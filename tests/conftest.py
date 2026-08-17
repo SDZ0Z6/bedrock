@@ -127,6 +127,41 @@ def fake_costs(monkeypatch):
 
 
 @pytest.fixture
+def fake_cloudwatch(monkeypatch):
+    """替换掉 CloudWatch 的发现与取数，不联网。"""
+    from bedrock_cost import cloudwatch_metrics as cwm
+
+    # 一个带正确标签的配置；直连模型没有标签
+    profiles = {
+        "2kbsta0lwebx": cwm.ProfileInfo(
+            name="map-global-claude-opus-4-8-use1",
+            model="anthropic.claude-opus-4-8",
+            tag_value="migALPHA",
+        ),
+    }
+
+    def fake_list(account, region):
+        return ["global.anthropic.claude-opus-5", "2kbsta0lwebx"]
+
+    def fake_fetch(account, region, win, metric_key):
+        stamps, _ = cwm.build_grid(win)
+        width = len(stamps)
+        return (
+            {
+                "global.anthropic.claude-opus-5": [12.0] * width,
+                "2kbsta0lwebx": [7.0] * width,
+            },
+            False,
+            None,
+        )
+
+    monkeypatch.setattr(cwm, "list_model_ids", fake_list)
+    monkeypatch.setattr(cwm, "resolve_profiles", lambda a, r: (profiles, True))
+    monkeypatch.setattr(cwm, "_fetch_region", fake_fetch)
+    cwm.clear_cache()
+
+
+@pytest.fixture
 def app(monkeypatch):
     monkeypatch.setattr(config, "AUTH_USERNAME", TEST_USER)
     monkeypatch.setattr(config, "AUTH_PASSWORD", TEST_PASSWORD)

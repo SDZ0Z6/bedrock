@@ -1,0 +1,407 @@
+{% extends "shell.html" %}
+{% block title %}模型用量 · Bedrock 成本监控{% endblock %}
+{% block page_title %}模型用量{% endblock %}
+
+{% block content %}
+
+<!-- ------------------------------------------------ 参数：一行筛选，改动即查询。
+     区域不在这里：四个美国区各画一张小图，见下方 2×2。 -->
+<form class="filters filters-auto" id="metric-filters" method="get" action="{{ url_for('main.model_usage') }}">
+  <div class="field">
+    <label for="account">账号</label>
+    <select id="account" name="account">
+      <option value="all" {% if selected_account == 'all' %}selected{% endif %}>全部账号</option>
+      {% for account in accounts %}
+        <option value="{{ account.key }}" {% if selected_account == account.key %}selected{% endif %}>
+          {{ account.partner }} / {{ account.account }}
+        </option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="metric">指标</label>
+    <select id="metric" name="metric">
+      {% for key, spec in metrics.items() %}
+        <option value="{{ key }}" {% if metric_key == key %}selected{% endif %}>{{ spec[0] }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="tags">标签</label>
+    <select id="tags" name="tags">
+      {% for key, label in tag_filters.items() %}
+        <option value="{{ key }}" {% if tag_filter == key %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="period">粒度</label>
+    <select id="period" name="period">
+      {% for key, spec in periods.items() %}
+        <option value="{{ key }}" {% if window.period_key == key %}selected{% endif %}>{{ spec[1] }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="start">开始（{{ tz_name }}）</label>
+    <input type="datetime-local" id="start" name="start" value="{{ local_start }}">
+  </div>
+  <div class="field">
+    <label for="end">结束（{{ tz_name }}）</label>
+    <input type="datetime-local" id="end" name="end" value="{{ local_end }}">
+  </div>
+
+  <noscript><button class="btn btn-primary" type="submit">查询</button></noscript>
+
+  <div class="presets">
+    {% for key, spec in windows.items() %}
+      <a class="chip {% if active_window == key %}chip-on{% endif %}"
+         href="{{ url_for('main.model_usage', account=selected_account, metric=metric_key,
+                          tags=tag_filter, period=window.period_key, win=key) }}">{{ spec[0] }}</a>
+    {% endfor %}
+  </div>
+</form>
+
+{% if fatal %}
+  <div class="alert alert-error"><strong>无法生成报表：</strong> {{ fatal }}</div>
+{% else %}
+
+  {% for message in report.errors %}
+    <div class="alert alert-error">查询失败 —— {{ message }}</div>
+  {% endfor %}
+
+  <!-- ------------------------------------------------ 汇总 -->
+  <section class="summary summary-4">
+    <div class="tile">
+      <span class="tile-label">
+        {{ report.metric_label }} 合计（四区{% if report.is_filtered %} · {{ report.tag_filter_label }}{% endif %}）
+      </span>
+      <span class="tile-value">{{ report.total | compact }} <span class="tile-unit">{{ report.unit }}</span></span>
+      <span class="tile-sub">
+        每 {{ window.period_label }} 均值 {{ (report.total / (report.timestamps | length or 1)) | compact }}
+        · {{ report.series | length }} 条序列
+      </span>
+    </div>
+    <div class="tile tile-split">
+      <span class="tile-label">有标签</span>
+      <span class="tile-value">{{ report.tagged_total | compact }} <span class="tile-unit">{{ report.unit }}</span></span>
+      <span class="tile-sub">
+        {{ report.tagged_share | pct }} · 走推理配置<span class="tile-hint">不受上方筛选影响</span>
+      </span>
+    </div>
+    <div class="tile tile-split">
+      <span class="tile-label">无标签</span>
+      <span class="tile-value">{{ report.untagged_total | compact }} <span class="tile-unit">{{ report.unit }}</span></span>
+      <span class="tile-sub">
+        {{ report.untagged_share | pct }} · 直连模型<span class="tile-hint">不受上方筛选影响</span>
+      </span>
+    </div>
+    <div class="tile">
+      <span class="tile-label">单个 {{ window.period_label }} 峰值</span>
+      {% set peak_index, peak_value = report.peak %}
+      <span class="tile-value">{{ peak_value | compact }} <span class="tile-unit">{{ report.unit }}</span></span>
+      <span class="tile-sub">
+        {%- if peak_index >= 0 %}出现在 {{ report.labels[peak_index] }}{% else %}区间内无数据{% endif -%}
+      </span>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------ 2×2 小倍数图 -->
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ report.metric_label }} · 美国四区</h2>
+      <span class="card-note">
+        {{ window.start.astimezone().strftime('%Y-%m-%d %H:%M') }} ~
+        {{ window.end.astimezone().strftime('%Y-%m-%d %H:%M') }}
+        （{{ tz_name }}） · {{ window.period_label }} 粒度 · 四张图共用纵轴刻度{% if report.is_filtered %} · <span class="tone-warn">{{ report.tag_filter_label }}</span>{% endif %}
+        {% if report.any_cached %}· <span class="tone-muted">部分数据来自缓存</span>{% endif %}
+      </span>
+    </div>
+
+    {% if report.series | length >= 2 %}
+      {# 一份共享图例：同一个模型在四张图里是同一个颜色 #}
+      <div class="legend">
+        {% for series in report.series %}
+          <span class="legend-item">
+            <i class="swatch" style="background: {{ series_color(series.slot) }}"></i>
+            <span class="legend-name">{{ series.name }}</span>
+            <span class="legend-value">{{ series.total | compact }}</span>
+          </span>
+        {% endfor %}
+        {% if report.folded_count %}
+          <span class="legend-note">另有 {{ report.folded_count }} 项已折叠进「其他」</span>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    <div class="panel-grid">
+      {% for panel in panels %}
+        <figure class="panel" data-region="{{ panel.region }}">
+          <figcaption class="panel-head">
+            <span class="panel-name">{{ panel.label }}</span>
+            <span class="panel-total">{{ panel.total | compact }} <em>{{ report.unit }}</em></span>
+          </figcaption>
+          <div class="panel-chart">{{ panel.svg | safe }}</div>
+        </figure>
+      {% endfor %}
+    </div>
+
+    {% if not report.series %}
+      <p class="chart-caption">
+        {%- if report.is_filtered and report.split_total > 0 -%}
+          这段时间四个区都没有「{{ report.tag_filter_label[1:] }}」的调用，但另一类有
+          {{ report.split_total | compact }} {{ report.unit }}——把上面的「标签」切回「全部」看看。
+        {%- else -%}
+          这段时间四个区都没有调用。这类流量常常是突发的，试试点上面的「近 7 天」或「近 30 天」。
+        {%- endif -%}
+      </p>
+    {% else %}
+      <p class="chart-caption">鼠标划过任意一张图，四张图的准线会一起移动，方便同一时刻横向对比；
+        也可以 Tab 进某张图用左右方向键逐点浏览。</p>
+    {% endif %}
+  </section>
+
+  <!-- ------------------------------------------------ 明细表（图的表格版） -->
+  <section class="card">
+    <div class="card-head">
+      <h2>{{ report.metric_label }} 明细</h2>
+      <span class="card-note">
+        {{ report.tag_filter_label }} · {{ report.series | length }} 项 · 单位 {{ report.unit }} ·
+        区域列为该区小计，日期列为四区合计
+      </span>
+    </div>
+
+    <div class="table-scroll">
+      <table class="wide-table">
+        <thead>
+          <tr>
+            <th class="sticky-col">模型</th>
+            <th class="num">四区合计</th>
+            <th class="num">占比</th>
+            {% for panel in report.panels %}
+              <th class="num region-col">{{ regions[panel.region] }}<br><code>{{ panel.region }}</code></th>
+            {% endfor %}
+            {% for label in report.labels %}
+              <th class="num date-col">{{ label }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for series in report.series %}
+            {% set row_index = loop.index0 %}
+            <tr>
+              <td class="sticky-col">
+                <i class="swatch" style="background: {{ series_color(series.slot) }}"></i>
+                {{ series.name }}
+              </td>
+              <td class="num strong">{{ series.total | compact }}</td>
+              <td class="num">
+                {%- if report.total > 0 %}{{ (series.total / report.total * 100) | pct }}{% else %}—{% endif -%}
+              </td>
+              {% for panel in report.panels %}
+                {% set cell = panel.series[row_index].total if panel.series | length > row_index else 0 %}
+                <td class="num {% if cell <= 0 %}zero{% endif %}">
+                  {%- if cell > 0 %}{{ cell | compact }}{% else %}—{% endif -%}
+                </td>
+              {% endfor %}
+              {% for value in series.values %}
+                <td class="num {% if value <= 0 %}zero{% endif %}">
+                  {%- if value > 0 %}{{ value | compact }}{% else %}—{% endif -%}
+                </td>
+              {% endfor %}
+            </tr>
+          {% else %}
+            <tr><td colspan="3" class="empty">所选区间和账号下没有调用数据。</td></tr>
+          {% endfor %}
+        </tbody>
+        {% if report.series %}
+          <tfoot>
+            <tr>
+              <td class="sticky-col">合计</td>
+              <td class="num strong">{{ report.total | compact }}</td>
+              <td class="num">{{ 100.0 | pct if report.total > 0 else '—' }}</td>
+              {% for panel in report.panels %}
+                <td class="num">{%- if panel.total > 0 %}{{ panel.total | compact }}{% else %}—{% endif -%}</td>
+              {% endfor %}
+              {% for value in report.column_totals %}
+                <td class="num">{%- if value > 0 %}{{ value | compact }}{% else %}—{% endif -%}</td>
+              {% endfor %}
+            </tr>
+          </tfoot>
+        {% endif %}
+      </table>
+    </div>
+  </section>
+{% endif %}
+
+<footer class="meta">
+  <span>数据源：CloudWatch <code>AWS/Bedrock</code>，维度 <code>[ModelId]</code>，统计口径 Sum</span>
+  <span>逐模型求和等于账号级总量，不重复计数；<code>ContextWindow</code> 是子集，未计入</span>
+  <span>时间显示为本机时区 {{ tz_name }}，查询按 UTC 发出</span>
+  <span>缓存 {{ cache_ttl_minutes }} 分钟 · 生成于 {{ generated_at }}</span>
+  <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
+</footer>
+
+<script>
+(function () {
+  const form = document.getElementById('metric-filters');
+  if (!form) return;
+  const content = document.querySelector('.content');
+  let pending = false;
+  function go() {
+    if (pending) return;
+    pending = true;
+    if (content) content.classList.add('is-loading');
+    form.submit();
+  }
+  for (const field of form.querySelectorAll('select, input')) {
+    field.addEventListener('change', go);
+  }
+  for (const chip of form.querySelectorAll('.chip')) {
+    chip.addEventListener('click', function () {
+      if (content) content.classList.add('is-loading');
+    });
+  }
+})();
+</script>
+
+{% if not fatal and report.series %}
+  <div id="chart-tip" class="chart-tip" hidden></div>
+  <script id="panel-data" type="application/json">{{ panels | map(attribute='tooltip') | list | tojson }}</script>
+  <script id="panel-names" type="application/json">{{ panels | map(attribute='label') | list | tojson }}</script>
+  <script>
+  (function () {
+    const holder = document.getElementById('panel-data');
+    const tip = document.getElementById('chart-tip');
+    if (!holder || !tip) return;
+
+    const perPanel = JSON.parse(holder.textContent);
+    const names = JSON.parse(document.getElementById('panel-names').textContent);
+    const unit = {{ report.unit | tojson }};
+
+    const num = v => Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 });
+    const esc = s => String(s).replace(/[&<>"]/g,
+      c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+    const panels = [...document.querySelectorAll('.panel')].map((figure, i) => {
+      const svg = figure.querySelector('.chart-svg');
+      return {
+        index: i, svg,
+        overlay: svg && svg.querySelector('.chart-overlay'),
+        crosshair: svg && svg.querySelector('.chart-crosshair'),
+        dots: svg ? [...svg.querySelectorAll('.chart-focus')] : [],
+        data: perPanel[i] || [],
+      };
+    }).filter(p => p.overlay && p.data.length);
+    if (!panels.length) return;
+
+    const pointCount = panels[0].data.length;
+    let current = -1;
+
+    function nearest(panel, clientX) {
+      const box = panel.svg.getBoundingClientRect();
+      const scale = panel.svg.viewBox.baseVal.width / (box.width || 1);
+      const targetX = (clientX - box.left) * scale;
+      let best = 0, bestGap = Infinity;
+      for (let i = 0; i < panel.data.length; i++) {
+        const gap = Math.abs(panel.data[i].x - targetX);
+        if (gap < bestGap) { bestGap = gap; best = i; }
+      }
+      return best;
+    }
+
+    // 四张图的准线联动：同一时刻横向对比才有意义
+    function moveAll(index) {
+      current = index;
+      for (const panel of panels) {
+        const item = panel.data[index];
+        if (!item) continue;
+        panel.crosshair.setAttribute('x1', item.x);
+        panel.crosshair.setAttribute('x2', item.x);
+        panel.crosshair.style.opacity = '1';
+        item.rows.forEach((row, i) => {
+          const dot = panel.dots[i];
+          if (!dot) return;
+          dot.setAttribute('cx', item.x);
+          dot.setAttribute('cy', row.y);
+          dot.setAttribute('fill', row.color);
+          dot.style.opacity = row.value > 0 ? '1' : '0';
+        });
+      }
+    }
+
+    function showTip(panel, index) {
+      const item = panel.data[index];
+      if (!item) return;
+      const rows = item.rows.filter(r => r.value > 0);
+      let out = '<div class="tip-head">' + esc(names[panel.index]) + ' · '
+              + esc(item.label) + '</div>'
+              + '<div class="tip-total">合计 ' + num(item.total) + ' ' + esc(unit) + '</div>';
+      if (rows.length) {
+        out += '<table class="tip-table">';
+        for (const row of rows) {
+          out += '<tr><td><i class="swatch" style="background:' + esc(row.color) + '"></i>'
+               + esc(row.name) + '</td><td class="tip-num">' + num(row.value) + '</td></tr>';
+        }
+        out += '</table>';
+      } else {
+        out += '<div class="tip-foot">该区此刻没有调用</div>';
+      }
+      tip.innerHTML = out;
+      tip.hidden = false;
+
+      const box = panel.svg.getBoundingClientRect();
+      const scale = box.width / panel.svg.viewBox.baseVal.width;
+      let left = box.left + item.x * scale - tip.offsetWidth / 2;
+      left = Math.max(8, Math.min(left, window.innerWidth - tip.offsetWidth - 8));
+      let top = box.top - tip.offsetHeight - 8;
+      if (top < 8) top = box.bottom + 8;
+      tip.style.left = left + 'px';
+      tip.style.top = top + 'px';
+    }
+
+    function hide() {
+      tip.hidden = true;
+      for (const panel of panels) {
+        panel.crosshair.style.opacity = '0';
+        panel.dots.forEach(d => { d.style.opacity = '0'; });
+      }
+      current = -1;
+    }
+
+    for (const panel of panels) {
+      panel.overlay.addEventListener('mousemove', e => {
+        const index = nearest(panel, e.clientX);
+        moveAll(index);
+        showTip(panel, index);
+      });
+      panel.overlay.addEventListener('mouseleave', hide);
+      panel.overlay.addEventListener('focus', () => {
+        const index = current < 0 ? pointCount - 1 : current;
+        moveAll(index);
+        showTip(panel, index);
+      });
+      panel.overlay.addEventListener('blur', hide);
+      panel.overlay.addEventListener('keydown', e => {
+        let index = current < 0 ? pointCount - 1 : current;
+        if (e.key === 'ArrowLeft') { index -= 1; }
+        else if (e.key === 'ArrowRight') { index += 1; }
+        else if (e.key === 'Home') { index = 0; }
+        else if (e.key === 'End') { index = pointCount - 1; }
+        else if (e.key === 'Escape') { hide(); return; }
+        else { return; }
+        e.preventDefault();
+        index = Math.max(0, Math.min(pointCount - 1, index));
+        moveAll(index);
+        showTip(panel, index);
+      });
+    }
+    window.addEventListener('scroll', hide, { passive: true });
+  })();
+  </script>
+{% endif %}
+{% endblock %}

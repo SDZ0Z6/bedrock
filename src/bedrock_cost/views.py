@@ -6,11 +6,12 @@ from datetime import date, datetime
 
 from flask import Blueprint, flash, redirect, render_template, request, url_for
 
-from . import chart, config, cost_explorer, usage_explorer
+from . import chart, cloudwatch_metrics, config, cost_explorer, usage_explorer
 from .auth import login_required
 from .dates import detect_preset, resolve_range
 from .excel_source import Account, ExcelSourceError, load_accounts
 from .report import build_report
+from .windows import PERIODS, WINDOWS, detect_window, resolve_window
 
 bp = Blueprint("main", __name__)
 
@@ -144,10 +145,88 @@ def cost_usage():
     )
 
 
+# --------------------------------------------------------------- 模型用量（CloudWatch）
+@bp.route("/model-usage")
+@login_required
+def model_usage():
+    window, notes = resolve_window(request.args)
+    refresh = request.args.get("refresh") == "1"
+
+    metric_key = (request.args.get("metric") or cloudwatch_metrics.DEFAULT_METRIC).strip()
+    if metric_key not in cloudwatch_metrics.METRICS:
+        metric_key = cloudwatch_metrics.DEFAULT_METRIC
+    tag_filter = (request.args.get("tags") or cloudwatch_metrics.DEFAULT_TAG_FILTER).strip()
+    if tag_filter not in cloudwatch_metrics.TAG_FILTERS:
+        tag_filter = cloudwatch_metrics.DEFAULT_TAG_FILTER
+
+    # 区域不再是筛选项：四个美国区各画一张小图（2×2），一次全查
+    picked_regions = list(cloudwatch_metrics.DEFAULT_REGIONS)
+
+    accounts: list[Account] = []
+    fatal = None
+    try:
+        accounts = load_accounts(force=refresh)
+    except ExcelSourceError as exc:
+        fatal = str(exc)
+    except Exception as exc:
+        fatal = f"{type(exc).__name__}: {exc}"
+
+    selected, chosen = _select_accounts(accounts, request.args.get("account", ""), notes)
+
+    report = cloudwatch_metrics.UsageMetricsReport(
+        window=window, metric_key=metric_key, tag_filter=tag_filter, regions=picked_regions
+    )
+    if not fatal:
+        try:
+            report = cloudwatch_metrics.build_metrics(
+                chosen, picked_regions, window, metric_key, tag_filter, refresh=refresh
+            )
+        except Exception as exc:
+            fatal = f"{type(exc).__name__}: {exc}"
+
+    if not fatal and not report.tags_resolved:
+        notes.append(
+            "读不到推理配置上的标签（缺 bedrock:ListTagsForResource 权限？），"
+            "所有流量都会被当成「无标签」，标签筛选此时不可信。"
+        )
+
+    panels = chart.render_small_multiples(report)
+
+    # Windows 上 tzname() 会给出「Malay Peninsula Standard Time」这种长名字，
+    # 放在标签里太占地方也不够明确，改用 UTC 偏移。
+    offset = datetime.now().astimezone().strftime("%z")
+    tz_name = f"UTC{offset[:3]}:{offset[3:]}" if len(offset) == 5 else "本机时区"
+
+    return render_template(
+        "model_usage.html",
+        active_page="model_usage",
+        report=report,
+        panels=panels,
+        fatal=fatal,
+        notes=notes,
+        window=window,
+        accounts=accounts,
+        selected_account=selected,
+        regions=cloudwatch_metrics.REGIONS,
+        metrics=cloudwatch_metrics.METRICS,
+        metric_key=metric_key,
+        tag_filters=cloudwatch_metrics.TAG_FILTERS,
+        tag_filter=tag_filter,
+        periods=PERIODS,
+        windows=WINDOWS,
+        active_window=detect_window(window),
+        local_start=window.start.astimezone().strftime("%Y-%m-%dT%H:%M"),
+        local_end=window.end.astimezone().strftime("%Y-%m-%dT%H:%M"),
+        tz_name=tz_name,
+        **page_meta(),
+    )
+
+
 @bp.route("/cache/clear")
 @login_required
 def clear_cache():
     cost_explorer.clear_cache()
     usage_explorer.clear_cache()
-    flash("已清空成本缓存，下一次查询会重新调用 Cost Explorer。", "ok")
+    cloudwatch_metrics.clear_cache()
+    flash("已清空缓存，下一次查询会重新调用 Cost Explorer 和 CloudWatch。", "ok")
     return redirect(request.referrer or url_for("main.index"))

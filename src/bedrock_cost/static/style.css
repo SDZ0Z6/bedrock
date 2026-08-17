@@ -212,6 +212,14 @@ code {
 .field select { min-width: 128px; max-width: 260px; }
 .field input:focus,
 .field select:focus { outline: none; border-color: var(--accent); }
+.field-wide { flex: 0 0 auto; }
+
+/* 区域多选：4 个选项用复选框最直观，比多选列表好点得多 */
+.checks { display: flex; align-items: center; gap: 4px 14px; flex-wrap: wrap; height: 34px; }
+.check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-dim); cursor: pointer; }
+.check:hover { color: var(--text); }
+.check input { width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; }
+.check code { font-size: 11px; }
 
 /* 参数改动即提交：压暗当前内容，不闪骨架屏、不跳布局 */
 .content.is-loading { opacity: .5; transition: opacity .12s ease; }
@@ -235,6 +243,17 @@ code {
   margin-bottom: 18px;
 }
 .summary-3 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.summary-4 { grid-template-columns: repeat(auto-fit, minmax(228px, 1fr)); }
+
+/* 有标签 / 无标签这两块始终展示全量拆分，不跟着上面的筛选走，
+   所以视觉上要和「合计」区分开，免得被当成筛选后的结果 */
+.tile-split { border-left: 2px solid var(--accent-dim); }
+.tile-hint {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-mute);
+  font-size: 11px;
+}
 .tile {
   display: flex;
   flex-direction: column;
@@ -247,6 +266,7 @@ code {
 .tile-label { font-size: 12px; color: var(--text-dim); }
 .tile-value { font-size: 24px; font-weight: 600; letter-spacing: .2px; font-variant-numeric: tabular-nums; }
 .tile-sub { font-size: 12px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
+.tile-unit { font-size: 13px; font-weight: 400; color: var(--text-dim); }
 
 /* ------------------------------------------------------- 表格 */
 .card {
@@ -334,7 +354,7 @@ tfoot td {
 .bar i.tone-none { background: var(--line); }
 
 .tone-ok { color: var(--ok); }
-.tone-warn { color: var(--warn); }
+.tone-warn, .card-note .tone-warn { color: var(--warn); }
 .tone-danger { color: var(--danger); }
 .tone-none, .tone-muted { color: var(--text-mute); }
 
@@ -347,6 +367,13 @@ tfoot td {
   padding: 4px 6px 8px;
 }
 .chart-svg { display: block; }
+
+/* ---- 折线图：十字准线 + 焦点圆点 + 覆盖层 ----
+   刻意不加 transition：准线要跟着鼠标走，淡入会拖成一片糊影 */
+.chart-crosshair,
+.chart-focus { opacity: 0; pointer-events: none; }
+.chart-overlay { fill: transparent; cursor: crosshair; outline: none; }
+.chart-overlay:focus-visible { fill: rgba(76, 141, 255, .07); }
 
 /* 命中区：一列一个，覆盖整个 band 和绘图高度，比单个色块好点得多 */
 .chart-hit {
@@ -431,10 +458,44 @@ tfoot td {
   font-variant-numeric: tabular-nums;
 }
 
+/* ------------------------------------------------------- 2×2 小倍数图 */
+.panel-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 14px;
+  padding: 10px 14px 4px;
+}
+.panel { margin: 0; min-width: 0; }
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 4px 2px;
+  border-bottom: 1px solid var(--line);
+}
+.panel-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.panel-total {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.panel-total em { font-style: normal; color: var(--text-mute); font-size: 11px; }
+/* 面板自适应宽度：SVG 用 viewBox 等比缩放，四张图的刻度仍然一致 */
+.panel-chart { overflow: hidden; }
+.panel-chart .panel-svg { width: 100%; height: auto; display: block; }
+
+@media (max-width: 1100px) {
+  .panel-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* ------------------------------------------------------- 宽表（日期列很多） */
 .wide-table th,
 .wide-table td { white-space: nowrap; }
 .wide-table .date-col { min-width: 96px; }
+.wide-table .region-col { min-width: 104px; line-height: 1.35; }
+.wide-table .region-col code { font-size: 10px; }
 .wide-table .zero { color: var(--text-mute); }
 
 /* 第一列钉住，横向滚日期时维度名不跑掉 */

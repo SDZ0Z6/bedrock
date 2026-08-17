@@ -72,6 +72,25 @@ def compact_money(value: float, symbol: str = "$") -> str:
     return f"{sign}{symbol}{text}"
 
 
+def compact_number(value: float) -> str:
+    """非金额的紧凑数字：46.2K 次 / 308.4M token。"""
+    sign = "-" if value < 0 else ""
+    v = abs(value)
+    if v >= 1_000_000_000:
+        text = f"{v / 1_000_000_000:.2f}B"
+    elif v >= 1_000_000:
+        text = f"{v / 1_000_000:.1f}M"
+    elif v >= 1_000:
+        text = f"{v / 1_000:.1f}K"
+    elif v == 0:
+        text = "0"
+    elif v < 10:
+        text = f"{v:.2f}".rstrip("0").rstrip(".")
+    else:
+        text = f"{v:,.0f}"
+    return f"{sign}{text}"
+
+
 def _nice_step(span: float, intervals: int = 4) -> float:
     """把轴刻度落到 1 / 2 / 2.5 / 5 / 10 这类整数上。"""
     if span <= 0:
@@ -299,6 +318,395 @@ def render_stacked_bars(report, symbol: str = "$") -> Chart:
                 "date": dates[index],
                 "label": report.labels[index],
                 "total": totals[index],
+                "rows": rows,
+            }
+        )
+
+    return Chart(svg="".join(parts), width=width, height=height, tooltip=tooltip)
+
+
+# =================================================================== 折线图
+# 时间序列 + 多个模型对比用折线而不是堆叠：折线能直接读出每条序列自己的绝对值
+# 和走势，堆叠图里上层序列得靠目测减下层。
+#
+# 规范要点：线宽 2px、圆角端点；网格发丝实线；序列 ≥2 条必有图例；≤4 条时额外
+# 在线尾直标末值（多了就只靠图例和悬浮，绝不给每个点都写数字）；一律单 Y 轴——
+# 调用次数和 token 量级完全不同，双轴的刻度对齐是任意的，会凭空造出相关性，
+# 所以指标做成单选。
+
+LINE_W = 2.0
+MARKER_R = 4.0          # 直径 8px，规范下限
+MARKER_MAX_POINTS = 30  # 点太多就不画标记，否则连成一片
+END_LABEL_MAX_SERIES = 4
+END_LABEL_MIN_GAP = 14.0
+PAD_R_LABELED = 64
+
+
+def _line_path(points: list[tuple[float, float]]) -> str:
+    head, *rest = points
+    return f"M{head[0]:.2f},{head[1]:.2f}" + "".join(
+        f" L{x:.2f},{y:.2f}" for x, y in rest
+    )
+
+
+# --------------------------------------------------------------- 小倍数图
+# 四个区域各一张小折线图，2×2 排列。两条硬规则：
+#   1. 四张图共用一个 Y 轴刻度。各自缩放的话，一个每小时几十次的小区会画得和
+#      每小时几万次的大区一样高，横向对比直接失去意义。
+#   2. 同一个模型在四张图里必须是同一个颜色（序列集合和颜色槽在数据层就统一好
+#      了），并且只用一份共享图例。
+PANEL_W = 468
+PANEL_PLOT_H = 148
+PANEL_PAD_L = 62
+PANEL_PAD_R = 14
+PANEL_PAD_T = 12
+PANEL_PAD_B = 32
+PANEL_MARKER_MAX_POINTS = 20
+
+
+@dataclass
+class Panel:
+    region: str
+    label: str
+    total: float
+    svg: str
+    tooltip: list[dict] = field(default_factory=list)
+    empty: bool = False
+
+
+def render_small_multiples(report) -> list[Panel]:
+    """把 UsageMetricsReport 的四个区域面板画成 2×2 小折线图。"""
+    labels = report.labels
+    count = len(labels)
+    shared_peak = report.shared_peak
+
+    step_value = _nice_step(shared_peak, 3) if shared_peak > 0 else 1.0
+    tick_count = max(1, math.ceil(shared_peak / step_value - 1e-9)) if shared_peak > 0 else 1
+    y_max = step_value * tick_count
+
+    plot_w = PANEL_W - PANEL_PAD_L - PANEL_PAD_R
+    plot_bottom = PANEL_PAD_T + PANEL_PLOT_H
+    height = PANEL_PAD_T + PANEL_PLOT_H + PANEL_PAD_B
+    step = plot_w / (count - 1) if count > 1 else 0.0
+    scale = PANEL_PLOT_H / y_max if y_max else 0.0
+
+    def x_at(index: int) -> float:
+        return PANEL_PAD_L + (step * index if count > 1 else plot_w / 2)
+
+    def y_at(value: float) -> float:
+        return plot_bottom - value * scale
+
+    panels: list[Panel] = []
+    for panel_data in report.panels:
+        parts: list[str] = [
+            f'<svg class="chart-svg panel-svg" viewBox="0 0 {PANEL_W} {height}" '
+            f'width="{PANEL_W}" height="{height}" role="img" '
+            f'aria-label="{html.escape(panel_data.label)} 的'
+            f'{html.escape(report.metric_label)}折线图，'
+            f'合计 {html.escape(compact_number(panel_data.total))} '
+            f'{html.escape(report.unit)}">'
+        ]
+
+        # 网格与刻度（四张图完全相同，因为共用刻度）
+        parts.append('<g class="chart-grid">')
+        for tick in range(tick_count + 1):
+            value = step_value * tick
+            y = y_at(value)
+            parts.append(
+                f'<line x1="{PANEL_PAD_L:.0f}" y1="{y:.2f}" '
+                f'x2="{PANEL_W - PANEL_PAD_R:.0f}" y2="{y:.2f}" '
+                f'stroke="{BASELINE if tick == 0 else GRID}" stroke-width="1"></line>'
+            )
+            parts.append(
+                f'<text x="{PANEL_PAD_L - 8:.0f}" y="{y + 4:.2f}" text-anchor="end" '
+                f'fill="{TICK_TEXT}" font-size="10" '
+                f'style="font-variant-numeric:tabular-nums">'
+                f"{html.escape(compact_number(value))}</text>"
+            )
+        parts.append("</g>")
+
+        if not count or panel_data.total <= 0:
+            parts.append(
+                f'<text x="{PANEL_PAD_L + plot_w / 2:.0f}" '
+                f'y="{PANEL_PAD_T + PANEL_PLOT_H / 2:.0f}" text-anchor="middle" '
+                f'fill="{TICK_TEXT}" font-size="12">该区无调用</text>'
+            )
+            parts.append("</svg>")
+            panels.append(
+                Panel(
+                    region=panel_data.region, label=panel_data.label,
+                    total=panel_data.total, svg="".join(parts), empty=True,
+                )
+            )
+            continue
+
+        parts.append('<g class="chart-lines">')
+        for series in panel_data.series:
+            if series.peak <= 0:
+                continue  # 这个区没跑过这个模型，不画一条贴地的直线
+            colour = color_for(series.slot)
+            points = [(x_at(i), y_at(series.values[i])) for i in range(count)]
+            if count == 1:
+                parts.append(
+                    f'<circle cx="{points[0][0]:.2f}" cy="{points[0][1]:.2f}" '
+                    f'r="{MARKER_R:.1f}" fill="{colour}"></circle>'
+                )
+                continue
+            parts.append(
+                f'<path d="{_line_path(points)}" fill="none" stroke="{colour}" '
+                f'stroke-width="{LINE_W}" stroke-linejoin="round" '
+                f'stroke-linecap="round"></path>'
+            )
+            if count <= PANEL_MARKER_MAX_POINTS:
+                for x, y in points:
+                    parts.append(
+                        f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{MARKER_R - 1:.1f}" '
+                        f'fill="{colour}" stroke="{SURFACE}" stroke-width="1.5"></circle>'
+                    )
+        parts.append("</g>")
+
+        # X 轴标签：面板窄，标签更稀疏；小图不做末值直标，交给共享图例和悬浮
+        label_width = 60.0 if report.window.period < 86400 else 44.0
+        stride = max(1, math.ceil(label_width / step)) if step else 1
+        shown = [i for i in range(count) if i % stride == 0]
+        parts.append('<g class="chart-xaxis">')
+        for index in shown:
+            x = x_at(index)
+            half = label_width / 2
+            if x - half < 2:
+                anchor, text_x = "start", 2.0
+            elif x + half > PANEL_W - 2:
+                anchor, text_x = "end", float(PANEL_W - 2)
+            else:
+                anchor, text_x = "middle", x
+            parts.append(
+                f'<text x="{text_x:.2f}" y="{plot_bottom + 18:.0f}" '
+                f'text-anchor="{anchor}" fill="{TICK_TEXT}" font-size="10">'
+                f"{html.escape(labels[index])}</text>"
+            )
+        parts.append("</g>")
+
+        parts.append('<g class="chart-cursor" aria-hidden="true">')
+        parts.append(
+            f'<line class="chart-crosshair" x1="0" y1="{PANEL_PAD_T}" x2="0" '
+            f'y2="{plot_bottom}" stroke="{TICK_TEXT}" stroke-width="1"></line>'
+        )
+        for series in panel_data.series:
+            parts.append(
+                f'<circle class="chart-focus" cx="0" cy="0" r="{MARKER_R:.1f}" '
+                f'fill="{color_for(series.slot)}" stroke="{SURFACE}" '
+                f'stroke-width="1.5"></circle>'
+            )
+        parts.append("</g>")
+        parts.append(
+            f'<rect class="chart-overlay" x="{PANEL_PAD_L}" y="{PANEL_PAD_T}" '
+            f'width="{plot_w:.2f}" height="{PANEL_PLOT_H}" tabindex="0" '
+            f'role="application" aria-label="{html.escape(panel_data.label)}：'
+            f"按左右方向键逐个时间点查看各模型的"
+            f'{html.escape(report.metric_label)}"></rect>'
+        )
+        parts.append("</svg>")
+
+        tooltip = []
+        for index in range(count):
+            rows = [
+                {
+                    "name": series.name,
+                    "color": color_for(series.slot),
+                    "value": series.values[index],
+                    "y": round(y_at(series.values[index]), 2),
+                }
+                for series in panel_data.series
+            ]
+            rows.sort(key=lambda row: -row["value"])
+            tooltip.append(
+                {
+                    "label": labels[index],
+                    "total": sum(row["value"] for row in rows),
+                    "x": round(x_at(index), 2),
+                    "rows": rows,
+                }
+            )
+
+        panels.append(
+            Panel(
+                region=panel_data.region, label=panel_data.label,
+                total=panel_data.total, svg="".join(parts), tooltip=tooltip,
+            )
+        )
+
+    return panels
+
+
+def render_lines(report, unit: str = "") -> Chart:
+    """把 UsageMetricsReport 画成折线图。"""
+    labels = report.labels
+    count = len(labels)
+    series_list = report.series
+    peak_all = max((s.peak for s in series_list), default=0.0)
+
+    if not count or not series_list or peak_all <= 0:
+        height = PAD_T + PLOT_H + PAD_B
+        svg = (
+            f'<svg class="chart-svg" viewBox="0 0 {IDEAL_W} {height}" '
+            f'width="{IDEAL_W}" height="{height}" role="img" '
+            f'aria-label="所选区间内没有调用数据">'
+            f'<text x="{IDEAL_W / 2:.0f}" y="{PAD_T + PLOT_H / 2:.0f}" '
+            f'text-anchor="middle" fill="{TICK_TEXT}" font-size="13">'
+            f"所选区间内没有调用数据</text></svg>"
+        )
+        return Chart(svg=svg, width=IDEAL_W, height=height, empty=True)
+
+    label_ends = len(series_list) <= END_LABEL_MAX_SERIES
+    pad_r = PAD_R_LABELED if label_ends else PAD_R
+    width = IDEAL_W
+    height = PAD_T + PLOT_H + PAD_B
+    plot_w = width - PAD_L - pad_r
+    plot_bottom = PAD_T + PLOT_H
+    step = plot_w / (count - 1) if count > 1 else 0.0
+
+    def x_at(index: int) -> float:
+        return PAD_L + (step * index if count > 1 else plot_w / 2)
+
+    step_value = _nice_step(peak_all, 4)
+    tick_count = max(1, math.ceil(peak_all / step_value - 1e-9))
+    y_max = step_value * tick_count
+    scale = PLOT_H / y_max if y_max else 0.0
+
+    def y_at(value: float) -> float:
+        return plot_bottom - value * scale
+
+    parts: list[str] = [
+        f'<svg class="chart-svg" viewBox="0 0 {width} {height}" '
+        f'width="{width}" height="{height}" role="img" '
+        f'aria-label="{html.escape(report.metric_label)}随时间变化的折线图，'
+        f"{count} 个时间点，{len(series_list)} 条序列，"
+        f'纵轴单位 {html.escape(unit or report.unit)}">'
+    ]
+
+    parts.append('<g class="chart-grid">')
+    for tick in range(tick_count + 1):
+        value = step_value * tick
+        y = y_at(value)
+        parts.append(
+            f'<line x1="{PAD_L:.0f}" y1="{y:.2f}" x2="{width - pad_r:.0f}" y2="{y:.2f}" '
+            f'stroke="{BASELINE if tick == 0 else GRID}" stroke-width="1"></line>'
+        )
+        parts.append(
+            f'<text x="{PAD_L - 10:.0f}" y="{y + 4:.2f}" text-anchor="end" '
+            f'fill="{TICK_TEXT}" font-size="11" '
+            f'style="font-variant-numeric:tabular-nums">'
+            f"{html.escape(compact_number(value))}</text>"
+        )
+    parts.append("</g>")
+
+    parts.append('<g class="chart-lines">')
+    for series in series_list:
+        colour = color_for(series.slot)
+        points = [(x_at(i), y_at(series.values[i])) for i in range(count)]
+        if count == 1:
+            parts.append(
+                f'<circle cx="{points[0][0]:.2f}" cy="{points[0][1]:.2f}" '
+                f'r="{MARKER_R:.1f}" fill="{colour}"></circle>'
+            )
+            continue
+        parts.append(
+            f'<path d="{_line_path(points)}" fill="none" stroke="{colour}" '
+            f'stroke-width="{LINE_W}" stroke-linejoin="round" '
+            f'stroke-linecap="round"></path>'
+        )
+        if count <= MARKER_MAX_POINTS:
+            for x, y in points:
+                parts.append(
+                    f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{MARKER_R:.1f}" '
+                    f'fill="{colour}" stroke="{SURFACE}" stroke-width="2"></circle>'
+                )
+    parts.append("</g>")
+
+    # 线尾直标末值。相互压字时宁可不标，交给图例和悬浮——把标签硬挤开会让它
+    # 和自己那条线脱钩，比不标更难读。
+    if label_ends:
+        candidates = sorted(
+            ((y_at(s.values[-1]), s) for s in series_list), key=lambda item: item[0]
+        )
+        placed: list[float] = []
+        parts.append('<g class="chart-endlabels">')
+        for y, series in candidates:
+            if placed and abs(y - placed[-1]) < END_LABEL_MIN_GAP:
+                continue
+            placed.append(y)
+            parts.append(
+                f'<text x="{x_at(count - 1) + 8:.2f}" y="{y + 4:.2f}" '
+                f'text-anchor="start" fill="{LABEL_TEXT}" font-size="11" '
+                f'font-weight="600" style="font-variant-numeric:tabular-nums">'
+                f"{html.escape(compact_number(series.values[-1]))}</text>"
+            )
+        parts.append("</g>")
+
+    # "08-10 21:00" 实测约 57px 宽，留点余量
+    label_width = 68.0 if report.window.period < 86400 else 46.0
+    stride = max(1, math.ceil(label_width / step)) if step else 1
+    shown = [i for i in range(count) if i % stride == 0]
+    if shown and shown[-1] != count - 1 and (count - 1 - shown[-1]) * step >= label_width:
+        shown.append(count - 1)
+    parts.append('<g class="chart-xaxis">')
+    for index in shown:
+        x = x_at(index)
+        # 贴边时改锚点而不是挪位置：挪了标签就和它对应的刻度脱钩，
+        # 还会挤到邻居身上（挪 18px 正好让首尾两个标签压字）
+        half = label_width / 2
+        if x - half < 2:
+            anchor, text_x = "start", 2.0
+        elif x + half > width - 2:
+            anchor, text_x = "end", float(width - 2)
+        else:
+            anchor, text_x = "middle", x
+        parts.append(
+            f'<text x="{text_x:.2f}" y="{plot_bottom + 20:.0f}" text-anchor="{anchor}" '
+            f'fill="{TICK_TEXT}" font-size="11">{html.escape(labels[index])}</text>'
+        )
+    parts.append("</g>")
+
+    # 十字准线 + 每条序列的焦点圆点，位置由 JS 按最近点移动。
+    # 用一个覆盖绘图区的透明层，而不是逐列命中区：点可以多到 1500 个，逐列命中
+    # 区会窄到点不中；覆盖层配合「取最近点」在任何密度下都好用，也能用左右
+    # 方向键逐点浏览。
+    parts.append('<g class="chart-cursor" aria-hidden="true">')
+    parts.append(
+        f'<line class="chart-crosshair" x1="0" y1="{PAD_T}" x2="0" y2="{plot_bottom}" '
+        f'stroke="{TICK_TEXT}" stroke-width="1"></line>'
+    )
+    for series in series_list:
+        parts.append(
+            f'<circle class="chart-focus" cx="0" cy="0" r="{MARKER_R + 0.5:.1f}" '
+            f'fill="{color_for(series.slot)}" stroke="{SURFACE}" stroke-width="2"></circle>'
+        )
+    parts.append("</g>")
+    parts.append(
+        f'<rect class="chart-overlay" x="{PAD_L}" y="{PAD_T}" '
+        f'width="{plot_w:.2f}" height="{PLOT_H}" tabindex="0" role="application" '
+        f'aria-label="按左右方向键逐个时间点查看各模型的'
+        f'{html.escape(report.metric_label)}"></rect>'
+    )
+    parts.append("</svg>")
+
+    tooltip = []
+    for index in range(count):
+        rows = [
+            {
+                "name": series.name,
+                "color": color_for(series.slot),
+                "value": series.values[index],
+                "y": round(y_at(series.values[index]), 2),
+            }
+            for series in series_list
+        ]
+        rows.sort(key=lambda row: -row["value"])
+        tooltip.append(
+            {
+                "label": labels[index],
+                "total": sum(row["value"] for row in rows),
+                "x": round(x_at(index), 2),
                 "rows": rows,
             }
         )

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from bedrock_cost import chart
+from bedrock_cost.cloudwatch_metrics import MetricSeries, UsageMetricsReport, build_grid
 from bedrock_cost.usage_explorer import Series, UsageReport, build_buckets
+from bedrock_cost.windows import MetricWindow
 
 START, END = date(2026, 8, 1), date(2026, 8, 17)
 
@@ -173,3 +175,250 @@ class TestRender:
         rendered = chart.render_stacked_bars(report)
         assert "<script>" not in rendered.svg
         assert "&lt;script&gt;" in rendered.svg
+
+
+# ------------------------------------------------------------------ 折线图
+NOW = datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)
+
+
+def make_lines(series_values: list[list[float]], hours: int = 12, period: str = "1h"):
+    window = MetricWindow(start=NOW - timedelta(hours=hours), end=NOW, period_key=period)
+    stamps, labels = build_grid(window)
+    report = UsageMetricsReport(
+        window=window, metric_key="invocations",
+        regions=["us-east-1"], timestamps=stamps, labels=labels,
+    )
+    for index, values in enumerate(series_values):
+        padded = (list(values) + [0.0] * len(stamps))[: len(stamps)]
+        report.series.append(MetricSeries(name=f"model-{index}", values=padded, slot=index))
+    return report
+
+
+class TestRenderLines:
+    def test_empty_placeholder(self):
+        rendered = chart.render_lines(make_lines([]))
+        assert rendered.empty is True
+        assert "没有调用数据" in rendered.svg
+
+    def test_all_zero_is_empty(self):
+        rendered = chart.render_lines(make_lines([[0.0] * 12]))
+        assert rendered.empty is True
+
+    def test_one_path_per_series(self):
+        rendered = chart.render_lines(make_lines([[5.0] * 12, [3.0] * 12, [1.0] * 12]))
+        assert rendered.svg.count('<path d="M') == 3
+
+    def test_lines_are_2px_round_and_unfilled(self):
+        rendered = chart.render_lines(make_lines([[5.0] * 12]))
+        assert 'stroke-width="2.0"' in rendered.svg
+        assert 'stroke-linejoin="round"' in rendered.svg
+        assert 'stroke-linecap="round"' in rendered.svg
+        assert 'fill="none"' in rendered.svg
+
+    def test_never_stacks_the_values(self):
+        """折线是叠放不是堆叠：Y 轴上限取单条最大值，不是各条之和。"""
+        rendered = chart.render_lines(make_lines([[100.0] * 12, [100.0] * 12]))
+        # 两条都是 100，若被堆叠，刻度会到 200
+        assert "200" not in rendered.svg or "100" in rendered.svg
+
+    def test_markers_only_when_sparse(self):
+        sparse = chart.render_lines(make_lines([[5.0] * 12], hours=12))
+        dense = chart.render_lines(make_lines([[5.0] * 200], hours=200))
+        assert sparse.svg.count("<circle") > dense.svg.count("<circle")
+
+    def test_end_labels_only_for_four_or_fewer_series(self):
+        few = chart.render_lines(make_lines([[5.0] * 12, [9.0] * 12]))
+        many = chart.render_lines(make_lines([[float(i + 1)] * 12 for i in range(6)]))
+        assert 'class="chart-endlabels"' in few.svg
+        assert 'class="chart-endlabels"' not in many.svg
+
+    @staticmethod
+    def _endlabel_block(svg: str) -> str:
+        start = svg.index('<g class="chart-endlabels">')
+        return svg[start : svg.index("</g>", start)]
+
+    def test_colliding_end_labels_are_dropped_not_stacked(self):
+        """三条线末值一样时，硬挤开会让标签和线脱钩，宁可只留一个。"""
+        rendered = chart.render_lines(make_lines([[10.0] * 12, [10.0] * 12, [10.0] * 12]))
+        assert self._endlabel_block(rendered.svg).count("<text") == 1
+
+    def test_separated_end_labels_are_all_kept(self):
+        rendered = chart.render_lines(make_lines([[10.0] * 12, [500.0] * 12, [1000.0] * 12]))
+        assert self._endlabel_block(rendered.svg).count("<text") == 3
+
+    def test_single_y_axis_only(self):
+        """绝不做双 Y 轴：两个刻度的对齐是任意的，会凭空造出相关性。"""
+        rendered = chart.render_lines(make_lines([[5.0] * 12, [500000.0] * 12]))
+        assert rendered.svg.count('text-anchor="end"') >= 1
+        # 右侧不应出现第二组刻度文字
+        assert rendered.svg.count('class="chart-grid"') == 1
+
+    def test_gridlines_solid(self):
+        assert "dasharray" not in chart.render_lines(make_lines([[5.0] * 12])).svg
+
+    def test_crosshair_focus_dots_and_overlay(self):
+        report = make_lines([[5.0] * 12, [3.0] * 12])
+        rendered = chart.render_lines(report)
+        assert rendered.svg.count('class="chart-crosshair"') == 1
+        assert rendered.svg.count('class="chart-focus"') == len(report.series)
+        assert 'class="chart-overlay"' in rendered.svg
+        assert 'tabindex="0"' in rendered.svg  # 键盘可达
+
+    def test_height_includes_x_axis_band(self):
+        rendered = chart.render_lines(make_lines([[5.0] * 12]))
+        assert rendered.height == chart.PAD_T + chart.PLOT_H + chart.PAD_B
+
+    def test_no_horizontal_scroll_needed(self):
+        """折线不像柱子，密了也不用加宽画布。"""
+        rendered = chart.render_lines(make_lines([[5.0] * 500], hours=500))
+        assert rendered.width == chart.IDEAL_W
+
+    def test_x_labels_stay_inside_and_do_not_shift(self):
+        rendered = chart.render_lines(make_lines([[5.0] * 168], hours=168))
+        # 贴边的标签改锚点而不是挪 x，挪位会挤到邻居
+        assert 'text-anchor="end"' in rendered.svg or 'text-anchor="start"' in rendered.svg
+
+    def test_tooltip_payload_has_position_and_value(self):
+        report = make_lines([[5.0] * 12, [3.0] * 12])
+        rendered = chart.render_lines(report)
+        assert len(rendered.tooltip) == len(report.timestamps)
+        rows = rendered.tooltip[0]["rows"]
+        assert all({"name", "color", "value", "y"} <= set(r) for r in rows)
+        assert "x" in rendered.tooltip[0]
+
+    def test_tooltip_rows_sorted_descending(self):
+        rendered = chart.render_lines(make_lines([[1.0] * 12, [50.0] * 12]))
+        values = [r["value"] for r in rendered.tooltip[0]["rows"]]
+        assert values == sorted(values, reverse=True)
+
+    def test_single_point_renders_a_dot(self):
+        rendered = chart.render_lines(make_lines([[5.0]], hours=1, period="1h"))
+        assert "<circle" in rendered.svg
+
+    def test_escapes_labels(self):
+        report = make_lines([[5.0] * 12])
+        report.labels[0] = "<script>"
+        rendered = chart.render_lines(report)
+        assert "<script>" not in rendered.svg
+
+
+# ------------------------------------------------------------ 2×2 小倍数图
+from bedrock_cost.cloudwatch_metrics import REGIONS, RegionPanel  # noqa: E402
+
+
+def make_panels(per_region: dict[str, list[list[float]]], hours: int = 12):
+    """per_region: {区域: [每条序列的值]}，序列名/槽位在所有区域间保持一致。"""
+    report = make_lines([], hours=hours)
+    width = len(report.timestamps)
+    names = [f"model-{i}" for i in range(max((len(v) for v in per_region.values()), default=0))]
+    merged = {name: [0.0] * width for name in names}
+    for region, series_values in per_region.items():
+        panel = RegionPanel(region=region)
+        for index, name in enumerate(names):
+            values = list(series_values[index]) if index < len(series_values) else [0.0] * width
+            values = (values + [0.0] * width)[:width]
+            panel.series.append(MetricSeries(name=name, values=values, slot=index))
+            for position, value in enumerate(values):
+                merged[name][position] += value
+        report.panels.append(panel)
+    for index, name in enumerate(names):
+        report.series.append(MetricSeries(name=name, values=merged[name], slot=index))
+    return report
+
+
+class TestSmallMultiples:
+    def test_one_panel_per_region(self):
+        report = make_panels({r: [[5.0] * 12] for r in REGIONS})
+        panels = chart.render_small_multiples(report)
+        assert [p.region for p in panels] == list(REGIONS)
+
+    def test_all_panels_share_one_y_scale(self):
+        """一个区大一个区小时，四张图的刻度文字必须完全相同。"""
+        report = make_panels(
+            {
+                "us-east-1": [[1000.0] * 12],
+                "us-east-2": [[10.0] * 12],
+                "us-west-1": [[5.0] * 12],
+                "us-west-2": [[1.0] * 12],
+            }
+        )
+        panels = chart.render_small_multiples(report)
+        ticks = [re.findall(r'font-size="10"[^>]*>([^<]+)</text>', p.svg)[:4] for p in panels]
+        assert len({tuple(t) for t in ticks}) == 1
+
+    def test_small_region_is_visibly_smaller(self):
+        """共用刻度的意义：小区的线要真的更矮，而不是各自撑满。"""
+        report = make_panels(
+            {"us-east-1": [[1000.0] * 12], "us-east-2": [[10.0] * 12],
+             "us-west-1": [[10.0] * 12], "us-west-2": [[10.0] * 12]}
+        )
+        panels = chart.render_small_multiples(report)
+        def first_y(svg):
+            return float(re.search(r'<path d="M[\d.]+,([\d.]+)', svg).group(1))
+        # y 越小越靠上，大区的线必须明显更高
+        assert first_y(panels[0].svg) < first_y(panels[1].svg) - 40
+
+    def test_panel_carries_its_own_total_and_label(self):
+        report = make_panels({r: [[5.0] * 12] for r in REGIONS})
+        panels = chart.render_small_multiples(report)
+        assert all(p.total > 0 for p in panels)
+        assert all(p.region in p.label for p in panels)
+
+    def test_region_without_traffic_says_so(self):
+        report = make_panels(
+            {"us-east-1": [[5.0] * 12], "us-east-2": [[0.0] * 12],
+             "us-west-1": [[0.0] * 12], "us-west-2": [[0.0] * 12]}
+        )
+        panels = chart.render_small_multiples(report)
+        assert panels[0].empty is False
+        assert panels[1].empty is True
+        assert "该区无调用" in panels[1].svg
+
+    def test_flat_zero_series_is_not_drawn(self):
+        """某个区没跑过某个模型时不画一条贴地的直线，否则底部一片糊。"""
+        report = make_panels(
+            {"us-east-1": [[5.0] * 12, [3.0] * 12], "us-east-2": [[5.0] * 12, [0.0] * 12],
+             "us-west-1": [[5.0] * 12, [0.0] * 12], "us-west-2": [[5.0] * 12, [0.0] * 12]}
+        )
+        panels = chart.render_small_multiples(report)
+        assert panels[0].svg.count('<path d="M') == 2
+        assert panels[1].svg.count('<path d="M') == 1
+
+    def test_each_panel_has_its_own_cursor_and_overlay(self):
+        report = make_panels({r: [[5.0] * 12] for r in REGIONS})
+        panels = chart.render_small_multiples(report)
+        for panel in panels:
+            assert panel.svg.count('class="chart-crosshair"') == 1
+            assert panel.svg.count('class="chart-overlay"') == 1
+            assert 'tabindex="0"' in panel.svg
+
+    def test_no_end_labels_on_small_panels(self):
+        report = make_panels({r: [[5.0] * 12] for r in REGIONS})
+        panels = chart.render_small_multiples(report)
+        assert all("chart-endlabels" not in p.svg for p in panels)
+
+    def test_tooltip_payload_per_panel(self):
+        report = make_panels({r: [[5.0] * 12] for r in REGIONS})
+        panels = chart.render_small_multiples(report)
+        for panel in panels:
+            assert len(panel.tooltip) == len(report.timestamps)
+            assert all({"label", "total", "x", "rows"} <= set(b) for b in panel.tooltip)
+
+    def test_x_positions_identical_across_panels(self):
+        """准线联动的前提：同一个时间点在四张图里 x 坐标相同。"""
+        report = make_panels({r: [[5.0] * 12] for r in REGIONS})
+        panels = chart.render_small_multiples(report)
+        xs = {tuple(b["x"] for b in p.tooltip) for p in panels}
+        assert len(xs) == 1
+
+    def test_gridlines_solid(self):
+        report = make_panels({r: [[5.0] * 12] for r in REGIONS})
+        assert all("dasharray" not in p.svg for p in chart.render_small_multiples(report))
+
+    def test_svg_scales_by_viewbox(self):
+        report = make_panels({r: [[5.0] * 12] for r in REGIONS})
+        panels = chart.render_small_multiples(report)
+        assert all('viewBox="0 0' in p.svg and "panel-svg" in p.svg for p in panels)
+
+    def test_no_panels_gives_no_output(self):
+        assert chart.render_small_multiples(make_lines([])) == []

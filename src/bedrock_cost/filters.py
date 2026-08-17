@@ -25,8 +25,15 @@ def ratio(value: float) -> str:
     return text or "0"
 
 
+def compact(value: float | None) -> str:
+    """非金额的紧凑数字：46.2K / 308.4M。用于调用次数和 token 量。"""
+    if value is None:
+        return "—"
+    return chart.compact_number(value)
+
+
 def register_filters(app: Flask) -> None:
-    app.jinja_env.filters.update(money=money, pct=pct, ratio=ratio)
+    app.jinja_env.filters.update(money=money, pct=pct, ratio=ratio, compact=compact)
     # 图表色板的唯一来源是 chart.py，模板里的图例和表格色块取同一套值，
     # 不在 CSS 里重复维护一遍
     app.jinja_env.globals["series_color"] = chart.color_for
