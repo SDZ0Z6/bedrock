@@ -5,7 +5,15 @@
 cred.xlsx
 ~$*.xlsx
 
+# Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# 构建与测试产物
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage

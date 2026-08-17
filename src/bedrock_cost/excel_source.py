@@ -12,7 +12,7 @@ from pathlib import Path
 
 import openpyxl
 
-import config
+from . import config
 
 # Excel 表头 -> 内部字段名。表头大小写、前后空格、列顺序都不敏感。
 REQUIRED_COLUMNS = {
@@ -194,6 +194,13 @@ def _read_workbook(path: Path) -> list[Account]:
         return accounts
     finally:
         workbook.close()
+
+
+def clear_cache() -> None:
+    """丢掉台账缓存，下次 load_accounts 会重新读文件。"""
+    with _cache_lock:
+        _cache["stamp"] = None
+        _cache["accounts"] = []
 
 
 def load_accounts(force: bool = False) -> list[Account]:

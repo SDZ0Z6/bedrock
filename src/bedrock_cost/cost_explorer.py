@@ -28,8 +28,8 @@ import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 
-import config
-from excel_source import Account
+from . import config
+from .excel_source import Account
 
 _AK_PATTERN = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{8,}\b")
 
@@ -66,7 +66,7 @@ def _redact(message: str, account: Account) -> str:
     return cleaned.strip()
 
 
-def _friendly_error(exc: Exception, account: Account) -> str:
+def friendly_error(exc: Exception, account: Account) -> str:
     if isinstance(exc, ClientError):
         code = exc.response.get("Error", {}).get("Code", "")
         detail = exc.response.get("Error", {}).get("Message", str(exc))
@@ -90,7 +90,7 @@ def _friendly_error(exc: Exception, account: Account) -> str:
     return _redact(f"{type(exc).__name__}: {exc}", account)
 
 
-def _build_filter() -> dict | None:
+def build_filter() -> dict | None:
     """只在配置了 SERVICE_FILTER 时才加服务过滤，默认统计账号全部服务。"""
     if not config.SERVICE_FILTER:
         return None
@@ -103,7 +103,7 @@ def _build_filter() -> dict | None:
     }
 
 
-def _split_group_key(raw_key: str) -> str:
+def split_group_key(raw_key: str) -> str:
     """CE 返回的分组键形如 'map-migrated$migXYT8EVQSVP'，取 $ 之后的标签值。"""
     _, separator, value = raw_key.partition("$")
     return value.strip() if separator else ""
@@ -135,7 +135,7 @@ def _query(account: Account, start: date, end: date) -> CostSplit:
         "Metrics": [config.COST_METRIC],
         "GroupBy": [{"Type": "TAG", "Key": tag_key}],
     }
-    cost_filter = _build_filter()
+    cost_filter = build_filter()
     if cost_filter:
         request["Filter"] = cost_filter
 
@@ -152,7 +152,7 @@ def _query(account: Account, start: date, end: date) -> CostSplit:
                 metric = group.get("Metrics", {}).get(config.COST_METRIC, {})
                 amount = float(metric.get("Amount") or 0.0)
                 split.currency = metric.get("Unit") or split.currency
-                tag_value = _split_group_key((group.get("Keys") or [""])[0])
+                tag_value = split_group_key((group.get("Keys") or [""])[0])
                 if tag_value:
                     seen[tag_value] = seen.get(tag_value, 0.0) + amount
 
@@ -238,7 +238,7 @@ def fetch_split(account: Account, start: date, end: date, refresh: bool = False)
     try:
         split = _query(account, start, end)
     except Exception as exc:  # 单个账号失败不能影响整页
-        return CostSplit(error=_friendly_error(exc, account), fetched_at=now)
+        return CostSplit(error=friendly_error(exc, account), fetched_at=now)
 
     if config.CACHE_TTL > 0:
         with _cache_lock:

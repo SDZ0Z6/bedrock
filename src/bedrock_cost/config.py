@@ -10,7 +10,23 @@ import os
 import secrets
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+
+def _find_project_root() -> Path:
+    """定位放 .env / cred.xlsx 的项目根目录。
+
+    代码在 src/bedrock_cost/ 里，数据和配置在项目根，所以不能用 __file__ 的
+    父目录。以 pyproject.toml 作为标记向上找：先从当前工作目录找（正常启动、
+    以及 editable 安装后从别处运行都能命中），再从包所在位置找；都找不到就
+    退回当前工作目录。
+    """
+    for base in (Path.cwd(), Path(__file__).resolve().parent):
+        for candidate in (base, *base.parents):
+            if (candidate / "pyproject.toml").is_file():
+                return candidate
+    return Path.cwd()
+
+
+BASE_DIR = _find_project_root()
 
 
 def _load_env_file(path: Path) -> None:

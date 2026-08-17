@@ -1,0 +1,109 @@
+{# 登录后所有页面的外壳：左侧导航 + 右侧内容区 #}
+{% extends "base.html" %}
+{% block body_class %}app{% endblock %}
+
+{% macro nav_item(endpoint, key, label, icon) -%}
+  {# 收起时只剩图标，title 让悬浮还能看到名字 #}
+  <a class="nav-item {% if active_page == key %}nav-on{% endif %}"
+     href="{{ url_for(endpoint) }}" title="{{ label }}">
+    <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true">{{ icon | safe }}</svg>
+    <span class="nav-label">{{ label }}</span>
+  </a>
+{%- endmacro %}
+
+{% block body %}
+<div class="shell">
+  <aside class="sidebar">
+    <div class="side-head">
+      <div class="side-brand">
+        <span class="mark">📊</span>
+        <span class="side-brand-text">Bedrock<br>成本监控</span>
+      </div>
+      <button class="side-toggle" type="button" aria-expanded="true" aria-label="收起侧边栏">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor"
+                stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+
+    <nav class="side-nav">
+      {{ nav_item('main.index', 'overview', '概览',
+         '<rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1"/>
+          <rect x="9" y="1.5" width="5.5" height="5.5" rx="1"/>
+          <rect x="1.5" y="9" width="5.5" height="5.5" rx="1"/>
+          <rect x="9" y="9" width="5.5" height="5.5" rx="1"/>') }}
+      {{ nav_item('main.cost_usage', 'cost_usage', '成本和使用情况',
+         '<rect x="1.5" y="8" width="3" height="6.5" rx="1"/>
+          <rect x="6.5" y="4.5" width="3" height="10" rx="1"/>
+          <rect x="11.5" y="1.5" width="3" height="13" rx="1"/>') }}
+    </nav>
+
+    <div class="side-foot">
+      <span class="who" title="{{ session.get('user') }}">{{ session.get('user') }}</span>
+      {# 复用 nav-item：收起时和上面两个入口一样只剩图标 #}
+      <a class="nav-item side-exit" href="{{ url_for('auth.logout') }}" title="退出登录">
+        <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M6.5 2.5h-3A1.5 1.5 0 0 0 2 4v8a1.5 1.5 0 0 0 1.5 1.5h3"
+                fill="none" stroke="currentColor" stroke-width="1.6"
+                stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M10.5 5 13.5 8l-3 3M13.5 8H6"
+                fill="none" stroke="currentColor" stroke-width="1.6"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="nav-label">退出</span>
+      </a>
+    </div>
+  </aside>
+
+  <main class="content">
+    <header class="page-head">
+      <h1>{% block page_title %}{% endblock %}</h1>
+      <div class="page-actions">{% block page_actions %}{% endblock %}</div>
+    </header>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="alert alert-{{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+
+    {% for note in notes %}
+      <div class="alert alert-warn">{{ note }}</div>
+    {% endfor %}
+
+    {% block content %}{% endblock %}
+  </main>
+</div>
+
+<script>
+(function () {
+  const root = document.documentElement;
+  const button = document.querySelector('.side-toggle');
+  if (!button) return;
+
+  function sync() {
+    const collapsed = root.getAttribute('data-sidebar') === 'collapsed';
+    const label = collapsed ? '展开侧边栏' : '收起侧边栏';
+    button.setAttribute('aria-expanded', String(!collapsed));
+    button.setAttribute('aria-label', label);
+    button.title = label;
+  }
+
+  button.addEventListener('click', function () {
+    const collapsed = root.getAttribute('data-sidebar') === 'collapsed';
+    if (collapsed) {
+      root.removeAttribute('data-sidebar');
+    } else {
+      root.setAttribute('data-sidebar', 'collapsed');
+    }
+    try {
+      localStorage.setItem('sidebar', collapsed ? 'expanded' : 'collapsed');
+    } catch (e) { /* 存不了就只在本页生效 */ }
+    sync();
+  });
+
+  sync();
+})();
+</script>
+{% endblock %}

@@ -18,9 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 
-import config
-import cost_explorer
-from excel_source import Account, load_accounts
+from . import config, cost_explorer
+from .excel_source import Account, load_accounts
 
 
 @dataclass
