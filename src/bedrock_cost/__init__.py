@@ -25,6 +25,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from flask import Flask
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from . import config
 from .auth import bp as auth_bp
@@ -54,9 +55,16 @@ def create_app(**overrides: object) -> Flask:
         SECRET_KEY=config.SECRET_KEY,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=config.SESSION_COOKIE_SECURE,
         PERMANENT_SESSION_LIFETIME=timedelta(hours=config.SESSION_HOURS),
     )
     app.config.update(overrides)
+
+    if config.TRUST_PROXY:
+        # 取最靠右的那一个值：Nginx 追加的那个才是它真正看到的对端地址，
+        # 左边的可以由客户端随便伪造。不做这一步的话，攻击者只要每次换一个
+        # 假的 X-Forwarded-For 就能绕开按 IP 的登录锁定。
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
     register_filters(app)
     app.register_blueprint(auth_bp)

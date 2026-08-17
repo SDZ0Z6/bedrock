@@ -114,6 +114,15 @@ SESSION_HOURS = _number("SESSION_HOURS", 12)
 MAX_LOGIN_ATTEMPTS = _number("MAX_LOGIN_ATTEMPTS", 8)
 LOCKOUT_SECONDS = _number("LOCKOUT_SECONDS", 300)
 
+# 只在 HTTPS 下发送会话 cookie。上了公网必须打开；本地 http 开着会登不进去。
+SESSION_COOKIE_SECURE = _flag("SESSION_COOKIE_SECURE", False)
+
+# 部署在 Nginx 之类的反向代理后面时打开。打开后 Flask 会按
+# X-Forwarded-For / X-Forwarded-Proto 还原真实客户端 IP 和协议——
+# 否则所有请求看起来都来自 127.0.0.1，按 IP 的登录锁定形同虚设。
+# 只有当代理确实由你自己控制、且会覆写这两个头时才可以打开。
+TRUST_PROXY = _flag("TRUST_PROXY", False)
+
 # ---------------------------------------------------------------- 展示与运行
 CURRENCY_SYMBOL = _text("CURRENCY_SYMBOL", "$")
 # 使用率颜色阈值（百分比）

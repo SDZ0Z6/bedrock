@@ -32,8 +32,13 @@ _attempts: dict[str, list] = {}
 
 
 def client_ip() -> str:
-    forwarded = request.headers.get("X-Forwarded-For", request.remote_addr or "?")
-    return forwarded.split(",")[0].strip()
+    """登录锁定按这个 IP 计数。
+
+    直接读 X-Forwarded-For 是不安全的：那个头可以由客户端伪造，每次换一个值
+    就能绕开锁定。这里一律用 remote_addr——本地直连时它本来就是对的，跑在
+    反向代理后面时由 ProxyFix 按 TRUST_PROXY 还原（见 create_app）。
+    """
+    return request.remote_addr or "?"
 
 
 def lockout_remaining(ip: str) -> int:
@@ -114,6 +119,10 @@ def login():
 
         record_failure(ip)
         flash("用户名或密码错误。", "error")
+        # 返回 401 而不是 200：这样 Nginx 的访问日志里失败登录是可识别的，
+        # fail2ban 才能据此封 IP。不带 WWW-Authenticate，所以浏览器不会弹
+        # 系统认证框，照常显示这个登录页。
+        return render_template("login.html"), 401
 
     return render_template("login.html")
 

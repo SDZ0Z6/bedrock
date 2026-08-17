@@ -16,6 +16,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# 生产部署用：gunicorn 只在 Linux 上装得了，本地开发不需要
+deploy = ["gunicorn>=22.0"]
 
 [project.scripts]
 bedrock-cost = "bedrock_cost.__main__:main"

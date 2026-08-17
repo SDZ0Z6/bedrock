@@ -26,12 +26,13 @@ class TestAuth:
 
     def test_wrong_password_is_rejected(self, client):
         response = client.post("/login", data={"username": TEST_USER, "password": "nope"})
-        assert response.status_code == 200
+        # 401 而不是 200：Nginx 日志里可识别，fail2ban 才能据此封 IP
+        assert response.status_code == 401
         assert client.get("/").status_code == 302
 
     def test_wrong_username_is_rejected(self, client):
         response = client.post("/login", data={"username": "someoneelse", "password": TEST_PASSWORD})
-        assert response.status_code == 200
+        assert response.status_code == 401
         assert client.get("/").status_code == 302
 
     def test_login_then_logout(self, client, ledger, fake_costs):
@@ -67,7 +68,80 @@ class TestAuth:
         monkeypatch.setattr(config, "AUTH_PASSWORD", "")
         monkeypatch.setattr(config, "AUTH_PASSWORD_HASH", "")
         response = client.post("/login", data={"username": TEST_USER, "password": ""})
-        assert response.status_code == 200
+        assert response.status_code == 401
+
+    def test_password_hash_is_accepted(self, app, monkeypatch):
+        """上公网时用哈希而不是明文口令，AUTH_PASSWORD 会被忽略。"""
+        from werkzeug.security import generate_password_hash
+
+        monkeypatch.setattr(config, "AUTH_PASSWORD", "irrelevant")
+        monkeypatch.setattr(config, "AUTH_PASSWORD_HASH", generate_password_hash("s3cret"))
+        # 各用一个干净的 client：登录成功会建立会话，复用的话第二次会被
+        # 「已登录」分支直接重定向走，测不到口令校验
+        assert app.test_client().post(
+            "/login", data={"username": TEST_USER, "password": "s3cret"}
+        ).status_code == 302
+        assert app.test_client().post(
+            "/login", data={"username": TEST_USER, "password": "irrelevant"}
+        ).status_code == 401
+
+
+class TestProductionHardening:
+    """公网部署要用到的几项，本地默认关着。"""
+
+    def test_secure_cookie_is_off_by_default(self, app):
+        assert app.config["SESSION_COOKIE_SECURE"] is False
+
+    def test_secure_cookie_follows_config(self, monkeypatch):
+        from bedrock_cost import create_app
+
+        monkeypatch.setattr(config, "SESSION_COOKIE_SECURE", True)
+        assert create_app(TESTING=True).config["SESSION_COOKIE_SECURE"] is True
+
+    def test_cookie_flags_always_on(self, app):
+        assert app.config["SESSION_COOKIE_HTTPONLY"] is True
+        assert app.config["SESSION_COOKIE_SAMESITE"] == "Lax"
+
+    def test_proxy_fix_only_when_trusted(self, monkeypatch):
+        from werkzeug.middleware.proxy_fix import ProxyFix
+
+        from bedrock_cost import create_app
+
+        monkeypatch.setattr(config, "TRUST_PROXY", False)
+        assert not isinstance(create_app(TESTING=True).wsgi_app, ProxyFix)
+        monkeypatch.setattr(config, "TRUST_PROXY", True)
+        assert isinstance(create_app(TESTING=True).wsgi_app, ProxyFix)
+
+    def test_forwarded_for_cannot_be_spoofed_to_dodge_lockout(self, monkeypatch):
+        """伪造 X-Forwarded-For 不能绕开按 IP 的登录锁定。
+
+        取最右边那个值（Nginx 追加的真实对端），客户端塞在左边的假值无效。
+        """
+        from bedrock_cost import create_app
+
+        monkeypatch.setattr(config, "TRUST_PROXY", True)
+        monkeypatch.setattr(config, "AUTH_USERNAME", TEST_USER)
+        monkeypatch.setattr(config, "AUTH_PASSWORD", TEST_PASSWORD)
+        monkeypatch.setattr(config, "AUTH_PASSWORD_HASH", "")
+        auth.clear_failures()
+        client = create_app(TESTING=True, SECRET_KEY="k").test_client()
+
+        codes = []
+        for attempt in range(config.MAX_LOGIN_ATTEMPTS + 2):
+            codes.append(
+                client.post(
+                    "/login",
+                    data={"username": TEST_USER, "password": "bad"},
+                    # 每次换一个伪造来源；真实对端始终是同一个
+                    headers={"X-Forwarded-For": f"9.9.9.{attempt}, 203.0.113.7"},
+                ).status_code
+            )
+        assert 429 in codes, "换假 IP 就绕开了锁定"
+        auth.clear_failures()
+
+    def test_client_ip_ignores_the_raw_header(self, app):
+        with app.test_request_context(headers={"X-Forwarded-For": "1.2.3.4"}):
+            assert auth.client_ip() != "1.2.3.4"
 
 
 class TestShell:
