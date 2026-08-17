@@ -1,0 +1,11 @@
+# 含登录口令和会话密钥
+.env
+
+# 含 AWS AK/SK
+cred.xlsx
+~$*.xlsx
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/

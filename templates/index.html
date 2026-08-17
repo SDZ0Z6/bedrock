@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}主页 · Bedrock 成本监控{% endblock %}
+
+{% macro usage_cell(pct, level, width) -%}
+  <div class="usage">
+    <span class="usage-num tone-{{ level }}">{{ pct | pct }}</span>
+    <span class="bar"><i class="tone-{{ level }}" style="width: {{ width }}%"></i></span>
+  </div>
+{%- endmacro %}
+
+{% block body %}
+<header class="topbar">
+  <div class="brand"><span class="mark">📊</span> Bedrock 成本监控</div>
+  <div class="topbar-right">
+    <span class="who">{{ session.get('user') }}</span>
+    <a class="btn btn-ghost" href="{{ url_for('logout') }}">退出</a>
+  </div>
+</header>
+
+<main class="wrap">
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <div class="alert alert-{{ category }}">{{ message }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  {% for note in notes %}
+    <div class="alert alert-warn">{{ note }}</div>
+  {% endfor %}
+
+  <!-- ------------------------------------------------ 日期范围 -->
+  <form class="filters" method="get" action="{{ url_for('index') }}">
+    <div class="field">
+      <label for="start">开始日期</label>
+      <input type="date" id="start" name="start" value="{{ start.isoformat() }}" max="{{ today.isoformat() }}">
+    </div>
+    <div class="field">
+      <label for="end">结束日期</label>
+      <input type="date" id="end" name="end" value="{{ end.isoformat() }}" max="{{ today.isoformat() }}">
+    </div>
+    <button class="btn btn-primary" type="submit">查询</button>
+    <a class="btn btn-ghost" href="{{ url_for('index', start=start.isoformat(), end=end.isoformat(), refresh=1) }}"
+       title="跳过缓存，重新调用 Cost Explorer">强制刷新</a>
+
+    <div class="presets">
+      {% set presets = [('mtd','本月'), ('last_month','上月'), ('last7','近 7 天'), ('last30','近 30 天'), ('ytd','今年')] %}
+      {% for key, label in presets %}
+        <a class="chip {% if active_preset == key %}chip-on{% endif %}"
+           href="{{ url_for('index', preset=key) }}">{{ label }}</a>
+      {% endfor %}
+    </div>
+  </form>
+
+  {% if fatal %}
+    <div class="alert alert-error"><strong>无法生成报表：</strong> {{ fatal }}</div>
+  {% elif report %}
+
+    <!-- ------------------------------------------------ 汇总 -->
+    <section class="summary">
+      <div class="tile">
+        <span class="tile-label">总预算</span>
+        <span class="tile-value">{{ report.total_budget | money }}</span>
+      </div>
+      <div class="tile">
+        <span class="tile-label">总消费</span>
+        <span class="tile-value">{{ report.total_cost | money }}</span>
+        <span class="tile-sub">TAG {{ report.total_tag | money }} + UNTAG {{ report.total_untag | money }}</span>
+      </div>
+      <div class="tile">
+        <span class="tile-label">整体使用率</span>
+        <span class="tile-value tone-{{ report.total_level }}">{{ report.total_usage_pct | pct }}</span>
+      </div>
+      <div class="tile">
+        <span class="tile-label">总余额</span>
+        <span class="tile-value {% if report.total_balance < 0 %}tone-danger{% endif %}">{{ report.total_balance | money }}</span>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------ 明细表 -->
+    <section class="card">
+      <div class="card-head">
+        <h2>账号明细</h2>
+        <span class="card-note">
+          {{ start.isoformat() }} ~ {{ end.isoformat() }} ·
+          {{ report.rows | length }} 个账号
+          {% if report.failed_count %}· <span class="tone-danger">{{ report.failed_count }} 个查询失败</span>{% endif %}
+          {% if report.any_cached %}· <span class="tone-muted">部分数据来自缓存</span>{% endif %}
+        </span>
+      </div>
+
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>上游</th>
+              <th>账号</th>
+              <th class="num">预算</th>
+              <th class="num">TAG 消费</th>
+              <th class="num">UNTAG 消费</th>
+              <th class="num">总消费</th>
+              <th class="num usage-col">使用率</th>
+              <th class="num">余额</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in report.rows %}
+              {% if row.error %}
+                <tr class="row-error">
+                  <td>{{ row.partner }}</td>
+                  <td class="mono">{{ row.account }}</td>
+                  <td class="num">{{ row.budget | money }}</td>
+                  <td colspan="5" class="err-cell">查询失败：{{ row.error }}</td>
+                </tr>
+              {% else %}
+                <tr>
+                  <td>{{ row.partner }}</td>
+                  <td class="mono">
+                    {{ row.account }}
+                    <span class="calc">{{ row.tag_label }}</span>
+                  </td>
+                  <td class="num">{{ row.budget | money }}</td>
+                  <td class="num">
+                    {{ row.tag_cost | money }}
+                    <span class="calc">{{ row.tag_raw | money }} × {{ row.tag_ratio | ratio }}</span>
+                  </td>
+                  <td class="num">
+                    {{ row.untag_cost | money }}
+                    <span class="calc">{{ row.untag_raw | money }} × {{ row.untag_ratio | ratio }}</span>
+                  </td>
+                  <td class="num strong">{{ row.total_cost | money }}</td>
+                  <td class="num usage-col">{{ usage_cell(row.usage_pct, row.level, row.bar_width) }}</td>
+                  <td class="num {% if row.overspent %}tone-danger strong{% endif %}">{{ row.balance | money }}</td>
+                </tr>
+                {% if row.note %}
+                  <tr class="row-note">
+                    <td colspan="8">⚠ {{ row.note }}</td>
+                  </tr>
+                {% endif %}
+              {% endif %}
+            {% else %}
+              <tr><td colspan="8" class="empty">{{ excel_name }} 里没有账号记录。</td></tr>
+            {% endfor %}
+          </tbody>
+          {% if report.rows %}
+          <tfoot>
+            <tr>
+              <td colspan="2">合计{% if report.failed_count %}<span class="calc">不含查询失败的账号</span>{% endif %}</td>
+              <td class="num">{{ report.total_budget | money }}</td>
+              <td class="num">{{ report.total_tag | money }}</td>
+              <td class="num">{{ report.total_untag | money }}</td>
+              <td class="num strong">{{ report.total_cost | money }}</td>
+              <td class="num usage-col">{{ usage_cell(report.total_usage_pct, report.total_level, 0 if report.total_usage_pct is none else (report.total_usage_pct if report.total_usage_pct < 100 else 100)) }}</td>
+              <td class="num {% if report.total_balance < 0 %}tone-danger strong{% endif %}">{{ report.total_balance | money }}</td>
+            </tr>
+          </tfoot>
+          {% endif %}
+        </table>
+      </div>
+    </section>
+  {% endif %}
+
+  <footer class="meta">
+    <span>数据源：Cost Explorer（{{ cost_metric }}，{{ service_scope }}）+ {{ excel_name }}</span>
+    <span>TAG/UNTAG 依据 {{ excel_name }} 的 <code>TAG</code> 列逐账号判定，其余消费归 UNTAG（缺省标签键 <code>{{ tag_key }}</code>）</span>
+    <span>缓存 {{ cache_ttl_minutes }} 分钟 · 生成于 {{ generated_at }}</span>
+    <span><a href="{{ url_for('clear_cache') }}">清空缓存</a></span>
+  </footer>
+</main>
+{% endblock %}
