@@ -8,7 +8,7 @@ Nginx 反向代理 · Let's Encrypt 证书自动续期 · 公网开放
 **先读这一段**：这个平台的 `cred.xlsx` 里是两个 AWS 账号的 **AK/SK 明文**，而
 登录只有一道口令。放到公网上等于「一道口令挡着两套云凭证」。所以本文档里的
 第 8 章（加固）不是可选项，请全部做完。最小化那两把密钥的 IAM 权限（只给
-只读的 CE / CloudWatch，见 README 的 IAM 章节）是性价比最高的一步——真出事时
+只读的 CE / CloudWatch，见 README 的《AK/SK 需要什么权限》）是性价比最高的一步——真出事时
 损失的上限就被它框住了。
 
 ---
@@ -548,7 +548,7 @@ scp -i C:\path\to\your-key.pem root@<ECS_IP>:/opt/bedrock/cred.xlsx ./backup-cre
 | 登录页能开，但输对口令也进不去 | `SESSION_COOKIE_SECURE=true` 却在用 http 访问。走 https，或临时改成 false 排查 |
 | 一直提示「登录失败次数过多」 | 触发了锁定。等 `LOCKOUT_SECONDS`，或 `systemctl restart bedrock` 清掉内存计数 |
 | 页面显示「找不到账号台账文件」 | `cred.xlsx` 没传上去，或属主/权限不对（应为 `bedrock:bedrock 640`） |
-| CloudWatch 页面空白但成本页正常 | AK/SK 缺 CloudWatch 权限，看 README 的 IAM 章节 |
+| CloudWatch 页面空白但成本页正常 | AK/SK 缺 CloudWatch 权限，看 README 的《AK/SK 需要什么权限》 |
 | certbot 签发失败 | 80 端口不通，或 DNS 没指到这台机器。certbot 需要从公网回访 80 |
 | 改了 `.env` 不生效 | `.env` 是启动时读的，改完要 `systemctl restart bedrock` |
 
