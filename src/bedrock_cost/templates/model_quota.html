@@ -1,0 +1,146 @@
+{% extends "shell.html" %}
+{% block title %}模型配额 · Bedrock 成本监控{% endblock %}
+{% block page_title %}模型配额{% endblock %}
+
+{% block content %}
+
+<!-- 没有区域筛选：这两类配额是账号级的全局池，四个美区共用同一份额度 -->
+<form class="filters filters-auto" id="quota-filters" method="get" action="{{ url_for('main.model_quota') }}">
+  <div class="field">
+    <label for="account">账号</label>
+    <select id="account" name="account">
+      {% for account in accounts %}
+        <option value="{{ account.key }}" {% if selected_account == account.key %}selected{% endif %}>
+          {{ account.partner }} / {{ account.account }}
+        </option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <noscript><button class="btn btn-primary" type="submit">查询</button></noscript>
+
+  <div class="presets">
+    <a class="btn btn-ghost" href="{{ url_for('main.model_quota', account=selected_account, refresh=1) }}"
+       title="跳过缓存，重新拉一次 Service Quotas">强制刷新</a>
+  </div>
+</form>
+
+{% if fatal %}
+  <div class="alert alert-error"><strong>无法生成报表：</strong> {{ fatal }}</div>
+{% else %}
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Claude Token 配额</h2>
+      <span class="card-note">
+        账号 {{ report.account_label }} · {{ report.rows | length }} 个模型 ·
+        全局跨区共享，不分区域
+      </span>
+    </div>
+
+    <div class="table-scroll">
+      <table class="wide-table quota-table">
+        <thead>
+          <tr>
+            <th class="sticky-col">模型</th>
+            <th>Model ID</th>
+            <th class="num">每日 Token 配额</th>
+            <th class="num">每分钟 Token 配额</th>
+            <th class="num">日 ÷ 分</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in report.rows %}
+            <tr>
+              <td class="sticky-col">
+                {{ row.display }}
+                {% if row.is_long_context %}<span class="calc">独立配额，与同名模型不共享</span>{% endif %}
+              </td>
+              <td class="model-id">
+                {%- if row.model_id %}<code>{{ row.model_id }}</code>
+                {%- else %}<span class="tone-muted">—</span>
+                  <span class="calc">没有对应的 global 跨区配置</span>{% endif -%}
+              </td>
+              <td class="num strong">
+                {%- if row.day is none %}<span class="tone-muted">未列出</span>
+                {%- else %}{{ row.day | compact }}
+                  <span class="calc">{{ '{:,.0f}'.format(row.day) }} ·
+                    {% if row.day_adjustable %}可申请提额{% else %}不可调{% endif %}</span>
+                {%- endif -%}
+              </td>
+              <td class="num strong">
+                {%- if row.minute is none %}<span class="tone-muted">未列出</span>
+                {%- else %}{{ row.minute | compact }}
+                  <span class="calc">{{ '{:,.0f}'.format(row.minute) }} ·
+                    {% if row.minute_adjustable %}<span class="tone-ok">可申请提额</span>
+                    {%- else %}不可调{% endif %}</span>
+                {%- endif -%}
+              </td>
+              <td class="num {% if not row.balanced %}tone-warn{% else %}tone-muted{% endif %}">
+                {%- if row.minutes_to_exhaust is none %}—
+                {%- else %}{{ '{:,.0f}'.format(row.minutes_to_exhaust) }} 分{% endif -%}
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="5" class="empty">没有读到任何 Claude token 配额。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>这一页怎么读</h2></div>
+    <div class="notes-body">
+      <ul>
+        <li><strong>配额是账号级的全局池，不分区域。</strong>
+          名字里的 Global cross-region 就是字面意思：四个美区共用同一份额度。实测四个区
+          返回的值完全相同，所以这一页没有区域维度，只查一个区（<code>{{ quota_region }}</code>，
+          它列出的模型最全）。</li>
+        <li><strong>配额口径是输入 + 输出 token 合计</strong>，
+          覆盖 Converse、ConverseStream、InvokeModel、InvokeModelWithResponseStream 全部请求。</li>
+        <li><strong>「日 ÷ 分」是两条配额自己的比值</strong>，不涉及任何实际用量。
+          正常应该是 1440（分钟配额跑满 24 小时刚好等于日配额）。
+          偏离 1440 的会标黄——说明这个模型的两条配额不是按整天配的，
+          实际瓶颈会先落在其中一条上。</li>
+        <li><strong>Model ID 是调用时真正要传的那个</strong>，
+          取自 <code>bedrock:ListInferenceProfiles</code> 的 <code>SYSTEM_DEFINED</code>
+          跨区推理配置（<code>global.anthropic.*</code>），不是从配额名拼出来的。
+          配额名里只有显示名，没有可调用的 ID。</li>
+        <li><strong>1M 上下文长度是独立的一条配额</strong>，
+          和同名模型的普通配额各走各的，不共享额度。它没有单独的 global 配置，
+          所以 Model ID 一列是空的——用普通模型的 ID 调用，靠请求里的上下文设置区分。</li>
+        <li><strong>两条配额的可调性不一样</strong>：日配额 <code>Adjustable=false</code>，
+          改不了；分钟配额 <code>Adjustable=true</code>，可以直接在 Service Quotas
+          控制台申请提额。实测 12 个模型全部是这个组合，所以 TPM 撞上限时是有办法的，
+          日配额撞上限只能找 AWS。</li>
+        <li>配额和实际用量的对比不在这一页——「模型用量」页有各模型按时间的
+          token 走势，需要的时候可以拿这里的数字去比。</li>
+      </ul>
+    </div>
+  </section>
+{% endif %}
+
+<footer class="meta">
+  <span>数据源：Service Quotas <code>{{ quota_service }}</code> @ <code>{{ quota_region }}</code></span>
+  <span>缓存 {{ quota_cache_hours }} 小时（配额几乎不变）· 生成于 {{ generated_at }}</span>
+  <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
+</footer>
+
+<script>
+(function () {
+  const form = document.getElementById('quota-filters');
+  if (!form) return;
+  const content = document.querySelector('.content');
+  let pending = false;
+  for (const field of form.querySelectorAll('select, input')) {
+    field.addEventListener('change', function () {
+      if (pending) return;
+      pending = true;
+      if (content) content.classList.add('is-loading');
+      form.submit();
+    });
+  }
+})();
+</script>
+{% endblock %}

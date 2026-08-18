@@ -182,3 +182,45 @@ def logged_in(client):
     )
     assert response.status_code == 302, "fixture 自己就登录失败了"
     return client
+
+
+@pytest.fixture
+def fake_service_quotas(monkeypatch):
+    """替换 Service Quotas，返回实测样式的配额，不联网。"""
+    from bedrock_cost import quotas
+
+    day = "Global cross-region model inference tokens per day for "
+    minute = "Global cross-region model inference tokens per minute for "
+
+    def q(name, value):
+        # 照实测：日配额不可调，分钟配额可申请提额
+        return {
+            "QuotaName": name,
+            "Value": value,
+            "QuotaCode": "L-X",
+            "Adjustable": " per minute " in name,
+        }
+
+    payload = [
+        q(day + "Anthropic Claude Opus 4.8", 43_200_000_000),
+        q(minute + "Anthropic Claude Opus 4.8", 30_000_000),
+        q(day + "Anthropic Claude Sonnet 4.5 V1", 7_200_000_000),
+        q(minute + "Anthropic Claude Sonnet 4.5 V1", 5_000_000),
+        q(day + "Anthropic Claude Sonnet 4.5 V1 1M Context Length", 1_440_000_000),
+        q(minute + "Anthropic Claude Sonnet 4.5 V1 1M Context Length", 1_000_000),
+        q(day + "Amazon Nova 2 Lite", 11_520_000_000),      # 非 Claude，应被排除
+        q("Batch inference job size (in GB) for Claude Opus 5", 1000),  # 无关配额
+    ]
+
+    class _Paginator:
+        def paginate(self, **kwargs):
+            return iter([{"Quotas": payload}])
+
+    class _Client:
+        def get_paginator(self, name):
+            return _Paginator()
+
+    monkeypatch.setattr(quotas.boto3, "client", lambda *a, **k: _Client())
+    quotas.clear_cache()
+    yield
+    quotas.clear_cache()

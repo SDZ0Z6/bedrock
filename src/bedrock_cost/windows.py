@@ -82,7 +82,7 @@ def _parse_local(raw: str | None) -> datetime | None:
     return None
 
 
-def _floor(moment: datetime, period: int) -> datetime:
+def floor_to_period(moment: datetime, period: int) -> datetime:
     """把时间对齐到 Period 边界，否则首尾会出现半个桶。"""
     epoch = int(moment.timestamp())
     return datetime.fromtimestamp(epoch - epoch % period, tz=timezone.utc)
@@ -168,8 +168,8 @@ def resolve_window(args: Mapping[str, str], now: datetime | None = None) -> tupl
     period = PERIODS[period_key][0]
     return (
         MetricWindow(
-            start=_floor(start, period),
-            end=_floor(end, period),
+            start=floor_to_period(start, period),
+            end=floor_to_period(end, period),
             period_key=period_key,
             window_key=window_key,
         ),

@@ -26,13 +26,14 @@ python -m bedrock_cost
 > `Scripts` 目录默认不在 PATH 上，所以直接敲 `bedrock-cost` 可能找不到。
 > `python -m bedrock_cost` 在哪种装法下都能用，推荐用它。
 
-左侧导航有三个页面：
+左侧导航有四个页面：
 
 | 页面 | 路径 | 数据源 | 用途 |
 |---|---|---|---|
 | 概览 | `/` | Cost Explorer | 每个上游账号的预算 / 消费 / 使用率 / 余额一览 |
 | 成本和使用情况 | `/cost-usage` | Cost Explorer | 按日或按月下钻，按服务 / 标签 / 账号维度看堆叠图和明细 |
 | 模型用量 | `/model-usage` | CloudWatch | 各模型的调用次数和 token 量随时间变化，美国四区 2×2 小倍数折线图 |
+| 模型配额 | `/model-quota` | Service Quotas | 各 Claude 模型的每日 / 每分钟 token 配额 |
 
 侧边栏可以点左上角的箭头收起成一条图标轨（60px）。收起后四个入口（概览、
 成本和使用情况、模型用量、退出）都只剩图标，尺寸完全一致，悬浮可以看到 `title`
@@ -40,6 +41,163 @@ python -m bedrock_cost
 收起状态存在 `localStorage`，跨页面和重启浏览器都保持；`<head>` 里有一小段内联
 脚本在首次绘制前就把状态套上，所以不会出现「先展开再收起」的闪动。窄屏
 （≤900px）侧边栏本来就是横条，收起按钮会隐藏。
+
+## AK/SK 需要什么权限
+
+`cred.xlsx` 里每个账号的 AK/SK 只用来**读**，一个写操作都没有。下面这份策略是按
+代码里实际发出的 API 调用逐条对出来的，不多不少：
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CostPages",
+      "Effect": "Allow",
+      "Action": "ce:GetCostAndUsage",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ModelUsagePage",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:ListMetrics",
+        "cloudwatch:GetMetricData"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ModelIdAndTags",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:ListInferenceProfiles",
+        "bedrock:ListTagsForResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "QuotaPage",
+      "Effect": "Allow",
+      "Action": "servicequotas:ListServiceQuotas",
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+逐条说明：
+
+| 权限 | 谁在用 | 干什么 | 缺了会怎样 |
+|---|---|---|---|
+| `ce:GetCostAndUsage` | 概览页、成本和使用情况页 | 拉消费金额，并按标签拆 TAG / UNTAG | 这两页整页出错 |
+| `cloudwatch:ListMetrics` | 模型用量页 | 发现该账号近两周用过哪些模型 | 模型用量页空白 |
+| `cloudwatch:GetMetricData` | 模型用量页 | 拉调用次数和 token 数 | 模型用量页空白 |
+| `bedrock:ListInferenceProfiles` | 模型用量页、模型配额页 | 把 12 位不透明 ID 解析成可读名字和底层模型；查配额页的 Model ID | 用量页显示原始 ID；配额页 Model ID 列为空。**不影响出数** |
+| `bedrock:ListTagsForResource` | 模型用量页 | 读推理配置上的 `map-migrated` 标签，判定有标签 / 无标签 | 全部流量被当成「无标签」，页面会明确提示 |
+| `servicequotas:ListServiceQuotas` | 模型配额页 | 拉 Bedrock 的 token 配额 | 配额页提示读不到 |
+
+几点说明：
+
+- **不需要 `ce:GetTags`。** 早期文档里列过它，那是当初排查标签键时手动用的，
+  代码里并不调用。已移除。
+- **不需要任何写权限**，也不需要 `bedrock:InvokeModel`——这个平台只读监控数据，
+  从不发起模型调用。
+- **`Resource` 只能是 `*`**：Cost Explorer、CloudWatch 的 `GetMetricData`、
+  Service Quotas 这几个接口都不支持按资源收敛。真正的收敛手段是上面这份
+  Action 列表本身。
+- **计费**：`ce:GetCostAndUsage` 约 0.01 USD/次，`cloudwatch:GetMetricData` 约
+  0.01 USD/1000 个 metric，其余（`ListMetrics`、`ListServiceQuotas`、
+  `ListInferenceProfiles`、`ListTagsForResource`）不计费。平台对结果做了缓存，
+  见《缓存》一节。
+- **想更省事**：AWS 托管策略 `ReadOnlyAccess` 一定够用，但它把整个账号的读权限
+  都给了出去。既然这套密钥要放在一台公网服务器上（见 `DEPLOY.md`），
+  强烈建议用上面这份最小策略——真泄露时损失的上限就是它框住的。
+
+### 怎么配
+
+1. IAM 控制台 → 策略 → 创建策略 → JSON，贴上面那段，命名如 `BedrockMonitorReadOnly`
+2. IAM → 用户 → 创建用户（不需要控制台访问）→ 直接附加上面这条策略
+3. 该用户 → 安全凭证 → 创建访问密钥 → 用途选「在 AWS 外部运行的应用程序」
+4. 把 AK / SK 填进 `cred.xlsx` 对应账号那一行
+
+每个账号各建一个这样的用户，互不相干。
+
+## 各页面的 API 调用与费用
+
+下面的调用次数是用 botocore 的事件钩子**实测**出来的，不是照着代码数的。测试环境
+是**台账里 2 个账号、4 个美区、每个账号约 11 个应用推理配置**，你的次数按下面的
+公式换算。
+
+### 概览 `/`
+
+| 调用 | 次数 | 公式 | 计费 |
+|---|---|---|---|
+| `ce:GetCostAndUsage` | 2 | 账号数 × 1 | 约 $0.01/次 |
+
+一个账号一次请求就同时拿到 TAG 和 UNTAG 两部分（靠 `GroupBy` 标签键，本地归类）。
+
+**冷加载实测 22.6 秒**——只有 2 次请求，时间全在 Cost Explorer 自己的响应上，
+不是次数问题。**单次成本约 $0.02。**
+
+### 成本和使用情况 `/cost-usage`
+
+| 调用 | 次数 | 公式 | 计费 |
+|---|---|---|---|
+| `ce:GetCostAndUsage` | 2 | 账号数 × 1 | 约 $0.01/次 |
+
+服务维度用两级 `GroupBy [SERVICE, TAG]`，所以逐格加权也只要一次请求。
+
+**冷加载实测 2.7 秒，单次成本约 $0.02。**
+
+> 换维度、换粒度、换日期区间都会绕开缓存重新请求（缓存键包含这些参数）。
+> 反复拖时间范围是这个平台最容易花钱的操作。
+
+### 模型用量 `/model-usage`
+
+| 调用 | 次数 | 公式 | 计费 |
+|---|---|---|---|
+| `cloudwatch:ListMetrics` | 8 | 账号数 × 区域数 | 免费 |
+| `cloudwatch:GetMetricData` | 8 | 账号数 × 区域数 | 按请求的 metric 数计 |
+| `bedrock:ListInferenceProfiles` | 4 | 有数据的 (账号×区域) | 免费 |
+| `bedrock:ListTagsForResource` | 43 | 配置数 × 区域数 | 免费 |
+
+`GetMetricData` 一次请求里打包了很多 metric，实测**共请求 78 个 metric**
+（模型数 × 该指标用到的 CloudWatch 指标数；总 Token 要 input + output 两个）。
+按约 $0.01 / 1000 个 metric 算，**单次约 $0.0008**——比成本页便宜两个数量级。
+
+**冷加载实测 39～59 秒。** 大头是那 43 次 `ListTagsForResource`（逐个配置读标签，
+`list_inference_profiles` 不返回标签）。这部分单独缓存 1 小时，所以一小时内只付
+一次。切换指标、标签筛选、时间窗口时不会重新读配置，只重新拉指标。
+
+### 模型配额 `/model-quota`
+
+| 调用 | 次数 | 公式 | 计费 |
+|---|---|---|---|
+| `servicequotas:ListServiceQuotas` | 30 | 配额总数 ÷ 每页 100 | 免费 |
+| `bedrock:ListInferenceProfiles` | 1 | 1 | 免费 |
+
+**这一页完全不花钱。冷加载实测 15～17 秒**，全在那 30 页分页上（该账号有 1162 条
+bedrock 配额，只有 12 条是我们要的）。缓存 6 小时，之后打开是毫秒级（实测 0.00 秒）。
+
+### 缓存之后
+
+**所有页面命中缓存后都是 0 次 API 调用、0 成本、毫秒级返回**（实测 0.00～0.03 秒）。
+各自的缓存期见下面《缓存》一节。
+
+### 大致的月度成本
+
+只有 Cost Explorer 明显花钱。假设 2 个账号、工作日每天冷加载概览页和成本页各
+10 次：
+
+```
+(10 + 10) 次/天 × 2 账号 × $0.01 × 22 个工作日 ≈ $8.8/月
+```
+
+CloudWatch 那两页按同样频率不到 $0.5/月，配额页 $0。想再省就把 `CACHE_TTL`
+调大（默认 900 秒）。
+
+> 单价以 AWS 官方定价为准，可能随区域和时间变化。上面的 $0.01/次（Cost Explorer）
+> 和 $0.01/1000 metric（GetMetricData）是写文档时的公开价格。
 
 ## 概览页字段口径
 
@@ -244,28 +402,47 @@ CloudWatch 对不同 Period 的保留期不同，超期的数据是**查不到**
 
 ### IAM 权限
 
-模型用量页需要在原有 Cost Explorer 权限之外再加四项：
+见文档开头的《AK/SK 需要什么权限》一节。
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": [
-      "ce:GetCostAndUsage",
-      "ce:GetTags",
-      "cloudwatch:ListMetrics",
-      "cloudwatch:GetMetricData",
-      "bedrock:ListInferenceProfiles",
-      "bedrock:ListTagsForResource"
-    ],
-    "Resource": "*"
-  }]
-}
+## 模型配额页
+
+列出各 Claude 模型的两类 token 配额，来自 Service Quotas（`ServiceCode=bedrock`）：
+
+```
+Global cross-region model inference tokens per day for <模型>
+Global cross-region model inference tokens per minute for <模型>
 ```
 
-`GetMetricData` 按请求的 metric 数计费（约 0.01 USD / 1000 个），比 Cost
-Explorer 便宜得多；`ListMetrics` 不计费。结果同样按 `CACHE_TTL` 缓存。
+这一页只展示配额本身，不查实际用量——用量在「模型用量」页。
+
+### 实测确认的几件事
+
+- **配额是账号级的全局池，不分区域。** 四个美区 `ListServiceQuotas` 返回的值完全
+  相同（32 条里 30 条一致，另 2 条只是 us-west-1 根本没列出那个模型）。名字里的
+  Global cross-region 就是字面意思。所以页面没有区域维度，只查 `us-east-1`
+  （它列出的模型最全，1162 条；us-west-1 只有 222 条）。
+- **配额口径是输入 + 输出 token 合计**，覆盖 Converse / ConverseStream /
+  InvokeModel / InvokeModelWithResponseStream。
+- **两条配额的可调性不一样**：日配额 `Adjustable=false` 改不了，分钟配额
+  `Adjustable=true` 可以在 Service Quotas 控制台申请提额。12 个模型全部是这个
+  组合，所以代码按条记录可调性——合并成一个字段会把日配额也说成能调。
+- **1M 上下文长度是独立的一条配额**，不和同名模型共享额度。
+
+### 「日 ÷ 分」这一列
+
+纯粹是两条配额自己的比值，不涉及任何用量。正常是 1440（分钟配额跑满 24 小时
+刚好等于日配额），偏离 1440 的会标黄，说明两条配额不是按整天配的。
+
+### 性能
+
+`ListServiceQuotas` 必须显式设 `PageSize=100`：boto3 的默认分页每页只有 8 条，
+1162 条配额要发 146 次请求，实测 54 秒；设成 100 之后是 30 页。
+调用次数和耗时见《各页面的 API 调用与费用》。
+
+### IAM 权限
+
+在原有权限之外再加一项 `servicequotas:ListServiceQuotas`，见开头的
+《AK/SK 需要什么权限》。这个接口不计费。
 
 ## Cost Explorer 查询口径
 
@@ -273,7 +450,7 @@ Explorer 便宜得多；`ListMetrics` 不计费。结果同样按 `CACHE_TTL` �
 - **服务范围**：账号下全部服务，不加服务过滤
 - **拆分方式**：按 `TAG` 列里的标签键做 `GroupBy`，再在本地按标签值归类。一个账号一次 API 调用就能同时拿到 TAG 和 UNTAG 两部分。
 - **端点**：`us-east-1`（Cost Explorer 是全局服务）
-- **凭证**：每个账号用台账里自己的 `AK` / `SK`，只需要 `ce:GetCostAndUsage` 权限
+- **凭证**：每个账号用台账里自己的 `AK` / `SK`，权限见开头的《AK/SK 需要什么权限》
 
 > ⚠️ 注意：Bedrock 上的 Claude 在 Cost Explorer 里是**按模型独立计费条目**，服务名形如
 > `Claude Opus 5 (Amazon Bedrock Edition)`，**不叫** `Amazon Bedrock`。
@@ -281,7 +458,16 @@ Explorer 便宜得多；`ListMetrics` 不计费。结果同样按 `CACHE_TTL` �
 
 ## 缓存
 
-Cost Explorer 按请求计费（约 0.01 USD/次），结果按「账号 + 日期区间 + 指标」缓存 15 分钟（`.env` 里的 `CACHE_TTL`，单位秒，设 0 关闭）。
+| 缓存的东西 | 期限 | 键 |
+|---|---|---|
+| Cost Explorer 结果 | `CACHE_TTL`（默认 15 分钟） | 账号 + 日期区间 + 指标 + 标签设置 |
+| CloudWatch 指标 | `CACHE_TTL`（默认 15 分钟） | 账号 + 区域 + 指标 + 时间窗口 + 粒度 |
+| 推理配置与其标签 | 1 小时 | 账号 + 区域 + 标签键 |
+| 模型配额与 Model ID | 6 小时 | 账号 |
+| 台账 `cred.xlsx` | 按文件 mtime + 大小 | 改完刷新页面即生效 |
+
+配置类的（推理配置、配额）期限给得长，因为它们几乎不变，而且拉一次很慢——
+见上面《各页面的 API 调用与费用》。
 
 - 点「强制刷新」跳过缓存重新查一次
 - 页脚「清空缓存」清掉全部缓存
@@ -320,17 +506,7 @@ Cost Explorer 按请求计费（约 0.01 USD/次），结果按「账号 + 日�
 
 - `cred.xlsx` 里的 AK/SK 是明文。这些密钥只在内存中传给 boto3，**不会**出现在页面、日志或错误信息里（`Account` 的 `repr` 屏蔽了这两个字段，CE 报错文本也会做脱敏）。
 - `.env` 和 `cred.xlsx` 已在 `.gitignore` 里，不要提交或分享。
-- 给这些 AK/SK 配最小权限即可：
-  ```json
-  {
-    "Version": "2012-10-17",
-    "Statement": [{
-      "Effect": "Allow",
-      "Action": ["ce:GetCostAndUsage", "ce:GetTags"],
-      "Resource": "*"
-    }]
-  }
-  ```
+- 给这些 AK/SK 配最小权限即可，见开头的《AK/SK 需要什么权限》。
 - 默认只监听 `127.0.0.1`。要对外提供访问，请用 gunicorn/waitress + Nginx 并启用 HTTPS，同时把 `SESSION_COOKIE_SECURE` 打开——当前的登录机制（单账号 + 内存级失败锁定）是按本地自用设计的。
 
 ## 文件结构
@@ -358,9 +534,10 @@ src/bedrock_cost/
   cost_explorer.py        概览页：调 CE 并按标签拆 TAG/UNTAG，带 TTL 缓存与并发
   usage_explorer.py       成本下钻页：时间序列 + 三种维度 + 颜色槽分配
   cloudwatch_metrics.py   模型用量页：AWS/Bedrock 指标、推理配置解析、区域合并
+  quotas.py               模型配额页：Service Quotas 里的两类 token 配额
   report.py               概览页八列口径与合计
   chart.py                堆叠柱状图 + 折线图（SVG），图表色板的唯一来源
-  templates/              base / shell / login / index / cost_usage / model_usage
+  templates/              base / shell / login / index / cost_usage / model_usage / model_quota
   static/style.css        深色仪表盘样式
 
 tests/                    见下节
@@ -386,7 +563,7 @@ tests/                    见下节
 pytest
 ```
 
-322 个用例，约 6 秒跑完，**不联网、不花钱**：Cost Explorer 调用被替换成 fake，
+367 个用例，约 7 秒跑完，**不联网、不花钱**：Cost Explorer 调用被替换成 fake，
 台账指向临时 xlsx，登录口令也换成固定值（不依赖你机器上的 `.env`）。
 
 概览页和下钻页的 fake 都从同两个常量算消费，所以「下钻任一维度加总 == 概览总

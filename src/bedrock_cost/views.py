@@ -6,7 +6,7 @@ from datetime import date, datetime
 
 from flask import Blueprint, flash, redirect, render_template, request, url_for
 
-from . import chart, cloudwatch_metrics, config, cost_explorer, usage_explorer
+from . import chart, cloudwatch_metrics, config, cost_explorer, quotas, usage_explorer
 from .auth import login_required
 from .dates import detect_preset, resolve_range
 from .excel_source import Account, ExcelSourceError, load_accounts
@@ -228,5 +228,59 @@ def clear_cache():
     cost_explorer.clear_cache()
     usage_explorer.clear_cache()
     cloudwatch_metrics.clear_cache()
+    quotas.clear_cache()
     flash("已清空缓存，下一次查询会重新调用 Cost Explorer 和 CloudWatch。", "ok")
     return redirect(request.referrer or url_for("main.index"))
+
+
+# --------------------------------------------------------------- 模型配额
+@bp.route("/model-quota")
+@login_required
+def model_quota():
+    refresh = request.args.get("refresh") == "1"
+    notes: list[str] = []
+
+    accounts: list[Account] = []
+    fatal = None
+    try:
+        accounts = load_accounts(force=refresh)
+    except ExcelSourceError as exc:
+        fatal = str(exc)
+    except Exception as exc:
+        fatal = f"{type(exc).__name__}: {exc}"
+
+    # 配额和限流都是按账号算的，没有「全部账号」这个选项：把多个账号合起来会
+    # 把一个快满的账号藏在平均值里，真限流时页面上还显示一切正常
+    chosen = None
+    selected = (request.args.get("account") or "").strip()
+    if accounts:
+        by_key = {a.key: a for a in accounts}
+        if selected and selected not in by_key:
+            notes.append("所选账号已不在台账中，已切回第一个账号。")
+            selected = ""
+        chosen = by_key.get(selected) or accounts[0]
+        selected = chosen.key
+
+    report = quotas.QuotaReport()
+    if not fatal:
+        try:
+            report = quotas.build_quota_report(chosen, refresh=refresh)
+        except Exception as exc:
+            fatal = f"{type(exc).__name__}: {exc}"
+
+    if report.error:
+        notes.append(f"读不到 Service Quotas：{report.error}")
+
+    return render_template(
+        "model_quota.html",
+        active_page="model_quota",
+        report=report,
+        fatal=fatal,
+        notes=notes,
+        accounts=accounts,
+        selected_account=selected,
+        quota_region=quotas.QUOTA_REGION,
+        quota_service=quotas.SERVICE_CODE,
+        quota_cache_hours=round(quotas.QUOTA_CACHE_TTL / 3600),
+        **page_meta(),
+    )

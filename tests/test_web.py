@@ -394,3 +394,83 @@ class TestCacheClear:
     def test_redirects_back(self, logged_in, ledger, fake_costs):
         response = logged_in.get("/cache/clear")
         assert response.status_code == 302
+
+
+class TestModelQuotaPage:
+    """纯配额页：不查 CloudWatch，只列 Service Quotas 的两类 token 配额。"""
+
+    def test_renders(self, logged_in, ledger, fake_service_quotas):
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert "模型配额" in html
+        assert "每日 Token 配额" in html
+        assert "每分钟 Token 配额" in html
+
+    def test_sidebar_has_four_entries(self, logged_in, ledger, fake_service_quotas):
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        for href in ('href="/"', 'href="/cost-usage"', 'href="/model-usage"', 'href="/model-quota"'):
+            assert href in html
+
+    def test_no_region_filter(self, logged_in, ledger, fake_service_quotas):
+        """配额是账号级的全局池，四区共用，所以不该有区域维度。"""
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        form = html[html.index('id="quota-filters"') : html.index("</form>")]
+        assert 'name="region"' not in form
+
+    def test_no_all_accounts_option(self, logged_in, ledger, fake_service_quotas):
+        """配额按账号发，合起来看没意义（也不能相加）。"""
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        form = html[html.index('id="quota-filters"') : html.index("</form>")]
+        assert 'value="all"' not in form
+
+    def test_defaults_to_first_account(self, logged_in, ledger, fake_service_quotas, accounts):
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert accounts[0].partner in html
+
+    def test_unknown_account_falls_back(self, logged_in, ledger, fake_service_quotas):
+        html = logged_in.get("/model-quota?account=nope").get_data(as_text=True)
+        assert "已切回第一个账号" in html
+
+    def test_shows_only_claude(self, logged_in, ledger, fake_service_quotas):
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert "Claude Opus 4.8" in html
+        assert "Nova" not in html
+        assert "Cohere" not in html
+
+    def test_marks_long_context_as_separate(self, logged_in, ledger, fake_service_quotas):
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert "1M Context Length" in html
+        assert "独立配额" in html
+
+    def test_explains_the_key_facts(self, logged_in, ledger, fake_service_quotas):
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        for fact in ("账号级的全局池", "输入 + 输出 token 合计", "两条配额的可调性不一样"):
+            assert fact in html
+
+    def test_quota_api_failure_is_shown_not_fatal(self, logged_in, ledger, monkeypatch):
+        from bedrock_cost import quotas
+
+        def broken(*a, **k):
+            raise RuntimeError("AccessDeniedException: servicequotas denied")
+
+        monkeypatch.setattr(quotas.boto3, "client", broken)
+        quotas.clear_cache()
+        response = logged_in.get("/model-quota")
+        assert response.status_code == 200
+        assert "读不到 Service Quotas" in response.get_data(as_text=True)
+
+    def test_no_credential_leak(self, logged_in, ledger, fake_service_quotas):
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        for secret in ("AKIAFAKEALPHA0000000", "x" * 40, TEST_PASSWORD):
+            assert secret not in html
+
+    def test_anonymous_is_blocked(self, client):
+        response = client.get("/model-quota")
+        assert response.status_code == 302
+        assert "/login" in response.headers["Location"]
+
+    def test_shows_adjustability_per_quota(self, logged_in, ledger, fake_service_quotas):
+        """日配额改不了、分钟配额能申请提额——两者必须分开显示。"""
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert "不可调" in html
+        assert "可申请提额" in html
+        assert "可自助调整" not in html   # 旧的合并列已移除
