@@ -103,59 +103,80 @@ apt update && apt upgrade -y
 ```
 
 ```bash
-apt install -y python3-venv python3-pip nginx fail2ban rsync
+apt install -y git python3-venv python3-pip nginx fail2ban
 ```
 
-`fail2ban` 第 8.4 章用，`rsync` 第 5 章用。
+`git` 第 5 章拉代码用，`fail2ban` 第 8.4 章用。
 
 ### 4.2 建一个专用的非 root 用户跑服务
 
 服务不该用 root 跑——被打穿时影响面差别很大。
 
 ```bash
-adduser --system --group --home /opt/bedrock bedrock
+adduser --system --group --no-create-home --home /opt/bedrock bedrock
 ```
 
-`--system` 建的是不能登录的系统账号，正合适。
+`--system` 建的是不能登录的系统账号，正合适。`--no-create-home` 是因为下一章要用
+`git clone` 生成 `/opt/bedrock`——目录先存在的话 clone 会拒绝。
 
 ---
 
-## 5. 上传代码
+## 5. 拉代码
 
-**回到你的 Windows 本地**执行。先确认本地测试是过的：
+代码在 GitHub 上，服务器直接 clone。`.env` 和 `cred.xlsx` 在 `.gitignore` 里，
+**不会**被 clone 下来，要单独传——这正是我们想要的：密钥永远不进仓库。
 
-```bash
-python -m pytest
-```
+### 5.1 clone
 
-### 5.1 传代码
-
-注意 `scp` / `rsync` **不看 `.gitignore`**——你让它传什么它就传什么。所以密钥
-文件要单独处理，别一股脑 `-r .` 上去。
-
-推荐用 `rsync`，能排除本地产物，而且以后更新只传改动的部分：
+仓库是公开的，不需要任何凭证：
 
 ```bash
-rsync -avz -e "ssh -i C:\path\to\your-key.pem" --exclude "__pycache__" --exclude ".venv" --exclude ".pytest_cache" --exclude "*.egg-info" --exclude ".env" --exclude "cred.xlsx" --exclude ".git" ./ root@<ECS_IP>:/opt/bedrock/
+git clone https://github.com/SDZ0Z6/bedrock.git /opt/bedrock
 ```
 
-> Windows 上如果没有 `rsync`（Git Bash 不自带），用 `scp` 逐项传也行，
-> 只是会多带上 `__pycache__`，无害：
->
-> ```bash
-> scp -i C:\path\to\your-key.pem -r src tests pyproject.toml requirements.txt README.md DEPLOY.md root@<ECS_IP>:/opt/bedrock/
-> ```
+<details>
+<summary>如果以后把仓库改成私有</summary>
 
-### 5.2 单独传台账
+用 **Deploy Key**（只读、只对这一个仓库有效、可随时吊销），比 Personal Access
+Token 安全得多——PAT 一泄露就是你整个 GitHub 账号。
+
+服务器上生成一把密钥：
+
+```bash
+ssh-keygen -t ed25519 -C "bedrock-ecs-deploy" -f /root/.ssh/bedrock_deploy -N ""
+```
+
+```bash
+cat /root/.ssh/bedrock_deploy.pub
+```
+
+把输出贴到 GitHub → 该仓库 → Settings → Deploy keys → Add deploy key，
+**不要**勾 "Allow write access"。然后配置 SSH：
+
+```bash
+{ echo "Host github.com"; echo "  IdentityFile /root/.ssh/bedrock_deploy"; echo "  IdentitiesOnly yes"; } >> /root/.ssh/config
+```
+
+```bash
+git clone git@github.com:SDZ0Z6/bedrock.git /opt/bedrock
+```
+
+</details>
+
+阿里云吉隆坡访问 GitHub 是通的，不用配代理（如果 ECS 在中国大陆则另说）。
+
+### 5.2 传台账
+
+`cred.xlsx` 里是 AWS 密钥，永远不进仓库，**从你 Windows 本地**传：
 
 ```bash
 scp -i C:\path\to\your-key.pem cred.xlsx root@<ECS_IP>:/opt/bedrock/
 ```
 
-**不要传本地的 `.env`**——里面的 `SECRET_KEY` 和明文口令是给本地用的，服务器上
-第 6 章会重新生成一份更严的。
+`.env` 不用传——第 6 章会在服务器上重新生成一份更严的（本地那份的口令是明文，
+服务器上要用哈希）。
 
-### 5.3 回到服务器，收紧权限
+### 5.3 收紧权限
 
 ```bash
 chown -R bedrock:bedrock /opt/bedrock
@@ -163,7 +184,18 @@ chmod 750 /opt/bedrock
 chmod 640 /opt/bedrock/cred.xlsx
 ```
 
-`cred.xlsx` 里是 AWS 密钥，`640` 表示只有 `bedrock` 用户和同组能读。
+`cred.xlsx` 的 `640` 表示只有 `bedrock` 用户和同组能读。
+
+代码归 `bedrock` 了，但你是用 root 跑 `git pull`。git 2.35 之后遇到「仓库属主
+不是当前用户」会直接拒绝（dubious ownership），所以要显式声明这个目录可信，
+否则第一次更新代码就会卡住：
+
+```bash
+git config --global --add safe.directory /opt/bedrock
+```
+
+> 想确认拉下来的代码是对的，可以跑一遍测试（第 6 章装完依赖之后）：
+> `cd /opt/bedrock && .venv/bin/python -m pytest`，应该全过且不联网。
 
 ---
 
@@ -497,18 +529,36 @@ systemctl restart bedrock
 
 ### 更新代码
 
-本地用第 5.1 章那条 `rsync` 命令重跑一遍（它只传改动的部分，且不会碰 `.env`
-和 `cred.xlsx`）。然后在服务器上：
+本地 `git push` 之后，在服务器上：
 
 ```bash
-chown -R bedrock:bedrock /opt/bedrock/src && systemctl restart bedrock
+cd /opt/bedrock && git pull
 ```
 
-依赖有变动时，重启前先补一句：
+```bash
+chown -R bedrock:bedrock /opt/bedrock && systemctl restart bedrock
+```
+
+`git pull` **不会碰 `.env` 和 `cred.xlsx`**——它们在 `.gitignore` 里，git 根本不
+管它们，所以更新代码永远不会覆盖掉你的配置和台账。
+
+依赖有变动时（`pyproject.toml` 改了），重启前先补一句：
 
 ```bash
 cd /opt/bedrock && .venv/bin/pip install -e ".[deploy]"
 ```
+
+出问题想回退到上一个版本：
+
+```bash
+cd /opt/bedrock && git log --oneline | head -5
+```
+
+```bash
+cd /opt/bedrock && git checkout <上一个提交号> && systemctl restart bedrock
+```
+
+回到最新：`git checkout master && git pull`。
 
 ### 更新台账（加账号 / 改预算）
 
@@ -551,6 +601,9 @@ scp -i C:\path\to\your-key.pem root@<ECS_IP>:/opt/bedrock/cred.xlsx ./backup-cre
 | CloudWatch 页面空白但成本页正常 | AK/SK 缺 CloudWatch 权限，看 README 的《AK/SK 需要什么权限》 |
 | certbot 签发失败 | 80 端口不通，或 DNS 没指到这台机器。certbot 需要从公网回访 80 |
 | 改了 `.env` 不生效 | `.env` 是启动时读的，改完要 `systemctl restart bedrock` |
+| `git pull` 报 local changes 冲突 | 服务器上不该改代码。`git checkout -- .` 丢弃本地改动后再拉（不会碰 `.env` / `cred.xlsx`） |
+| `git clone` 提示目录已存在 | `/opt/bedrock` 已经有内容。建用户时要加 `--no-create-home`，见 4.2 |
+| `git pull` 报 detected dubious ownership | 代码归 `bedrock` 而你用 root 跑 git。执行 `git config --global --add safe.directory /opt/bedrock`，见 5.3 |
 
 ---
 
