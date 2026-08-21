@@ -4,6 +4,9 @@
 # 含 AWS AK/SK
 cred.xlsx
 ~$*.xlsx
+# 账号管理页每次写入前的自动备份，里面同样是明文 AK/SK
+ledger-backups/
+ledger-audit.log
 
 # Python
 __pycache__/

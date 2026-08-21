@@ -17,6 +17,7 @@
     chart           堆叠柱状图（SVG），图表色板的唯一来源
     dates           日期区间解析与快捷项
     auth / views    Web 层：登录蓝图与页面蓝图
+    accounts        账号管理页：台账的增 / 改 / 停用
     filters         Jinja 过滤器与全局
 """
 
@@ -28,6 +29,7 @@ from flask import Flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from . import config
+from .accounts import bp as accounts_bp
 from .auth import bp as auth_bp
 from .filters import register_filters
 from .views import bp as views_bp
@@ -69,5 +71,6 @@ def create_app(**overrides: object) -> Flask:
     register_filters(app)
     app.register_blueprint(auth_bp)
     app.register_blueprint(views_bp)
+    app.register_blueprint(accounts_bp)
     app.after_request(_security_headers)
     return app

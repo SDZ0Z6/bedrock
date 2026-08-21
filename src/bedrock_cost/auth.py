@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hmac
+import secrets
 import threading
 import time
 from functools import wraps
@@ -88,6 +89,37 @@ def login_required(view):
     def wrapper(*args, **kwargs):
         if not session.get("user"):
             return redirect(url_for("auth.login", next=request.full_path))
+        return view(*args, **kwargs)
+
+    return wrapper
+
+
+# ------------------------------------------------------------------ CSRF
+# 会话 cookie 是 SameSite=Lax，浏览器本来就不会把它带上跨站 POST，所以这层是
+# 冗余保护。留着的理由是账号管理页能改预算、停用账号，值得多一道；成本也就是
+# 表单里多一个隐藏域。
+def csrf_token() -> str:
+    """取本会话的令牌，没有就现生成一个（模板里当全局函数用）。"""
+    token = session.get("csrf")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf"] = token
+    return token
+
+
+def csrf_ok() -> bool:
+    expected = session.get("csrf") or ""
+    return bool(expected) and hmac.compare_digest(expected, request.form.get("csrf") or "")
+
+
+def csrf_protect(view):
+    """给 POST 视图用。放在 login_required 里侧，先认人再验令牌。"""
+
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if not csrf_ok():
+            flash("表单已过期（会话可能已重启），请刷新页面后重试。", "error")
+            return redirect(request.referrer or url_for("main.index"))
         return view(*args, **kwargs)
 
     return wrapper

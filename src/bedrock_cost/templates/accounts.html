@@ -1,0 +1,324 @@
+{% extends "shell.html" %}
+{% block title %}账号管理 · Bedrock 成本监控{% endblock %}
+{% block page_title %}账号管理{% endblock %}
+
+{% block page_actions %}
+  {% if not fatal %}
+    <button class="btn btn-primary" type="button" data-open="dlg-create">
+      <span class="plus">＋</span> 新增账号
+    </button>
+  {% endif %}
+{% endblock %}
+
+{# 校验没过时的错误清单，显示在对应的弹窗里——用户此刻正看着那儿 #}
+{% macro error_box(messages) -%}
+  <div class="alert alert-error">
+    <strong>没有保存：</strong>
+    <ul class="error-list">{% for message in messages %}<li>{{ message }}</li>{% endfor %}</ul>
+  </div>
+{%- endmacro %}
+
+{# 新增和修改共用同一组字段。uid 用来生成不重复的 id，好让 label 对得上。
+   凭证只在新增时出现，这是「编辑改不了 AK/SK」在模板层的体现。 #}
+{% macro fields(uid, values, creating) -%}
+  <div class="form-grid">
+    <div class="field">
+      <label for="{{ uid }}-partner">上游</label>
+      <input id="{{ uid }}-partner" name="partner" required maxlength="64"
+             value="{{ values.get('partner', '') }}">
+    </div>
+    <div class="field">
+      <label for="{{ uid }}-account">账号 ID</label>
+      <input id="{{ uid }}-account" name="account" required inputmode="numeric"
+             pattern="[0-9]{12}" title="12 位数字的 AWS 账号 ID"
+             placeholder="123456789012" value="{{ values.get('account', '') }}">
+    </div>
+    <div class="field">
+      <label for="{{ uid }}-budget">预算</label>
+      <input id="{{ uid }}-budget" name="budget" required inputmode="decimal"
+             placeholder="100000" value="{{ values.get('budget', '') }}">
+    </div>
+    <div class="field">
+      <label for="{{ uid }}-tag-ratio">TAG 比率</label>
+      <input id="{{ uid }}-tag-ratio" name="tag_ratio" required inputmode="decimal"
+             value="{{ values.get('tag_ratio', '1') }}">
+    </div>
+    <div class="field">
+      <label for="{{ uid }}-untag-ratio">UNTAG 比率</label>
+      <input id="{{ uid }}-untag-ratio" name="untag_ratio" required inputmode="decimal"
+             value="{{ values.get('untag_ratio', '1') }}">
+    </div>
+    <div class="field field-full">
+      <label for="{{ uid }}-tag">TAG（可选，留空则用默认标签键 {{ tag_key }}）</label>
+      <input id="{{ uid }}-tag" name="tag_spec" placeholder="{{ tag_key }}=migXXXXXXXX"
+             value="{{ values.get('tag_spec', '') }}">
+    </div>
+
+    {% if creating %}
+      <div class="field">
+        <label for="{{ uid }}-ak">AK</label>
+        {# 关掉自动填充：浏览器会把这里当登录框，往里塞保存过的密码 #}
+        <input id="{{ uid }}-ak" name="ak" required autocomplete="off" spellcheck="false"
+               placeholder="AKIA…">
+      </div>
+      <div class="field">
+        <label for="{{ uid }}-sk">SK</label>
+        <input id="{{ uid }}-sk" name="sk" type="password" required
+               autocomplete="new-password" spellcheck="false" placeholder="写入后不再回显">
+      </div>
+      <p class="form-hint field-full">
+        AK / SK 只在这里填一次，之后既不回显也不可改。要更换凭证请停用旧账号、再新建一条。
+      </p>
+    {% endif %}
+  </div>
+{%- endmacro %}
+
+
+{% block content %}
+
+{% if fatal %}
+  <div class="alert alert-error"><strong>读不到台账：</strong> {{ fatal }}</div>
+{% else %}
+
+{# 兜底：所有错误都该显示在某个弹窗里，这里只防万一 #}
+{% if errors and not open_create and not edit_key %}
+  {{ error_box(errors) }}
+{% endif %}
+
+<noscript>
+  <div class="alert alert-warn">
+    这一页的新增、修改、停用都用弹窗，需要浏览器开启 JavaScript。
+    关掉 JS 的话只能看，不能改。
+  </div>
+</noscript>
+
+<section class="card">
+  <div class="card-head">
+    <h2>账号台账</h2>
+    <span class="card-note">
+      {{ excel_name }} · 共 {{ accounts | length }} 个账号，
+      启用 {{ enabled_count }} 个{% if accounts | length > enabled_count %}，
+      停用 {{ accounts | length - enabled_count }} 个{% endif %}
+    </span>
+  </div>
+
+  {% if not accounts %}
+    <p class="empty">台账里还没有账号，用右上角的「新增账号」加一个。</p>
+  {% else %}
+  <div class="table-scroll">
+    <table class="wide-table accounts-table">
+      <thead>
+        <tr>
+          <th>状态</th>
+          <th>上游</th>
+          <th>账号 ID</th>
+          <th class="num">预算</th>
+          <th class="num">TAG 比率</th>
+          <th class="num">UNTAG 比率</th>
+          <th>TAG</th>
+          <th>AK</th>
+          <th class="col-actions">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for account in accounts %}
+          <tr {% if not account.enabled %}class="row-off"{% endif %}>
+            <td class="col-state">
+              {% if account.enabled %}
+                <span class="dot dot-on"></span>启用
+              {% else %}
+                <span class="dot dot-off"></span>停用
+              {% endif %}
+            </td>
+            <td>{{ account.partner }}</td>
+            <td class="cell-id">{{ account.account }}</td>
+            <td class="num">{{ account.budget | money }}</td>
+            <td class="num">{{ account.tag_ratio | ratio }}</td>
+            <td class="num">{{ account.untag_ratio | ratio }}</td>
+            <td>
+              {% if account.tag_spec %}
+                <code>{{ account.tag_spec }}</code>
+              {% else %}
+                <span class="tone-muted" title="台账 TAG 列留空，回落到 .env 里的 TAG_KEY">默认 {{ tag_key }}</span>
+              {% endif %}
+            </td>
+            <td>
+              {# SK 任何时候都不出现在页面上；AK 也只露头尾 #}
+              {% if account.ak %}
+                <code title="只读，如需更换请停用后新建">{{ account.ak_masked }}</code>
+              {% else %}
+                <span class="tone-danger" title="没有凭证，所有查询页都取不到这个账号的数">缺凭证</span>
+              {% endif %}
+            </td>
+            <td class="row-actions">
+              <button class="btn btn-sm" type="button" data-open="dlg-edit-{{ loop.index }}"
+                      title="修改 {{ account.partner }} / {{ account.account }}">修改</button>
+              {% if account.enabled %}
+                <button class="btn btn-sm btn-danger" type="button" data-open="dlg-off-{{ loop.index }}"
+                        title="停用 {{ account.account }}">停用</button>
+              {% else %}
+                {# 恢复是安全且可逆的，不值得再拦一道；<form> 放在 <td> 里是合法的 #}
+                <form class="inline-form" method="post" action="{{ url_for('accounts.toggle') }}">
+                  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+                  <input type="hidden" name="key" value="{{ account.key }}">
+                  <input type="hidden" name="enabled" value="1">
+                  <button class="btn btn-sm" type="submit" title="恢复 {{ account.account }}">恢复</button>
+                </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+
+<!-- ------------------------------------------------ 弹窗 -->
+{# <dialog> 不能放在 <table> 里，统一收在表格后面。showModal() 会把它提到
+   顶层图层，所以在 DOM 里的位置不影响显示。 #}
+
+<dialog class="modal" id="dlg-create" {% if open_create %}data-reopen{% endif %}>
+  <form method="post" action="{{ url_for('accounts.create') }}" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <header class="modal-head">
+      <h2>新增账号</h2>
+      <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+    </header>
+    <div class="modal-body">
+      {% if open_create and errors %}{{ error_box(errors) }}{% endif %}
+      {{ fields('new', create_form, true) }}
+    </div>
+    <footer class="modal-foot">
+      <span class="card-note">写入前会自动备份台账</span>
+      <div class="modal-btns">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn btn-primary" type="submit">添加账号</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
+{% for account in accounts %}
+  {% set current = {
+       'partner': account.partner,
+       'account': account.account,
+       'budget': account.budget | ratio,
+       'tag_ratio': account.tag_ratio | ratio,
+       'untag_ratio': account.untag_ratio | ratio,
+       'tag_spec': account.tag_spec,
+     } %}
+  {# 校验没过时回填用户刚填的值，别让人重打一遍 #}
+  {% set values = edit_form if edit_key == account.key else current %}
+
+  <dialog class="modal" id="dlg-edit-{{ loop.index }}"
+          {% if edit_key == account.key %}data-reopen{% endif %}>
+    <form method="post" action="{{ url_for('accounts.update') }}" autocomplete="off">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="key" value="{{ account.key }}">
+      <header class="modal-head">
+        <h2>修改账号</h2>
+        <span class="modal-sub">{{ account.partner }} / {{ account.account }}</span>
+        <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+      </header>
+      <div class="modal-body">
+        {% if edit_key == account.key and errors %}{{ error_box(errors) }}{% endif %}
+        {{ fields('e' ~ loop.index, values, false) }}
+        <p class="form-hint">
+          AK <code>{{ account.ak_masked or '（缺凭证）' }}</code> 不可修改。
+          要更换凭证请停用这个账号、再用新凭证新建一条。
+        </p>
+      </div>
+      <footer class="modal-foot">
+        <span class="card-note">没有实际改动时不会写文件</span>
+        <div class="modal-btns">
+          <button class="btn" type="button" data-close>取消</button>
+          <button class="btn btn-primary" type="submit">保存</button>
+        </div>
+      </footer>
+    </form>
+  </dialog>
+
+  {% if account.enabled %}
+    <dialog class="modal modal-sm" id="dlg-off-{{ loop.index }}">
+      <form method="post" action="{{ url_for('accounts.toggle') }}">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="key" value="{{ account.key }}">
+        <input type="hidden" name="enabled" value="0">
+        <header class="modal-head">
+          <h2>停用账号</h2>
+          <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+        </header>
+        <div class="modal-body">
+          <p class="confirm-lead">
+            要停用 <strong>{{ account.partner }} / {{ account.account }}</strong> 吗？
+          </p>
+          <ul class="confirm-list">
+            <li>它会从概览、成本和使用情况、模型用量、模型配额四个页面消失，不再参与预算合计。</li>
+            <li>不再对它发起 Cost Explorer 查询（省钱）。</li>
+            <li>台账里的行、凭证和 TAG 配置都保留，随时可以在这一页恢复。</li>
+          </ul>
+        </div>
+        <footer class="modal-foot">
+          <div class="modal-btns">
+            <button class="btn" type="button" data-close>取消</button>
+            <button class="btn btn-danger-solid" type="submit">确定停用</button>
+          </div>
+        </footer>
+      </form>
+    </dialog>
+  {% endif %}
+{% endfor %}
+
+<footer class="meta">
+  <span>改动直接写回 <code>{{ excel_name }}</code>，写入前自动备份到 <code>ledger-backups/</code>（保留最近 20 份）</span>
+  <span>操作记录：<code>ledger-audit.log</code></span>
+  <span class="tone-danger">台账请只从这一页改——本地另存的 {{ excel_name }} 再 scp 上来会把这里的改动整个覆盖</span>
+  <span>生成于 {{ generated_at }}</span>
+</footer>
+
+<script>
+(function () {
+  // 用事件委托，不给每个按钮单独挂监听——一页上可能有几十个弹窗触发点
+  document.addEventListener('click', function (event) {
+    if (!(event.target instanceof Element)) return;
+
+    var opener = event.target.closest('[data-open]');
+    if (opener) {
+      var target = document.getElementById(opener.getAttribute('data-open'));
+      if (target) {
+        target.showModal();
+        // showModal 默认聚焦第一个可聚焦元素，这里显式落到第一个输入框
+        var first = target.querySelector('input:not([type=hidden])');
+        if (first) first.focus();
+      }
+      return;
+    }
+
+    var closer = event.target.closest('[data-close]');
+    if (closer) {
+      var owner = closer.closest('dialog');
+      if (owner) owner.close();
+    }
+  });
+
+  document.querySelectorAll('dialog.modal').forEach(function (dialog) {
+    // 点遮罩关闭。dialog 自身没有内边距、内容铺满，所以只有点在遮罩上时
+    // event.target 才会是 dialog 本身
+    dialog.addEventListener('click', function (event) {
+      if (event.target === dialog) dialog.close();
+    });
+  });
+
+  // 服务端说这次提交没通过校验：把对应的弹窗重新打开，里面已经带着错误和回填值
+  var reopen = document.querySelector('dialog[data-reopen]');
+  if (reopen) {
+    reopen.showModal();
+    var bad = reopen.querySelector('input:not([type=hidden])');
+    if (bad) bad.focus();
+  }
+})();
+</script>
+
+{% endif %}
+{% endblock %}
