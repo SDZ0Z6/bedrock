@@ -20,6 +20,8 @@ from bedrock_cost.excel_source import LedgerConflict, load_accounts
 from .conftest import LEDGER_HEADER, LEDGER_ROWS, write_ledger
 
 CSRF_PATTERN = re.compile(r'name="csrf" value="([^"]+)"')
+# <dialog id="…" … data-reopen> —— 属性形式，不会误命中脚本里的 dialog[data-reopen]
+REOPEN_PATTERN = re.compile(r'id="(dlg-[\w-]+)"[^>]*\sdata-reopen>')
 
 # 一份合法的新账号表单，用例按需覆盖其中几项
 NEW_FORM = {
@@ -111,21 +113,73 @@ def test_页面列出全部账号且不泄露凭证(admin):
     assert "AKIAFAKE…" in html
 
 
-def test_每个账号各有一套编辑和停用表单(admin):
+def test_新增入口在页头而不是页面里(admin):
     html = admin.get("/accounts/").get_data(as_text=True)
-    # 表单靠 HTML5 的 form="…" 属性和单元格里的输入框对上，数量必须一致
-    assert html.count('id="edit-') == len(LEDGER_ROWS)
-    assert html.count('id="toggle-') == len(LEDGER_ROWS)
-    assert html.count('form="edit-1"') >= len(excel_source.EDITABLE)
+    head, _, body = html.partition('<div class="page-actions">')
+    assert 'data-open="dlg-create"' in body.partition("</div>")[0]
 
 
-def test_停用的账号在页面上仍然可见并可恢复(admin, ledger):
+def test_每个账号各有一个修改弹窗(admin):
+    html = admin.get("/accounts/").get_data(as_text=True)
+    assert html.count('id="dlg-edit-') == len(LEDGER_ROWS)
+    assert html.count('data-open="dlg-edit-') == len(LEDGER_ROWS)
+    # 弹窗里是完整的一套可编辑字段，凭证不在其中
+    for name in excel_source.EDITABLE:
+        assert f'name="{name}"' in html
+    assert 'name="ak"' in html  # 只在新增弹窗里
+    assert html.count('name="ak"') == 1
+    assert html.count('name="sk"') == 1
+
+
+def test_启用中的账号点停用要先过确认弹窗(admin):
+    html = admin.get("/accounts/").get_data(as_text=True)
+    # 两个账号都启用中，各有一个确认弹窗；按钮只负责打开它，不直接提交
+    assert html.count('id="dlg-off-') == len(LEDGER_ROWS)
+    assert html.count('data-open="dlg-off-') == len(LEDGER_ROWS)
+    assert "确定停用" in html
+    # 确认弹窗里才是真正的 POST 表单
+    assert html.count(f'action="/accounts/toggle"') == len(LEDGER_ROWS)
+
+
+def test_停用的账号在页面上仍然可见并可一键恢复(admin, ledger):
     target = by_account("111111111111")
     post(admin, "/accounts/toggle", key=target.key, enabled="0")
     html = admin.get("/accounts/").get_data(as_text=True)
     assert "111111111111" in html
-    assert "恢复" in html
     assert "row-off" in html
+    # 恢复是安全可逆的，不再拦一道确认：它是 <td> 里的一个直接提交表单
+    assert "恢复" in html
+    assert html.count('id="dlg-off-') == len(LEDGER_ROWS) - 1
+    assert 'value="1"' in html
+
+
+def reopened_dialogs(html: str) -> list[str]:
+    """页面加载后会自动弹回来的窗口（校验没过时服务端打的标记）。"""
+    return REOPEN_PATTERN.findall(html)
+
+
+def test_新增校验失败会重新弹出新增窗口(admin, ledger):
+    response = post(admin, "/accounts/create", **{**NEW_FORM, "budget": "abc"})
+    html = response.get_data(as_text=True)
+    assert reopened_dialogs(html) == ["dlg-create"]
+    assert 'value="abc"' in html
+
+
+def test_修改校验失败会重新弹出那一行的窗口(admin, ledger):
+    target = by_account("111111111111")  # 台账里第一行
+    response = post(
+        admin, "/accounts/update",
+        key=target.key, partner="ALPHA", account="111111111111",
+        budget="abc", tag_ratio="1", untag_ratio="1", tag_spec="",
+    )
+    html = response.get_data(as_text=True)
+    # 只弹这一个，而且必须是这个账号的窗口，不能是别人的
+    assert reopened_dialogs(html) == ["dlg-edit-1"]
+    assert 'value="abc"' in html
+
+
+def test_没出错时不会自动弹窗(admin):
+    assert reopened_dialogs(admin.get("/accounts/").get_data(as_text=True)) == []
 
 
 # ------------------------------------------------------------------ 新增
