@@ -620,3 +620,105 @@ tfoot td {
 /* Model ID 列：等宽字体，不换行 */
 .quota-table .model-id { white-space: nowrap; }
 .quota-table .model-id code { font-size: 11.5px; }
+
+/* ------------------------------------------------------- 账号管理页 */
+.error-list { margin: 6px 0 0; padding-left: 20px; }
+.error-list li { margin: 3px 0; }
+
+/* 新增表单：默认收起，出错回填时由模板加 open 展开 */
+.card-create { margin-bottom: 18px; }
+.card-create > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 14px 18px;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 600;
+  list-style: none;
+  user-select: none;
+}
+.card-create > summary::-webkit-details-marker { display: none; }
+.card-create > summary:hover { background: var(--panel-2); }
+.card-create[open] > summary { border-bottom: 1px solid var(--line); }
+.card-create .plus {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+}
+.card-create[open] .plus { background: var(--text-mute); }
+
+.create-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px;
+  padding: 18px;
+}
+.create-grid .field-tag { grid-column: span 2; }
+.create-grid .field input { width: 100%; }
+.create-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 0 18px 18px;
+}
+
+/* 行内编辑：单元格本身就是输入框，没有「进入编辑模式」这一步。
+   平时看起来和普通表格一样，聚焦时才显出边框。 */
+.accounts-table td { padding: 8px 10px; }
+.accounts-table .cell {
+  width: 100%;
+  min-width: 88px;
+  height: 30px;
+  padding: 0 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  color-scheme: dark;
+}
+.accounts-table .cell:hover { border-color: var(--line); }
+.accounts-table .cell:focus {
+  outline: none;
+  background: var(--bg);
+  border-color: var(--accent);
+}
+.accounts-table .cell-num { text-align: right; min-width: 76px; }
+.accounts-table .cell-id { min-width: 118px; font-variant-numeric: tabular-nums; }
+.accounts-table .cell-tag { min-width: 170px; }
+.accounts-table .col-actions,
+.accounts-table .row-actions { white-space: nowrap; }
+.accounts-table .row-actions { display: flex; gap: 8px; }
+
+/* 校验没过的那一行：整行标红，配合顶部的错误列表 */
+.row-bad > td { background: rgba(242,88,91,.08); }
+.row-bad .cell { border-color: rgba(242,88,91,.45); }
+
+/* 已停用：压暗但仍可读，和配额页的 row-idle 一个路数 */
+.row-off { opacity: .5; }
+.row-off:hover { opacity: .8; }
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+.dot-on { background: var(--ok); }
+.dot-off { background: var(--text-mute); }
+
+.btn-sm { height: 28px; padding: 0 11px; font-size: 12px; }
+.btn-danger { color: var(--danger); border-color: rgba(242,88,91,.35); }
+.btn-danger:hover { background: rgba(242,88,91,.12); border-color: var(--danger); }

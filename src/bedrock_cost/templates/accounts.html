@@ -1,0 +1,198 @@
+{% extends "shell.html" %}
+{% block title %}账号管理 · Bedrock 成本监控{% endblock %}
+{% block page_title %}账号管理{% endblock %}
+
+{# 提交失败时把用户刚填的值填回去，别让人重打一遍。只对出错的那一行生效。 #}
+{% macro kept(account, name, current) -%}
+{{- edit_form.get(name, current) if edit_key == account.key else current -}}
+{%- endmacro %}
+
+{% block content %}
+
+{% if errors %}
+  <div class="alert alert-error">
+    <strong>没有保存：</strong>
+    <ul class="error-list">{% for message in errors %}<li>{{ message }}</li>{% endfor %}</ul>
+  </div>
+{% endif %}
+
+{% if fatal %}
+  <div class="alert alert-error"><strong>读不到台账：</strong> {{ fatal }}</div>
+{% else %}
+
+<!-- ------------------------------------------------ 新增 -->
+<details class="card card-create" {% if open_create %}open{% endif %}>
+  <summary>
+    <span class="plus">+</span> 新增账号
+    <span class="card-note">AK / SK 只在这里填一次，之后不可见也不可改</span>
+  </summary>
+
+  <form method="post" action="{{ url_for('accounts.create') }}" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <div class="create-grid">
+      <div class="field">
+        <label for="new-partner">上游</label>
+        <input id="new-partner" name="partner" aria-label="上游" required maxlength="64"
+               value="{{ create_form.get('partner', '') }}">
+      </div>
+      <div class="field">
+        <label for="new-account">账号 ID</label>
+        <input id="new-account" name="account" required inputmode="numeric"
+               pattern="[0-9]{12}" title="12 位数字的 AWS 账号 ID"
+               placeholder="123456789012" value="{{ create_form.get('account', '') }}">
+      </div>
+      <div class="field">
+        <label for="new-budget">预算</label>
+        <input id="new-budget" name="budget" required inputmode="decimal"
+               placeholder="100000" value="{{ create_form.get('budget', '') }}">
+      </div>
+      <div class="field">
+        <label for="new-tag-ratio">TAG 比率</label>
+        <input id="new-tag-ratio" name="tag_ratio" required inputmode="decimal"
+               value="{{ create_form.get('tag_ratio', '1') }}">
+      </div>
+      <div class="field">
+        <label for="new-untag-ratio">UNTAG 比率</label>
+        <input id="new-untag-ratio" name="untag_ratio" required inputmode="decimal"
+               value="{{ create_form.get('untag_ratio', '1') }}">
+      </div>
+      <div class="field field-tag">
+        <label for="new-tag">TAG（可选）</label>
+        <input id="new-tag" name="tag_spec" placeholder="{{ tag_key }}=migXXXXXXXX"
+               value="{{ create_form.get('tag_spec', '') }}">
+      </div>
+      <div class="field">
+        <label for="new-ak">AK</label>
+        {# 关掉自动填充：浏览器会把这里当登录框，往里塞保存过的密码 #}
+        <input id="new-ak" name="ak" required autocomplete="off" spellcheck="false"
+               placeholder="AKIA…">
+      </div>
+      <div class="field field-tag">
+        <label for="new-sk">SK</label>
+        <input id="new-sk" name="sk" type="password" required autocomplete="new-password"
+               spellcheck="false" placeholder="写入后不再回显">
+      </div>
+    </div>
+    <div class="create-foot">
+      <button class="btn btn-primary" type="submit">添加账号</button>
+      <span class="card-note">保存前会自动备份一份台账到 ledger-backups/</span>
+    </div>
+  </form>
+</details>
+
+<!-- ------------------------------------------------ 列表 -->
+{# HTML 不允许 <form> 直接包 <tr>，所以表单放在表格外面，
+   单元格里的输入框靠 HTML5 的 form="…" 属性挂上去。 #}
+<div hidden>
+  {% for account in accounts %}
+    <form id="edit-{{ loop.index }}" method="post" action="{{ url_for('accounts.update') }}">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="key" value="{{ account.key }}">
+    </form>
+    <form id="toggle-{{ loop.index }}" method="post" action="{{ url_for('accounts.toggle') }}"
+          {% if account.enabled %}onsubmit="return confirm('停用后，该账号会从概览、成本、用量、配额四个页面全部消失（历史数据和凭证都保留，可随时恢复）。确定停用？')"{% endif %}>
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="key" value="{{ account.key }}">
+      <input type="hidden" name="enabled" value="{{ '0' if account.enabled else '1' }}">
+    </form>
+  {% endfor %}
+</div>
+
+<section class="card">
+  <div class="card-head">
+    <h2>账号台账</h2>
+    <span class="card-note">
+      {{ excel_name }} · 共 {{ accounts | length }} 个账号，
+      启用 {{ enabled_count }} 个{% if accounts | length > enabled_count %}，
+      停用 {{ accounts | length - enabled_count }} 个{% endif %}
+    </span>
+  </div>
+
+  {% if not accounts %}
+    <p class="empty">台账里还没有账号，用上面的「新增账号」加一个。</p>
+  {% else %}
+  <div class="table-scroll">
+    <table class="wide-table accounts-table">
+      <thead>
+        <tr>
+          <th>状态</th>
+          <th>上游</th>
+          <th>账号 ID</th>
+          <th class="num">预算</th>
+          <th class="num">TAG 比率</th>
+          <th class="num">UNTAG 比率</th>
+          <th>TAG</th>
+          <th>AK</th>
+          <th class="col-actions">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for account in accounts %}
+          <tr class="{% if not account.enabled %}row-off{% endif %}
+                     {% if edit_key == account.key %}row-bad{% endif %}">
+            <td>
+              {% if account.enabled %}
+                <span class="dot dot-on" title="启用中"></span>
+              {% else %}
+                <span class="dot dot-off" title="已停用"></span>停用
+              {% endif %}
+            </td>
+            <td>
+              <input class="cell" form="edit-{{ loop.index }}" name="partner" aria-label="上游" required maxlength="64"
+                     value="{{ kept(account, 'partner', account.partner) }}">
+            </td>
+            <td>
+              <input class="cell cell-id" form="edit-{{ loop.index }}" name="account" aria-label="账号 ID" required
+                     inputmode="numeric" pattern="[0-9]{12}" title="12 位数字的 AWS 账号 ID"
+                     value="{{ kept(account, 'account', account.account) }}">
+            </td>
+            <td class="num">
+              <input class="cell cell-num" form="edit-{{ loop.index }}" name="budget" aria-label="预算" required
+                     inputmode="decimal" value="{{ kept(account, 'budget', account.budget | ratio) }}">
+            </td>
+            <td class="num">
+              <input class="cell cell-num" form="edit-{{ loop.index }}" name="tag_ratio" aria-label="TAG 比率" required
+                     inputmode="decimal" value="{{ kept(account, 'tag_ratio', account.tag_ratio | ratio) }}">
+            </td>
+            <td class="num">
+              <input class="cell cell-num" form="edit-{{ loop.index }}" name="untag_ratio" aria-label="UNTAG 比率" required
+                     inputmode="decimal" value="{{ kept(account, 'untag_ratio', account.untag_ratio | ratio) }}">
+            </td>
+            <td>
+              <input class="cell cell-tag" form="edit-{{ loop.index }}" name="tag_spec" aria-label="TAG"
+                     placeholder="{{ tag_key }}" value="{{ kept(account, 'tag_spec', account.tag_spec) }}">
+            </td>
+            <td>
+              {# SK 任何时候都不出现在页面上；AK 也只露头尾 #}
+              {% if account.ak %}
+                <code title="只读，如需更换请停用后新建">{{ account.ak_masked }}</code>
+              {% else %}
+                <span class="tone-danger" title="没有凭证，所有查询页都取不到这个账号的数">缺凭证</span>
+              {% endif %}
+            </td>
+            <td class="row-actions">
+              <button class="btn btn-sm btn-primary" form="edit-{{ loop.index }}" type="submit"
+                      title="保存 {{ account.partner }} / {{ account.account }} 的改动">保存</button>
+              <button class="btn btn-sm {% if account.enabled %}btn-danger{% endif %}"
+                      form="toggle-{{ loop.index }}" type="submit"
+                      title="{{ '停用' if account.enabled else '恢复' }} {{ account.account }}">
+                {{ '停用' if account.enabled else '恢复' }}
+              </button>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+
+<footer class="meta">
+  <span>改动直接写回 <code>{{ excel_name }}</code>，写入前自动备份到 <code>ledger-backups/</code>（保留最近 20 份）</span>
+  <span>操作记录：<code>ledger-audit.log</code></span>
+  <span class="tone-danger">台账请只从这一页改——本地另存的 {{ excel_name }} 再 scp 上来会把这里的改动整个覆盖</span>
+  <span>生成于 {{ generated_at }}</span>
+</footer>
+
+{% endif %}
+{% endblock %}

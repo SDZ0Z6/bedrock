@@ -562,6 +562,21 @@ cd /opt/bedrock && git checkout <上一个提交号> && systemctl restart bedroc
 
 ### 更新台账（加账号 / 改预算）
 
+> **从这一版开始，日常增删改账号请直接用页面上的「账号管理」，不要再 scp 覆盖。**
+> 两个入口同时用会互相冲掉：你本地那份 `cred.xlsx` 不含页面上做过的改动，一传
+> 上去就把它们全抹了。下面的 scp 流程只在**首次部署**和**从备份恢复**时用。
+>
+> 页面写入需要 `bedrock` 用户对 `/opt/bedrock` 目录有写权限（原子替换要在同目录
+> 建临时文件），systemd 单元里的 `ReadWritePaths=/opt/bedrock` 已经满足；另外它
+> 会在那里建 `ledger-backups/` 和 `ledger-audit.log`：
+>
+> ```bash
+> ls -l /opt/bedrock/ledger-backups/ && tail /opt/bedrock/ledger-audit.log
+> ```
+>
+> `ledger-backups/` 里是**明文 AK/SK 的完整副本**，和 `cred.xlsx` 同等敏感，
+> 备份服务器时别漏了它，公开分享时更别带上。
+
 直接传新的 `cred.xlsx` 覆盖即可，**不用重启**——应用按文件的 mtime 判断，
 刷新页面就生效：
 

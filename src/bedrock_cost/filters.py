@@ -5,6 +5,7 @@ from __future__ import annotations
 from flask import Flask
 
 from . import chart, config
+from .auth import csrf_token
 
 
 def money(value: float | None) -> str:
@@ -37,3 +38,5 @@ def register_filters(app: Flask) -> None:
     # 图表色板的唯一来源是 chart.py，模板里的图例和表格色块取同一套值，
     # 不在 CSS 里重复维护一遍
     app.jinja_env.globals["series_color"] = chart.color_for
+    # 表单里的隐藏域直接调它，不用每个视图都往模板塞一遍
+    app.jinja_env.globals["csrf_token"] = csrf_token
