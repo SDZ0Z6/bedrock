@@ -638,3 +638,133 @@ tfoot td {
   color: var(--text-mute);
   vertical-align: 1px;
 }
+
+/* ------------------------------------------------------- 账号管理页 */
+/* 页头右上角的操作区。这是第一个用 page_actions 块的页面 */
+.page-actions { display: flex; align-items: center; gap: 10px; }
+.plus { font-size: 15px; line-height: 1; margin-right: 2px; }
+
+.accounts-table .col-state { white-space: nowrap; }
+.accounts-table .cell-id { font-variant-numeric: tabular-nums; }
+.accounts-table .col-actions,
+.accounts-table .row-actions { white-space: nowrap; }
+.accounts-table .row-actions { display: flex; gap: 8px; }
+/* 「恢复」是 <td> 里的一个真表单（这是合法的），别让它把按钮撑成块级 */
+.inline-form { display: inline-flex; margin: 0; }
+
+/* 已停用：压暗但仍可读，和配额页的 row-idle 一个路数 */
+.row-off { opacity: .5; }
+.row-off:hover { opacity: .85; }
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+.dot-on { background: var(--ok); }
+.dot-off { background: var(--text-mute); }
+
+.btn-sm { height: 28px; padding: 0 11px; font-size: 12px; }
+.btn-danger { color: var(--danger); border-color: rgba(242,88,91,.35); }
+.btn-danger:hover { background: rgba(242,88,91,.12); border-color: var(--danger); }
+/* 确认弹窗里那颗真正执行停用的按钮，要比列表里的入口更显眼 */
+.btn-danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; }
+.btn-danger-solid:hover { background: #d84447; border-color: #d84447; }
+
+/* ------------------------------------------------------- 弹窗 */
+/* 用原生 <dialog>：自带遮罩、ESC 关闭和焦点陷阱，不用为这些各写一遍 */
+dialog.modal {
+  /* padding 必须是 0：点遮罩关闭靠的是「event.target === dialog」，
+     dialog 上有内边距的话，点在那圈内边距上也会被当成点遮罩 */
+  padding: 0;
+  width: min(620px, calc(100% - 32px));
+  max-height: calc(100% - 64px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 18px 48px rgba(0,0,0,.5);
+  overflow: visible;
+}
+dialog.modal-sm { width: min(440px, calc(100% - 32px)); }
+dialog.modal::backdrop { background: rgba(6, 8, 12, .66); }
+
+/* 表单撑满弹窗，并让中间的 body 单独滚动——头尾始终可见 */
+dialog.modal > form {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 64px);
+  min-height: 0;
+}
+
+.modal-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.modal-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.modal-sub { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.modal-x {
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-mute);
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+}
+.modal-x:hover { background: var(--panel-2); color: var(--text); }
+
+.modal-body { padding: 18px; overflow-y: auto; }
+.modal-body .alert:last-child { margin-bottom: 0; }
+
+.modal-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 14px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-soft);
+}
+.modal-btns { display: flex; gap: 10px; margin-left: auto; }
+
+/* 弹窗里的表单栅格 */
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+}
+.form-grid .field-full { grid-column: 1 / -1; }
+.form-grid .field input { width: 100%; }
+.form-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-mute);
+}
+.modal-body > .form-hint { margin-top: 14px; }
+
+/* 停用确认 */
+.confirm-lead { margin: 0 0 10px; font-size: 14px; }
+.confirm-list { margin: 0; padding-left: 20px; }
+.confirm-list li { margin: 6px 0; font-size: 12.5px; line-height: 1.7; color: var(--text-dim); }
+
+.error-list { margin: 6px 0 0; padding-left: 20px; }
+.error-list li { margin: 3px 0; }
+
+@media (max-width: 620px) {
+  .modal-foot { flex-direction: column; align-items: stretch; }
+  .modal-btns { margin-left: 0; }
+  .modal-btns .btn { flex: 1; justify-content: center; }
+}
+

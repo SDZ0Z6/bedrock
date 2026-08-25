@@ -141,6 +141,10 @@ python -m bedrock_cost
 
 不调用 Cost Explorer，所以看今天花了多少是不花 CE 钱的。
 
+### 账号管理 `/accounts/`
+
+不调用任何 AWS API，只读写本地的 `cred.xlsx`，**不花钱**。
+
 ### 概览 `/`
 
 | 调用 | 次数 | 公式 | 计费 |
@@ -573,14 +577,77 @@ https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/
 - 页脚「清空缓存」清掉全部缓存
 - 改完 `cred.xlsx` 直接刷新页面即可生效，不用重启服务
 
-## 增加账号
+## 账号管理页 `/accounts/`
 
-直接在 `cred.xlsx` 里追加一行就行。表头大小写、前后空格、**列顺序**都不敏感，多余的列会被忽略。
+台账的增删改都在这一页，不用再手工改 Excel 再传上去。表格本身是只读的，
+所有改动都走弹窗，避免手滑碰到输入框就改了数据。
+
+| 操作 | 入口 | 说明 |
+|---|---|---|
+| 新增 | 页面右上角「＋ 新增账号」 | 弹窗里填上游 / 账号 / 预算 / 两个比率 / TAG / **AK / SK**，追加在末尾，不影响已有行 |
+| 修改 | 每行右侧「修改」 | 弹窗里改，**没有 AK/SK 这两项** |
+| 停用 | 每行右侧「停用」 | 先弹确认窗说明后果，点「确定停用」才真的写。软删：只把 `ENABLED` 列置 FALSE |
+| 恢复 | 每行右侧「恢复」 | 停用的账号在这一页仍然可见。恢复是安全可逆的，不再拦一道确认 |
+
+弹窗用的是浏览器原生的 `<dialog>`，遮罩、ESC 关闭、焦点陷阱都是浏览器自带的。
+点遮罩、点右上角 × 、点「取消」都只是关窗，不会写任何东西——**只有弹窗里那颗
+主按钮会提交**。校验没过时，对应的弹窗会带着错误提示和你刚填的值自动弹回来，
+不用重新输一遍。
+
+> 这一页依赖 JavaScript。关掉 JS 只能看，不能改（页面上会有提示）。其余四个
+> 查询页不受影响。
+
+### 凭证是单向的
+
+AK/SK 只在新建时填一次，此后既不回显也不可改——页面上只看得到掩码后的 AK
+（`AKIA…7X4Q`），SK 任何时候都不出现在 HTML 里。
+
+**要换凭证就停用旧账号、新建一条。** AWS 换 AK 本来就是签发新的、作废旧的，
+做成原地编辑反而容易停在半新半旧的状态。
+
+### 停用意味着什么
+
+停用的账号**从概览、成本和使用情况、模型用量、模型配额四个页面全部消失**，
+不再参与预算合计，也不再产生 Cost Explorer 请求（省钱）。它只在账号管理页可见。
+
+行不会被删除，所以：
+
+- 其他账号的行号不动，`account.key`（`账号#行号`）不会集体位移，各处按它建的
+  缓存键和页面上的书签都还有效；
+- 凭证和 TAG 配置原样保留，恢复之后立刻能用；
+- 被停用的账号 ID **不能**被新建的账号重新占用，否则恢复时就撞车了。
+
+### 每次写入都会做的事
+
+1. 校验（账号 12 位数字且台账内唯一、预算非负、比率大于 0、TAG 能解析出标签键）；
+2. 备份当前台账到 `ledger-backups/cred-<时间戳>.xlsx`，只保留最近 20 份；
+3. 写到同目录的临时文件，再 `os.replace()` 原子替换——中途崩了不会留下半个文件；
+4. 清掉台账缓存，并往 `ledger-audit.log` 追加一行「谁、什么时候、改了什么」（不含凭证值）。
+
+没有任何字段真的变化时（比如点了保存但什么都没改），第 2~4 步整个跳过，文件的
+mtime 都不会动。
+
+> `ledger-backups/` 里是**明文 AK/SK 的完整副本**，和 `cred.xlsx` 同等敏感。
+> 已经在 `.gitignore` 里，权限也是 640。
+
+### 手工改 Excel 还能用吗
+
+能，格式没变。表头大小写、前后空格、**列顺序**都不敏感，多余的列会被忽略：
 
 ```
 必需：PARTNER  ACCOUNT  BUDGET  TAG_RATIO  UNTAG_RATIO  AK  SK
-可选：TAG
+可选：TAG  ENABLED
 ```
+
+`ENABLED` 是这一版新加的可选列，**老台账没有这一列时所有账号都算启用**，第一次
+在页面上停用账号时会自动补上。
+
+但**上线之后请只从页面改**：本地另存一份再 scp 上去，会把页面上的改动整个覆盖掉。
+两个入口同时用，迟早丢数据。
+
+如果确实在服务器外改过台账（比如 scp 覆盖），页面上原来打开的那份就过期了——
+这时点保存会看到「台账内容和页面上看到的对不上」并拒绝写入，刷新一下即可。
+这是靠写入前核对「行号那一行的账号 ID 是否还是原来那个」实现的，宁可报错也不改错行。
 
 单个账号查询失败（凭证错误、权限不足等）只会让那一行显示错误，不影响其他账号；合计行只统计查询成功的账号。
 
@@ -606,7 +673,9 @@ https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/
 ## 安全须知
 
 - `cred.xlsx` 里的 AK/SK 是明文。这些密钥只在内存中传给 boto3，**不会**出现在页面、日志或错误信息里（`Account` 的 `repr` 屏蔽了这两个字段，CE 报错文本也会做脱敏）。
-- `.env` 和 `cred.xlsx` 已在 `.gitignore` 里，不要提交或分享。
+- `.env`、`cred.xlsx`、`ledger-backups/`、`ledger-audit.log` 都在 `.gitignore` 里，不要提交或分享。
+- 账号管理页的写操作带 CSRF 令牌。会话 cookie 本来就是 `SameSite=Lax`（浏览器不会把它带上跨站 POST），令牌是第二道。
+- **登录即可改台账**：目前是单口令，没有区分「只读」和「管理员」。谁能登录，谁就能改预算、停用账号。要区分角色需要换成真正的用户体系。
 - 给这些 AK/SK 配最小权限即可，见开头的《AK/SK 需要什么权限》。
 - 默认只监听 `127.0.0.1`。要对外提供访问，请用 gunicorn/waitress + Nginx 并启用 HTTPS，同时把 `SESSION_COOKIE_SECURE` 打开——当前的登录机制（单账号 + 内存级失败锁定）是按本地自用设计的。
 
@@ -628,10 +697,12 @@ src/bedrock_cost/
   config.py               .env 读取、默认值、项目根定位
   dates.py                CE 的自然日区间解析与快捷项（不依赖 Flask，可单独测）
   windows.py              CloudWatch 的时间窗口与粒度（含保留期自动收窄）
-  auth.py                 登录蓝图：口令校验、失败锁定、login_required
+  auth.py                 登录蓝图：口令校验、失败锁定、login_required、CSRF 令牌
   views.py                页面蓝图：概览 + 成本和使用情况 + 模型用量
+  accounts.py             账号管理蓝图：台账的增 / 改 / 停用
   filters.py              Jinja 过滤器（money / pct / ratio / compact）与全局
-  excel_source.py         读台账，解析 TAG 列，按 mtime 缓存
+  excel_source.py         读写台账：解析 TAG/ENABLED 列、按 mtime 缓存、
+                          校验 + 备份 + 原子写入
   cost_explorer.py        概览页：调 CE 并按标签拆 TAG/UNTAG，带 TTL 缓存与并发
   usage_explorer.py       成本下钻页：时间序列 + 三种维度 + 颜色槽分配
   cloudwatch_metrics.py   模型用量页：AWS/Bedrock 指标、推理配置解析、区域合并
@@ -641,7 +712,7 @@ src/bedrock_cost/
   report.py               概览页八列口径与合计
   chart.py                堆叠柱状图 + 折线图（SVG），图表色板的唯一来源
   templates/              base / shell / login / index / cost_usage / model_usage /
-                          model_quota / cost_estimate
+                          model_quota / cost_estimate / accounts
   static/style.css        深色仪表盘样式
 
 tests/                    见下节
@@ -651,8 +722,14 @@ tests/                    见下节
 
 - **应用工厂**：没有模块级的全局 `app`，一律 `create_app()`。测试可以按需造带
   不同配置的实例，也不会在 import 时就产生副作用。
-- **蓝图**：`auth`（登录）和 `main`（页面）两个，所以模板里的 endpoint 是
-  `main.index`、`auth.logout` 这种带前缀的写法。
+- **蓝图**：`auth`（登录）、`main`（查询页）、`accounts`（账号管理）三个，所以
+  模板里的 endpoint 是 `main.index`、`auth.logout`、`accounts.index` 这种带前缀
+  的写法。
+- **只有一处写台账**：`excel_source` 的 `create_account` / `update_account` /
+  `set_enabled`，它们共用同一条「加锁 → 校验 → 备份 → 原子替换 → 清缓存 → 审计」
+  的流水线。视图层只做表单进出，不直接碰 openpyxl。
+- **默认口径不含停用账号**：`load_accounts()` 只返回启用中的，账号管理页显式传
+  `include_disabled=True`。新增查询页时不用记得过滤，默认就是对的。
 - **日期逻辑不碰 request**：`resolve_range(args, today)` 收一个普通映射，视图
   里传 `request.args`，测试里传字典，不用假造请求上下文。
 - **图表色板只有一处定义**：都在 `chart.py`，模板里图例和表格的色块通过 Jinja
@@ -667,8 +744,12 @@ tests/                    见下节
 pytest
 ```
 
-437 个用例，约 8 秒跑完，**不联网、不花钱**：Cost Explorer 调用被替换成 fake，
+489 个用例，约 13 秒跑完，**不联网、不花钱**：Cost Explorer 调用被替换成 fake，
 台账指向临时 xlsx，登录口令也换成固定值（不依赖你机器上的 `.env`）。
+
+账号管理页的用例（`tests/test_accounts.py`）重点不在「功能能用」，而在「写坏了
+会怎样」：编辑路径上 AK/SK 一个字节都不能变、校验没过时文件的 mtime 都不许动、
+软删之后其他账号的 `key` 不许位移、行号对不上时宁可报错也不改错行。
 
 概览页和下钻页的 fake 都从同两个常量算消费，所以「下钻任一维度加总 == 概览总
 消费」这条不变量测出来才有意义，不会因为两边各造一套数字而虚假通过。
