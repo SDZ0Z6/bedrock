@@ -101,6 +101,13 @@ MAX_WORKERS = _number("MAX_WORKERS", 8)
 CE_TIMEOUT = _number("CE_TIMEOUT", 30)
 CE_RETRIES = _number("CE_RETRIES", 3)
 
+# ---------------------------------------------------------------- 预估成本
+# 计价档覆盖。auto = 按 ModelId 和推理配置的 ARN 自动判断跨区(global)还是
+# 本区(standard)；实测该判断和账单误差 0.06%。真遇到判错时可以强制指定：
+#   PRICE_TIER=global    全部按跨区价（便宜约 10%）
+#   PRICE_TIER=standard  全部按本区价
+PRICE_TIER = _text("PRICE_TIER", "auto").lower()
+
 # ---------------------------------------------------------------- 登录
 AUTH_USERNAME = _text("AUTH_USERNAME", "admin")
 AUTH_PASSWORD = _text("AUTH_PASSWORD")

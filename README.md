@@ -98,6 +98,9 @@ python -m bedrock_cost
 
 几点说明：
 
+- **预估成本页不需要新权限。** 它用的是模型用量页已有的 `cloudwatch:ListMetrics`
+  和 `cloudwatch:GetMetricData`；单价来自 AWS 的**公开**价目表端点，不带凭证访问，
+  所以**不需要** `pricing:GetProducts`。
 - **不需要 `ce:GetTags`。** 早期文档里列过它，那是当初排查标签键时手动用的，
   代码里并不调用。已移除。
 - **不需要任何写权限**，也不需要 `bedrock:InvokeModel`——这个平台只读监控数据，
@@ -127,6 +130,16 @@ python -m bedrock_cost
 下面的调用次数是用 botocore 的事件钩子**实测**出来的，不是照着代码数的。测试环境
 是**台账里 2 个账号、4 个美区、每个账号约 11 个应用推理配置**，你的次数按下面的
 公式换算。
+
+### 预估成本 `/cost-estimate`
+
+| 调用 | 次数 | 公式 | 计费 |
+|---|---|---|---|
+| `cloudwatch:ListMetrics` | 4 | 区域数 | 不计费 |
+| `cloudwatch:GetMetricData` | 4 | 区域数（每次 模型数×4 个 metric） | 约 $0.01/1000 metric |
+| AWS 价目表 | 1/天 | 公开 HTTP 端点 | 不计费，**不需要凭证** |
+
+不调用 Cost Explorer，所以看今天花了多少是不花 CE 钱的。
 
 ### 账号管理 `/accounts/`
 
@@ -448,6 +461,93 @@ Global cross-region model inference tokens per minute for <模型>
 在原有权限之外再加一项 `servicequotas:ListServiceQuotas`，见开头的
 《AK/SK 需要什么权限》。这个接口不计费。
 
+## 预估成本页 `/cost-estimate`
+
+Cost Explorer 的数据有一到两天延迟，今天花了多少要等到后天才看得见。这一页用
+CloudWatch 的 token 量乘 AWS 牌价，立刻给出估算：
+
+```
+估算成本 = 输入×输入价 + 输出×输出价 + 缓存读×缓存读价 + 缓存写×缓存写价
+```
+
+页面上有两块：**每天的预估花费**（按模型分色的堆叠柱状图）和**按模型明细**
+（四种 token 的量、四种单价、估算成本）。
+
+### 准不准
+
+2026-08 拿一天 10 万美金的真实账单逐模型核对过：
+
+| 模型 | CE 实际 | 预估 | 比值 |
+|---|---:|---:|---:|
+| Claude Opus 5 | 47,191.50 | 47,135.96 | 0.999 |
+| Claude Opus 4.6 | 30,783.30 | 30,779.33 | 1.000 |
+| Claude Opus 4.8 | 15,762.44 | 15,758.52 | 1.000 |
+| Claude Sonnet 4.6 | 4,248.45 | 4,248.20 | 1.000 |
+| Claude Opus 4.7 | 2,554.61 | 2,554.32 | 1.000 |
+| Claude Sonnet 5 | 1,886.17 | 1,884.54 | 0.999 |
+| **合计** | **102,428.12** | **102,362.51** | **0.999** |
+
+**误差 0.06%。**
+
+### 四个计数器互相独立，不要减
+
+`InputTokenCount` **不包含**缓存读写的 token。这一点是实测的：某天输入 32 亿、
+缓存读 765 亿——缓存读比输入大 24 倍，输入那一项不可能包含它。所以公式里输入
+直接乘单价，不用先减掉缓存。
+
+写成「(输入 − 缓存读 − 缓存写) × 输入价」的话，输入会算成负数，整体偏低 6~26%
+（实测各模型 0.74~1.01 不等，没有规律）。
+
+### 跨区和本区是两个价
+
+Global（全球跨区推理）比本区便宜约 10%。哪一档由数据自己说了算：
+
+- **直连模型**看 ModelId 前缀：`global.anthropic.*` 是跨区；`us.` / `eu.` 之类的
+  地理级跨区走本区价。
+- **应用推理配置**看 `modelArn` 里有没有不带区域的那一条
+  （`arn:aws:bedrock:::foundation-model/...`）——跨区配置会带上它。
+  刻意不看配置名：不同账号命名规则完全不同，猜名字迟早出错。
+
+判错的话整体会稳定偏 10%，很好识别。真判错了可以用 `PRICE_TIER` 强制覆盖，
+不用改代码。
+
+> 注意 AWS 并非对所有模型都给跨区折扣——实测 Claude Sonnet 4 两档价完全相同。
+
+### 单价从哪来
+
+AWS Price List 的**公开批量端点**，service code 是 `AmazonBedrockFoundationModels`：
+
+```
+https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/
+    AmazonBedrockFoundationModels/current/us-east-1/index.json
+```
+
+**不需要任何凭证，也不需要给账号加 `pricing:GetProducts` 权限。** 文件 0.4 MB，
+按天缓存，本地留一份副本（`bedrock-prices.json`），AWS 端点临时不可达时用副本顶上
+并在页面上提示。
+
+几个容易踩的点：
+
+- Claude **不在** `AmazonBedrock` 这个 service code 里。那里面只有 5 条 Claude 2.x/3
+  时代的老 SKU，现役模型一条都没有。
+- `servicename` 恰好就是 CE 里的计费条目名（`Claude Opus 5 (Amazon Bedrock Edition)`），
+  所以两边能逐模型对账。
+- `usagetype` 有**两代命名**：老的 `InputTokenCount`，新的 `input_tokens_standard`，
+  不同世代的模型混着用，两套都得认。
+- **四个美区单价一致**（有用例守着），所以只拉 us-east-1 一份，四区合并计价是安全的。
+
+### 已知的偏差来源
+
+| 来源 | 方向 | 说明 |
+|---|---|---|
+| **AWS 公开牌价** | 偏高 | 不含 EDP 或私有折扣。有协议价的话实际账单会更低 |
+| **1M 上下文** | 偏低 | 该档单价更高，但 AWS 价目表里没有对应 SKU，无从取值 |
+| **缓存写档位** | 偏低 | 1 小时档比 5 分钟档贵 60%，CloudWatch 只有一个计数器区分不了。实测按 5 分钟档能对上账单，说明这部分占比很小 |
+| **新模型** | 偏低 | 价目表里还没有的模型会被标成「无单价」，**不计入总额**，页面上会明确列出来 |
+
+这一页**不套**台账的 `TAG_RATIO` / `UNTAG_RATIO`，出来的是 AWS 原始成本，不是加价后
+的对外金额——要和预算比请看概览页。
+
 ## Cost Explorer 查询口径
 
 - **指标**：`UnblendedCost`（可在 `.env` 改成 `AmortizedCost` / `NetUnblendedCost`）
@@ -566,6 +666,7 @@ mtime 都不会动。
 | `COST_METRIC` | `UnblendedCost` | CE 成本指标 |
 | `SERVICE_FILTER` | 空（全部服务） | 逗号分隔的 CE 服务全名 |
 | `CACHE_TTL` | `900` | 缓存秒数 |
+| `PRICE_TIER` | `auto` | 预估成本页的计价档。`auto` 按 ModelId 和推理配置 ARN 自动判断跨区/本区；判错时可强制填 `global` 或 `standard` |
 | `WARN_PCT` / `DANGER_PCT` | `70` / `90` | 使用率变黄 / 变红的阈值 |
 | `HOST` / `PORT` | `127.0.0.1` / `5000` | 监听地址 |
 
@@ -606,10 +707,12 @@ src/bedrock_cost/
   usage_explorer.py       成本下钻页：时间序列 + 三种维度 + 颜色槽分配
   cloudwatch_metrics.py   模型用量页：AWS/Bedrock 指标、推理配置解析、区域合并
   quotas.py               模型配额页：Service Quotas 里的两类 token 配额
+  pricing.py              AWS 官方价目表：拉取、解析两代 usagetype 命名、模型名映射
+  cost_estimate.py        预估成本页：token 量 × 单价，按天出序列
   report.py               概览页八列口径与合计
   chart.py                堆叠柱状图 + 折线图（SVG），图表色板的唯一来源
   templates/              base / shell / login / index / cost_usage / model_usage /
-                          model_quota / accounts
+                          model_quota / cost_estimate / accounts
   static/style.css        深色仪表盘样式
 
 tests/                    见下节
@@ -641,7 +744,7 @@ tests/                    见下节
 pytest
 ```
 
-432 个用例，约 10 秒跑完，**不联网、不花钱**：Cost Explorer 调用被替换成 fake，
+489 个用例，约 13 秒跑完，**不联网、不花钱**：Cost Explorer 调用被替换成 fake，
 台账指向临时 xlsx，登录口令也换成固定值（不依赖你机器上的 `.env`）。
 
 账号管理页的用例（`tests/test_accounts.py`）重点不在「功能能用」，而在「写坏了
@@ -650,6 +753,18 @@ pytest
 
 概览页和下钻页的 fake 都从同两个常量算消费，所以「下钻任一维度加总 == 概览总
 消费」这条不变量测出来才有意义，不会因为两边各造一套数字而虚假通过。
+
+预估成本的用例（`tests/test_cost_estimate.py`）盯的是「数出来了但是错的」那一类：
+四个计数器不能相减、直连和推理配置的同一个模型要并成一行、计价档选错就是 10% 的
+偏差、没在价目表里的模型不能按 0 悄悄算进总额。
+
+另有一组打 AWS 真实价目表的用例（`tests/test_pricing_live.py`），也标了 `integration`，
+但**不需要凭证也不花钱**——价目表端点是公开的。它当哨兵用：AWS 哪天改了 service code、
+改了 usagetype 写法、或者现役模型缺了单价，这几条会先炸，而不是等页面上悄悄少算钱。
+
+```bash
+pytest -m integration tests/test_pricing_live.py
+```
 
 真实调用 CE 的用例在 `tests/test_integration.py`，标了 `integration`，默认跳过：
 
