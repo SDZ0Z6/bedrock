@@ -6,7 +6,15 @@ from datetime import date, datetime
 
 from flask import Blueprint, flash, redirect, render_template, request, url_for
 
-from . import chart, cloudwatch_metrics, config, cost_explorer, quotas, usage_explorer
+from . import (
+    chart,
+    cloudwatch_metrics,
+    config,
+    cost_estimate,
+    cost_explorer,
+    quotas,
+    usage_explorer,
+)
 from .auth import login_required
 from .dates import detect_preset, resolve_range
 from .excel_source import Account, ExcelSourceError, load_accounts
@@ -222,11 +230,70 @@ def model_usage():
     )
 
 
+# --------------------------------------------------------------- 预估成本
+@bp.route("/cost-estimate")
+@login_required
+def estimate():
+    """CloudWatch token 量 × AWS 牌价。用来补 Cost Explorer 那一两天的延迟。"""
+    today = date.today()
+    start, end, notes = resolve_range(request.args, today)
+    refresh = request.args.get("refresh") == "1"
+
+    accounts: list[Account] = []
+    fatal = None
+    try:
+        accounts = load_accounts(force=refresh)
+    except ExcelSourceError as exc:
+        fatal = str(exc)
+    except Exception as exc:
+        fatal = f"{type(exc).__name__}: {exc}"
+
+    selected, chosen = _select_accounts(accounts, request.args.get("account", ""), notes)
+
+    report = cost_estimate.EstimateReport(start=start, end=end)
+    if not fatal:
+        try:
+            report = cost_estimate.build_estimate(chosen, start, end, refresh=refresh)
+        except Exception as exc:
+            fatal = f"{type(exc).__name__}: {exc}"
+
+    if report.price_stale:
+        notes.append(
+            "拉不到最新的 AWS 价目表，用的是本地缓存副本"
+            f"（{report.price_error}）。单价可能已经过时。"
+        )
+    if report.unpriced:
+        notes.append(
+            "这些模型在 AWS 价目表里没有对应条目，**没有计入**估算总额："
+            + "、".join(report.unpriced)
+            + "。多半是刚发布的新模型，等 AWS 更新价目表即可。"
+        )
+
+    return render_template(
+        "cost_estimate.html",
+        active_page="cost_estimate",
+        report=report,
+        chart=chart.render_stacked_bars(report, config.CURRENCY_SYMBOL),
+        fatal=fatal,
+        notes=notes,
+        start=start,
+        end=end,
+        today=today,
+        accounts=accounts,
+        selected_account=selected,
+        kinds=cost_estimate.KIND_ORDER,
+        kind_labels=cost_estimate.KIND_LABELS,
+        active_preset=detect_preset(start, end, today),
+        **page_meta(),
+    )
+
+
 @bp.route("/cache/clear")
 @login_required
 def clear_cache():
     cost_explorer.clear_cache()
     usage_explorer.clear_cache()
+    cost_estimate.clear_cache()
     cloudwatch_metrics.clear_cache()
     quotas.clear_cache()
     flash("已清空缓存，下一次查询会重新调用 Cost Explorer 和 CloudWatch。", "ok")

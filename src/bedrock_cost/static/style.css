@@ -620,3 +620,21 @@ tfoot td {
 /* Model ID 列：等宽字体，不换行 */
 .quota-table .model-id { white-space: nowrap; }
 .quota-table .model-id code { font-size: 11.5px; }
+
+/* ------------------------------------------------------- 预估成本页 */
+/* 单价那几列是参考信息，压暗一档，让 token 量和金额先被看到 */
+.estimate-table .rate-col { color: var(--text-dim); font-size: 12.5px; }
+.estimate-table tfoot .rate-col { color: var(--text-mute); }
+.estimate-table .sticky-col { min-width: 190px; }
+
+/* 跨区 / 本区：影响单价，必须能一眼看出来，但不该抢走金额的注意力 */
+.tier-badge {
+  display: inline-block;
+  margin-left: 7px;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--text-mute);
+  vertical-align: 1px;
+}

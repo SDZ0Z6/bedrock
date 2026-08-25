@@ -131,6 +131,9 @@ class ProfileInfo:
     name: str
     model: str       # 底层原厂模型，已剥掉跨区前缀
     tag_value: str   # 台账那个标签键的值；空串表示没打这个标签
+    # 原始的 modelArn 列表，未做任何加工。计价要靠它判断跨区还是本区
+    # （见 cost_estimate.tier_of_profile），所以这里刻意保留全貌。
+    model_arns: tuple[str, ...] = ()
 
 
 @dataclass
@@ -424,6 +427,11 @@ def resolve_profiles(account: Account, region: str) -> tuple[dict[str, ProfileIn
                         for m in summary.get("models", [])
                         if m.get("modelArn")
                     ]
+                    arns = tuple(
+                        m.get("modelArn", "")
+                        for m in summary.get("models", [])
+                        if m.get("modelArn")
+                    )
                     mapping[summary["inferenceProfileId"]] = ProfileInfo(
                         name=(
                             summary.get("inferenceProfileName")
@@ -431,6 +439,7 @@ def resolve_profiles(account: Account, region: str) -> tuple[dict[str, ProfileIn
                         ),
                         model=strip_cris_prefix(models[0]) if models else "",
                         tag_value=(tags or {}).get(account.tag_key, ""),
+                        model_arns=arns,
                     )
     except Exception:
         # 没有 bedrock 权限也要能出图，只是标签判定会失效（页面上会明确提示）

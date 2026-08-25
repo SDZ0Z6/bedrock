@@ -11,6 +11,9 @@ __pycache__/
 .venv/
 venv/
 
+# AWS 价目表的本地副本（公开数据，纯缓存，可再生）
+bedrock-prices.json
+
 # 构建与测试产物
 build/
 dist/
