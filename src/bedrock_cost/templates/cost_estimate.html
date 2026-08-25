@@ -150,22 +150,45 @@
           <tr>
             <th class="sticky-col">合计</th>
             {% for kind in kinds %}<td class="num">{{ report.kind_total(kind) | compact }}</td>{% endfor %}
-            {% for kind in kinds %}
-              <td class="num rate-col calc" title="该类 token 花掉的钱">{{ report.kind_cost(kind) | money }}</td>
-            {% endfor %}
+            {# 单价是逐模型的，加总没有意义，这四格留空 #}
+            <td class="rate-col" colspan="{{ kinds | length }}"></td>
             <td class="num"><strong>{{ report.total_cost | money }}</strong></td>
           </tr>
         </tfoot>
       </table>
     </div>
-    <p class="chart-caption">
-      合计行的单价那四格放的是<strong>该类 token 花掉的钱</strong>，不是单价——
-      单价是逐模型的，加总没有意义。
-    </p>
     {% endif %}
   </section>
 
 {% endif %}
+
+<script>
+(function () {
+  // 参数改动即提交，和其余几个页面一个做法
+  const form = document.getElementById('estimate-filters');
+  if (!form) return;
+  const content = document.querySelector('.content');
+  let pending = false;
+
+  function go() {
+    if (pending) return;
+    pending = true;
+    // 不闪骨架屏：把当前内容压暗，等新页面替换，避免布局跳动
+    if (content) content.classList.add('is-loading');
+    form.submit();
+  }
+
+  for (const field of form.querySelectorAll('select, input')) {
+    field.addEventListener('change', go);
+  }
+  // 快捷区间是链接，点了也压暗
+  for (const chip of form.querySelectorAll('.chip')) {
+    chip.addEventListener('click', function () {
+      if (content) content.classList.add('is-loading');
+    });
+  }
+})();
+</script>
 
 <footer class="meta">
   <span>数据源：CloudWatch <code>AWS/Bedrock</code> 的四个 token 指标 × AWS 官方价目表</span>
@@ -175,4 +198,62 @@
   <span>缓存 {{ cache_ttl_minutes }} 分钟 · 生成于 {{ generated_at }}</span>
   <span><a href="{{ url_for('main.estimate', account=selected_account, start=start.isoformat(), end=end.isoformat(), refresh=1) }}">强制刷新</a></span>
 </footer>
+
+{% if not fatal %}
+  <div id="chart-tip" class="chart-tip" hidden></div>
+  <script id="chart-data" type="application/json">{{ chart.tooltip | tojson }}</script>
+  <script>
+  (function () {
+    const holder = document.getElementById('chart-data');
+    const tip = document.getElementById('chart-tip');
+    if (!holder || !tip) return;
+    const data = JSON.parse(holder.textContent);
+
+    const money = v => '$' + Number(v).toLocaleString('en-US',
+      { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const esc = s => String(s).replace(/[&<>"]/g,
+      c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+    function place(target) {
+      const box = target.getBoundingClientRect();
+      let left = box.left + box.width / 2 - tip.offsetWidth / 2;
+      left = Math.max(8, Math.min(left, window.innerWidth - tip.offsetWidth - 8));
+      let top = box.top - tip.offsetHeight - 10;
+      if (top < 8) top = box.bottom + 10;
+      tip.style.left = left + 'px';
+      tip.style.top = top + 'px';
+    }
+
+    function show(target) {
+      const item = data[Number(target.dataset.idx)];
+      if (!item) return;
+      // 这一页不加价，raw 和 marked 永远相等，所以没有「原始金额」那一行
+      let out = '<div class="tip-head">' + esc(item.date) + '</div>'
+              + '<div class="tip-total">预估 ' + money(item.total) + '</div>';
+      if (item.rows.length) {
+        out += '<table class="tip-table">';
+        for (const row of item.rows) {
+          out += '<tr><td><i class="swatch" style="background:' + esc(row.color) + '"></i>'
+               + esc(row.name) + '</td><td class="tip-num">' + money(row.marked) + '</td></tr>';
+        }
+        out += '</table>';
+      }
+      tip.innerHTML = out;
+      tip.hidden = false;
+      place(target);
+    }
+
+    const hide = () => { tip.hidden = true; };
+
+    for (const hit of document.querySelectorAll('.chart-hit')) {
+      hit.addEventListener('mouseenter', () => show(hit));
+      hit.addEventListener('focus', () => show(hit));
+      hit.addEventListener('mouseleave', hide);
+      hit.addEventListener('blur', hide);
+    }
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') hide(); });
+    window.addEventListener('scroll', hide, { passive: true });
+  })();
+  </script>
+{% endif %}
 {% endblock %}

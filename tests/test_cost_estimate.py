@@ -446,6 +446,68 @@ def test_按账号筛选(logged_in, ledger, fake_prices, fake_cloudwatch, accoun
     assert accounts[0].partner in response.get_data(as_text=True)
 
 
+# ------------------------------------------------------------------ 页面上的交互件
+# 这三样都是「漏了也不报错、只是页面变哑巴」的东西，很容易改着改着就丢了
+def test_筛选条改动即提交(logged_in, ledger, fake_prices, fake_cloudwatch):
+    """账号和日期改了要自动重查。这一页的表单没有查询按钮，脚本丢了就等于失灵。"""
+    html = logged_in.get("/cost-estimate").get_data(as_text=True)
+    assert "estimate-filters" in html
+    # 脚本必须绑到这个表单上，光有 filters-auto 这个类是不起作用的
+    assert "getElementById('estimate-filters')" in html
+    assert "form.submit()" in html
+
+
+def test_图表带悬浮提示(logged_in, ledger, fake_prices, fake_cloudwatch):
+    """柱子上的 hover 提示靠三样东西：容器、数据、脚本，缺一个就没反应。"""
+    fake_cloudwatch["regions"] = {
+        "us-east-1": {"global.anthropic.claude-opus-5": tokens(inp=1_000_000)}
+    }
+    html = logged_in.get(
+        "/cost-estimate?start=2026-08-14&end=2026-08-14"
+    ).get_data(as_text=True)
+    assert 'id="chart-tip"' in html
+    assert 'id="chart-data"' in html
+    assert "chart-hit" in html          # SVG 里的命中区
+    assert "mouseenter" in html
+
+
+def test_悬浮数据里有每个模型的金额(logged_in, ledger, fake_prices, fake_cloudwatch):
+    import json
+    import re
+
+    fake_cloudwatch["regions"] = {
+        "us-east-1": {"global.anthropic.claude-opus-5": tokens(inp=1_000_000)}
+    }
+    html = logged_in.get(
+        "/cost-estimate?start=2026-08-14&end=2026-08-14"
+    ).get_data(as_text=True)
+    payload = re.search(
+        r'<script id="chart-data" type="application/json">(.*?)</script>', html, re.S
+    )
+    assert payload
+    buckets = json.loads(payload.group(1))
+    assert len(buckets) == 1
+    assert buckets[0]["rows"][0]["name"] == "claude-opus-5"
+    assert buckets[0]["total"] > 0
+
+
+def test_合计行不显示单价(logged_in, ledger, fake_prices, fake_cloudwatch):
+    """单价是逐模型的，加总没有意义，那四格留空。"""
+    import re
+
+    fake_cloudwatch["regions"] = {
+        "us-east-1": {"global.anthropic.claude-opus-5": tokens(inp=1_000_000)}
+    }
+    html = logged_in.get(
+        "/cost-estimate?start=2026-08-14&end=2026-08-14"
+    ).get_data(as_text=True)
+    foot = re.search(r"<tfoot>(.*?)</tfoot>", html, re.S).group(1)
+    assert "合计" in foot
+    assert "$5.00" not in foot        # 单价不该出现在合计行
+    assert 'colspan="4"' in foot      # 四格并成一个空格子
+    assert "$5.00" in html            # 但明细行里还在
+
+
 def test_UTC分桶(accounts, fake_prices, fake_cloudwatch):
     """CloudWatch 的 Period=86400 是按 UTC 零点切的，桶边界必须跟它一致。"""
     stamps, dates, labels = cost_estimate.build_days(date(2026, 8, 10), date(2026, 8, 12))
