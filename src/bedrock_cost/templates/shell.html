@@ -2,10 +2,24 @@
 {% extends "base.html" %}
 {% block body_class %}app{% endblock %}
 
+{# 点导航时盖在旧页面上的等待文案。写的是**目标页**在等什么——点的时候
+   当前页还不知道要去哪，所以文案挂在链接上，由下面的宏按 key 查表带出去。 #}
+{% set LOADING_HINTS = {
+     'overview':       ('正在查 Cost Explorer', ''),
+     'cost_usage':     ('正在查各维度消费', ''),
+     'model_usage':    ('正在拉 CloudWatch 指标', ''),
+     'model_quota':    ('正在拉四个区的配额', '首次约 45 秒，Service Quotas 限流；之后走缓存'),
+     'cost_estimate':  ('正在拉用量和单价', ''),
+     'accounts':       ('正在读台账', ''),
+   } %}
+
 {% macro nav_item(endpoint, key, label, icon) -%}
+  {%- set hint = LOADING_HINTS.get(key, ('', '')) -%}
   {# 收起时只剩图标，title 让悬浮还能看到名字 #}
   <a class="nav-item {% if active_page == key %}nav-on{% endif %}"
-     href="{{ url_for(endpoint) }}" title="{{ label }}">
+     href="{{ url_for(endpoint) }}" title="{{ label }}"
+     {% if hint[0] %}data-loading="{{ hint[0] }}"{% endif %}
+     {% if hint[1] %}data-loading-note="{{ hint[1] }}"{% endif %}>
     <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true">{{ icon | safe }}</svg>
     <span class="nav-label">{{ label }}</span>
   </a>
@@ -98,6 +112,21 @@
 
     {% block content %}{% endblock %}
   </main>
+
+  {# 等待动效。全站是服务端同步渲染，点链接 / 改筛选之后旧页面会一直留在屏幕
+     上直到新页面回来，所以「加载中」就盖在旧页面上。放在 .content 之外，
+     否则会被 .content.is-loading 的 opacity 一起压暗。 #}
+  <div class="page-loading" id="page-loading">
+    <div class="page-loading-inner">
+      {%- if loading_media %}
+      <video class="page-loading-art" src="{{ url_for('static', filename=loading_media) }}"
+             muted loop playsinline preload="auto" aria-hidden="true"></video>
+      {%- endif %}
+      <p class="page-loading-text" role="status" aria-live="polite"><span
+        data-label>{% block loading_label %}正在处理{% endblock %}</span><i>.</i><i>.</i><i>.</i></p>
+      <p class="page-loading-note" data-note>{% block loading_note %}{% endblock %}</p>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -128,6 +157,82 @@
   });
 
   sync();
+})();
+</script>
+
+<script>
+(function () {
+  const overlay = document.getElementById('page-loading');
+  const content = document.querySelector('.content');
+  if (!overlay || !content) return;
+
+  const inner = overlay.querySelector('.page-loading-inner');
+  const label = overlay.querySelector('[data-label]');
+  const note = overlay.querySelector('[data-note]');
+  const art = overlay.querySelector('video');
+  // 本页自己的文案（筛选提交时用它——提交后还留在同一页）
+  const ownLabel = label.textContent.trim();
+  const ownNote = note.textContent.trim();
+  let timer = null;
+  let pending = false;
+
+  function show(text, hint) {
+    if (pending) return;
+    pending = true;
+    label.textContent = text || ownLabel;
+    note.textContent = hint || (text ? '' : ownNote);
+    note.hidden = !note.textContent;
+    // 压暗立刻生效，反馈要快；动效延后 250 毫秒——命中缓存时响应只要几十
+    // 毫秒，闪一下小生物比根本不显示更难受
+    content.classList.add('is-loading');
+    timer = setTimeout(function () {
+      // 按内容区（而不是视口）的中心摆，侧边栏收起时也居中
+      const box = content.getBoundingClientRect();
+      inner.style.left = (box.left + box.width / 2) + 'px';
+      overlay.classList.add('on');
+      if (art) { const played = art.play(); if (played && played.catch) played.catch(function () {}); }
+    }, 250);
+  }
+
+  function hide() {
+    clearTimeout(timer);
+    pending = false;
+    overlay.classList.remove('on');
+    content.classList.remove('is-loading');
+  }
+
+  // 站内链接：点了就盖上
+  document.addEventListener('click', function (event) {
+    if (event.defaultPrevented || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target.closest ? event.target.closest('a[href]') : null;
+    if (!link || link.target === '_blank' || link.hasAttribute('download')) return;
+    const raw = link.getAttribute('href');
+    if (!raw || raw.charAt(0) === '#') return;              // 页内锚点不算导航
+    if (link.protocol !== 'http:' && link.protocol !== 'https:') return;  // mailto: 之类
+    if (link.origin !== location.origin) return;
+    show(link.dataset.loading, link.dataset.loadingNote);
+  }, true);
+
+  // 表单提交（账号管理的 POST 等）
+  document.addEventListener('submit', function (event) {
+    if (event.defaultPrevented) return;
+    show(event.target.dataset.loading, event.target.dataset.loadingNote);
+  }, true);
+
+  // 筛选表单：改动即提交。form.submit() 不触发 submit 事件，所以手动盖。
+  for (const form of document.querySelectorAll('form.filters-auto')) {
+    for (const field of form.querySelectorAll('select, input')) {
+      field.addEventListener('change', function () {
+        if (pending) return;
+        show();
+        form.submit();
+      });
+    }
+  }
+
+  // 点了链接又按后退：bfcache 会把这一页原样端回来，遮罩得收掉
+  window.addEventListener('pageshow', function (event) { if (event.persisted) hide(); });
 })();
 </script>
 {% endblock %}

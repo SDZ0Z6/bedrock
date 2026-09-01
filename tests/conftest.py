@@ -186,7 +186,12 @@ def logged_in(client):
 
 @pytest.fixture
 def fake_service_quotas(monkeypatch):
-    """替换 Service Quotas，返回实测样式的配额，不联网。"""
+    """替换 Service Quotas 和 Bedrock 推理配置，返回实测样式的数据，不联网。
+
+    配额页按应用推理配置的 ARN 逐条列，所以两套数据都要给。配额值按区不同
+    （照实测：Opus 4.6 只有 us-east-1 提到了 6M），页面上的区域列和
+    「没跟上提额」标记才有东西可测。
+    """
     from bedrock_cost import quotas
 
     day = "Global cross-region model inference tokens per day for "
@@ -201,26 +206,78 @@ def fake_service_quotas(monkeypatch):
             "Adjustable": " per minute " in name,
         }
 
-    payload = [
-        q(day + "Anthropic Claude Opus 4.8", 43_200_000_000),
-        q(minute + "Anthropic Claude Opus 4.8", 30_000_000),
-        q(day + "Anthropic Claude Sonnet 4.5 V1", 7_200_000_000),
-        q(minute + "Anthropic Claude Sonnet 4.5 V1", 5_000_000),
-        q(day + "Anthropic Claude Sonnet 4.5 V1 1M Context Length", 1_440_000_000),
-        q(minute + "Anthropic Claude Sonnet 4.5 V1 1M Context Length", 1_000_000),
-        q(day + "Amazon Nova 2 Lite", 11_520_000_000),      # 非 Claude，应被排除
-        q("Batch inference job size (in GB) for Claude Opus 5", 1000),  # 无关配额
+    # 两个账号的 AK 不一样，据此给出各自的账号号码。多账号时 ARN 必须互不相同，
+    # 配额也要不同，不然「一行一条 ARN」和「最高值不跨账号」都测不出来。
+    ACCOUNT_BY_AK = {
+        "AKIAFAKEALPHA0000000": "111111111111",
+        "AKIAFAKEBETA00000000": "222222222222",
+    }
+
+    def quotas_for(region, acct):
+        # 提额按区批，而且只有 ALPHA 那个账号提了：BETA 四个区都是 3M。
+        # 于是「最高值按账号分组」一旦写错，BETA 会被整片标黄。
+        raised = region == "us-east-1" and acct == "111111111111"
+        return [
+            q(day + "Anthropic Claude Opus 4.8", 43_200_000_000),
+            q(minute + "Anthropic Claude Opus 4.8", 30_000_000),
+            q(day + "Anthropic Claude Opus 4.6 V1", 8_640_000_000 if raised else 4_320_000_000),
+            q(minute + "Anthropic Claude Opus 4.6 V1", 6_000_000 if raised else 3_000_000),
+            q(day + "Anthropic Claude Sonnet 4.5 V1 1M Context Length", 1_440_000_000),
+            q(minute + "Anthropic Claude Sonnet 4.5 V1 1M Context Length", 1_000_000),
+            q(day + "Amazon Nova 2 Lite", 11_520_000_000),      # 非 Claude，应被排除
+            q("Batch inference job size (in GB) for Claude Opus 5", 1000),  # 无关配额
+        ]
+
+    # 账号自建的应用推理配置。配置名是账号自己起的，和模型名没关系。
+    PROFILES = [
+        ("anthropic.claude-opus-4-8", "claude48oupsauto_0706"),
+        ("anthropic.claude-opus-4-6-v1", "claude46Oupsauto_wjc_0529"),
     ]
 
+    def profiles_for(region, acct):
+        summaries = []
+        for index, (model, name) in enumerate(PROFILES):
+            pid = f"{acct[:2]}{region.replace('-', '')}{index}"
+            summaries.append({
+                "inferenceProfileId": pid,
+                "inferenceProfileName": name,
+                "inferenceProfileArn": (
+                    f"arn:aws:bedrock:{region}:{acct}"
+                    f":application-inference-profile/{pid}"
+                ),
+                # 跨区配置会多带一条不带区域的 modelArn
+                "models": [
+                    {"modelArn": f"arn:aws:bedrock:::foundation-model/{model}"},
+                    {"modelArn": f"arn:aws:bedrock:{region}::foundation-model/{model}"},
+                ],
+                "status": "ACTIVE",
+                "type": "APPLICATION",
+            })
+        return summaries
+
     class _Paginator:
+        def __init__(self, region, acct):
+            self.region, self.acct = region, acct
+
         def paginate(self, **kwargs):
-            return iter([{"Quotas": payload}])
+            return iter([{"Quotas": quotas_for(self.region, self.acct)}])
 
     class _Client:
-        def get_paginator(self, name):
-            return _Paginator()
+        def __init__(self, region, acct):
+            self.region, self.acct = region, acct
 
-    monkeypatch.setattr(quotas.boto3, "client", lambda *a, **k: _Client())
+        def get_paginator(self, name):
+            return _Paginator(self.region, self.acct)
+
+        def list_inference_profiles(self, **kwargs):
+            return {"inferenceProfileSummaries": profiles_for(self.region, self.acct)}
+
+    def factory(service, **kw):
+        # boto3.client 收到的 AK 就是账号身份，据此分派
+        acct = ACCOUNT_BY_AK.get(kw.get("aws_access_key_id", ""), "999999999999")
+        return _Client(kw.get("region_name", ""), acct)
+
+    monkeypatch.setattr(quotas.boto3, "client", factory)
     quotas.clear_cache()
     yield
     quotas.clear_cache()

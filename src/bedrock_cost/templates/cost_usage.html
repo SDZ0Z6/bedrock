@@ -1,6 +1,7 @@
 {% extends "shell.html" %}
 {% block title %}成本和使用情况 · Bedrock 成本监控{% endblock %}
 {% block page_title %}成本和使用情况{% endblock %}
+{% block loading_label %}正在查各维度消费{% endblock %}
 
 {% block content %}
 
@@ -195,32 +196,6 @@
 </footer>
 
 {# 参数改动即提交。放在 fatal 判断之外，台账出问题时也还能改参数。 #}
-<script>
-(function () {
-  const form = document.getElementById('usage-filters');
-  if (!form) return;
-  const content = document.querySelector('.content');
-  let pending = false;
-
-  function go() {
-    if (pending) return;
-    pending = true;
-    // 不闪骨架屏：把当前内容压暗，等新页面替换，避免布局跳动
-    if (content) content.classList.add('is-loading');
-    form.submit();
-  }
-
-  for (const field of form.querySelectorAll('select, input')) {
-    field.addEventListener('change', go);
-  }
-  // 快捷区间是链接，点了也压暗
-  for (const chip of form.querySelectorAll('.chip')) {
-    chip.addEventListener('click', function () {
-      if (content) content.classList.add('is-loading');
-    });
-  }
-})();
-</script>
 
 {% if not fatal %}
   <div id="chart-tip" class="chart-tip" hidden></div>

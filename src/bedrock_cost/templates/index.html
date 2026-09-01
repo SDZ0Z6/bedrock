@@ -1,6 +1,7 @@
 {% extends "shell.html" %}
 {% block title %}概览 · Bedrock 成本监控{% endblock %}
 {% block page_title %}概览{% endblock %}
+{% block loading_label %}正在查 Cost Explorer{% endblock %}
 
 {% macro usage_cell(pct, level, width) -%}
   <div class="usage">
@@ -114,11 +115,11 @@
                 <td class="num usage-col">{{ usage_cell(row.usage_pct, row.level, row.bar_width) }}</td>
                 <td class="num {% if row.overspent %}tone-danger strong{% endif %}">{{ row.balance | money }}</td>
               </tr>
-              {% if row.note %}
-                <tr class="row-note">
-                  <td colspan="8">⚠ {{ row.note }}</td>
-                </tr>
-              {% endif %}
+              {# 标签值没匹配上时的提示条已撤掉。数据层照旧在算
+                 （cost_explorer 的 split.note，两个分支都还在），report.py 也照旧
+                 传到 row.note 上，只是这里不渲染。想恢复就把下面三行放回来：
+                   <tr class="row-note"><td colspan="8">⚠ {{ row.note }}</td></tr>
+                 .row-note 的样式也留着，没删。 #}
             {% endif %}
           {% else %}
             <tr><td colspan="8" class="empty">{{ excel_name }} 里没有账号记录。</td></tr>

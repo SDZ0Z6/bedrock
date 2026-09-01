@@ -244,6 +244,15 @@ code {
 .alert-warn   { background: var(--warn-tint);   border-color: var(--warn-edge);   color: var(--warn); }
 .alert-ok     { background: var(--ok-tint);     border-color: var(--ok-edge);     color: var(--ok); }
 
+/* 报错和告警前面加个图标。用 ::before 而不是往 15 处模板里各插一个 emoji：
+   一处改动全站生效，flash 消息那种运行时才知道类别的也自动带上。
+   两处 alert 内部第一个元素都是 inline（<strong> 或纯文本），所以图标会跟
+   文字同一行，不会自己占一行。 */
+.alert-error::before,
+.alert-warn::before { margin-right: 6px; }
+.alert-error::before { content: "❌"; }
+.alert-warn::before  { content: "⚠️"; }
+
 /* ------------------------------------------------------- 筛选条 */
 .filters {
   display: flex;
@@ -283,6 +292,75 @@ code {
 
 /* 参数改动即提交：压暗当前内容，不闪骨架屏、不跳布局 */
 .content.is-loading { opacity: .5; transition: opacity .12s ease; }
+
+/* ---- 等待动效 ----
+ * 全站服务端同步渲染：点链接之后旧页面一直留在屏幕上，所以动效就盖在它上面。
+ * 必须在 .content 之外，否则会被上面那条 opacity 一起压暗。
+ */
+.page-loading {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  visibility: hidden;
+  /* 不拦点击：等着的时候还想点别处就让他点。也不能用 opacity 做显隐——
+     opacity < 1 会让这一层变成隔离组，下面那个 mix-blend-mode 就失效了 */
+  pointer-events: none;
+}
+.page-loading.on { visibility: visible; }
+
+.page-loading-inner {
+  position: fixed;
+  top: 46%;
+  left: 50%;            /* 脚本会按内容区中心改写，侧边栏收起时也居中 */
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+/* 素材是 1486×720 带 alpha 通道的 webm（实测采样：96% 全透明，边缘有
+ * 半透明抗锯齿），所以直接铺上去就行——不需要 mix-blend-mode，也不需要
+ * 卡片托底。刻意不加 darken 之类的混合：小生物身上有比纸色更亮的高光
+ * （rgb(248,216,200)），darken 会把它压掉。
+ * 小生物只占画面中间约 17% 宽，其余是透明留白，所以宽度给得比看起来需要的大。 */
+.page-loading-art {
+  width: 460px;
+  max-width: 62vw;
+  /* 小生物在 720 行里只走 y 88..476，底下那 244 行永远是空的，不裁的话
+     会把下面的文案推远一大截。裁到前 500 行——按源片自己的坐标写，
+     换素材时一眼能看出该改成多少。 */
+  aspect-ratio: 1486 / 500;
+  object-fit: cover;
+  object-position: 50% 0;
+}
+
+.page-loading-text {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.page-loading-note {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-mute);
+}
+.page-loading-note:empty { display: none; }
+
+/* 文案. -> 文案.. -> 文案...：第一个点常亮，后两个按 1.2 秒三段依次出现。
+   每段的两个关键帧取同值，所以是硬切而不是渐变。 */
+.page-loading-text i { font-style: normal; }
+.page-loading-text i:nth-of-type(2) { animation: loading-dot-2 1.2s infinite; }
+.page-loading-text i:nth-of-type(3) { animation: loading-dot-3 1.2s infinite; }
+@keyframes loading-dot-2 { 0%, 33% { opacity: 0; } 34%, 100% { opacity: 1; } }
+@keyframes loading-dot-3 { 0%, 66% { opacity: 0; } 67%, 100% { opacity: 1; } }
+
+/* 系统开了减弱动画就别蹦了：视频撤掉，点数固定成三个 */
+@media (prefers-reduced-motion: reduce) {
+  .page-loading-art { display: none; }
+  .page-loading-text i { animation: none; opacity: 1; }
+}
 
 .presets { display: flex; gap: 7px; flex-wrap: wrap; margin-left: auto; }
 .chip {
@@ -734,7 +812,32 @@ tfoot td {
 
 /* Model ID 列：等宽字体，不换行 */
 .quota-table .model-id { white-space: nowrap; }
-.quota-table .model-id code { font-size: 11.5px; }
+.quota-table .model-id code { font-size: 10.5px; }
+
+/* ARN 列：只放 12 位配置 ID。sticky-col 默认 210px 是给模型名留的，
+   这里 12 个等宽字符用不了那么宽，压回去让 TPM / TPD 能进视野 */
+.quota-table .arn-col { min-width: 132px; }
+.quota-table .arn-col code { font-size: 11.5px; }
+
+/* 账号列：只放 12 位号码，等宽字体好对齐 */
+.quota-table .account-col { min-width: 124px; }
+.quota-table .account-col code { font-size: 11.5px; color: var(--text-dim); }
+
+/* 同一个模型的四个区相邻，组首一道细分隔线，几十行才扫得动 */
+.quota-table tr.group-start td { border-top: 1px solid var(--line); }
+
+/* 可排序表头：点一次升、再一次降、第三次回到服务端排好的默认分组。
+   箭头由 aria-sort 驱动——无障碍属性和视觉共用一个来源，不会各说各话。 */
+.quota-table th.sortable { cursor: pointer; user-select: none; }
+.quota-table th.sortable:hover { color: var(--text); }
+.quota-table th.sortable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.quota-table th.sortable::after { content: "↕"; margin-left: 5px; opacity: .3; }
+.quota-table th[aria-sort="ascending"]::after { content: "↑"; opacity: 1; }
+.quota-table th[aria-sort="descending"]::after { content: "↓"; opacity: 1; }
+
+/* 自定义排序下「同一模型的四个区相邻」不再成立，分组线会散落在没有意义的
+   位置，所以排序期间隐掉 */
+.quota-table.is-sorted tr.group-start td { border-top: none; }
 
 /* ------------------------------------------------------- 预估成本页 */
 /* 单价那几列是参考信息，压暗一档，让 token 量和金额先被看到 */

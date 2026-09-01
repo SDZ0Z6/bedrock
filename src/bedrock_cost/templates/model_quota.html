@@ -1,14 +1,18 @@
 {% extends "shell.html" %}
 {% block title %}模型配额 · Bedrock 成本监控{% endblock %}
 {% block page_title %}模型配额{% endblock %}
+{% block loading_label %}正在拉四个区的配额{% endblock %}
+{% block loading_note %}首次约 45 秒，Service Quotas 限流；之后走缓存{% endblock %}
 
 {% block content %}
 
-<!-- 没有区域筛选：这两类配额是账号级的全局池，四个美区共用同一份额度 -->
+{# 区域是筛选项，也是表格里的一列：默认四个区一起列，区域间的配额差异就是
+   这一页要看的东西；要单看某个区时再筛。 #}
 <form class="filters filters-auto" id="quota-filters" method="get" action="{{ url_for('main.model_quota') }}">
   <div class="field">
     <label for="account">账号</label>
     <select id="account" name="account">
+      <option value="all" {% if selected_account == 'all' %}selected{% endif %}>全部账号</option>
       {% for account in accounts %}
         <option value="{{ account.key }}" {% if selected_account == account.key %}selected{% endif %}>
           {{ account.partner }} / {{ account.account }}
@@ -17,11 +21,34 @@
     </select>
   </div>
 
+  <div class="field">
+    <label for="model">模型名称</label>
+    <select id="model" name="model">
+      <option value="" {% if not selected_model %}selected{% endif %}>全部模型</option>
+      {# 选项取自未筛选的全量数据，所以筛掉一个模型之后别的还在列表里 #}
+      {% for name in report.model_options %}
+        <option value="{{ name }}" {% if selected_model == name %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="region">区域</label>
+    <select id="region" name="region">
+      <option value="" {% if not selected_region %}selected{% endif %}>全部区域</option>
+      {% for code in report.region_options %}
+        <option value="{{ code }}" {% if selected_region == code %}selected{% endif %}>{{ code }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
   <noscript><button class="btn btn-primary" type="submit">查询</button></noscript>
 
   <div class="presets">
-    <a class="btn btn-ghost" href="{{ url_for('main.model_quota', account=selected_account, refresh=1) }}"
-       title="跳过缓存，重新拉一次 Service Quotas">强制刷新</a>
+    <a class="btn btn-ghost"
+       href="{{ url_for('main.model_quota', account=selected_account, model=selected_model, region=selected_region, refresh=1) }}"
+       title="跳过缓存，重新拉一次四个区的 Service Quotas 和推理配置"
+       data-loading="正在重新拉四个区的配额" data-loading-note="跳过缓存，约 45 秒">强制刷新</a>
   </div>
 </form>
 
@@ -29,116 +56,220 @@
   <div class="alert alert-error"><strong>无法生成报表：</strong> {{ fatal }}</div>
 {% else %}
 
+  {% if report.arn_error %}
+    <div class="alert alert-warn">
+      <strong>读不到应用推理配置：</strong>
+      {% if report.arn_driven %}{{ report.arn_error }}
+      {% else %}已退回按「模型 × 区域」列配额，ARN 和模型 ID 两列留空。
+        service-quotas 是另一套权限，配额数字本身不受影响。
+        <span class="calc">{{ report.arn_error }}</span>{% endif %}
+    </div>
+  {% endif %}
+
   <section class="card">
     <div class="card-head">
-      <h2>Claude Token 配额</h2>
+      <h2>{% if report.arn_driven %}应用推理配置 · Token 配额{% else %}Claude Token 配额{% endif %}</h2>
       <span class="card-note">
-        账号 {{ report.account_label }} · {{ report.rows | length }} 个模型 ·
-        全局跨区共享，不分区域
+        {{ report.account_label }} ·
+        {% if report.arn_driven %}{{ report.profile_count }} 条 ARN ·{% endif %}
+        {{ report.model_count }} 个模型 ·
+        {% if report.region_filter %}只看 <code>{{ report.region_filter }}</code>
+        {%- else %}{{ report.regions | length }} 个区各查一次{% endif %}
+        {%- if report.is_filtered %} · <span class="tone-warn">已筛选，共
+          {{ report.rows | length }} / {{ report.all_rows | length }} 行</span>{% endif %}
+        {%- if report.lagging_models %} ·
+          <span class="tone-warn">{{ report.lagging_models | length }} 个模型的配额四区不一致（标黄的区没跟上提额）</span>
+        {%- endif %}
       </span>
     </div>
 
     <div class="table-scroll">
       <table class="wide-table quota-table">
         <thead>
+          {# 表头可点排序：一次升、再一次降、第三次回到服务端排好的默认分组。
+             aria-sort 既是无障碍属性，也是 CSS 画箭头的依据，一份来源。 #}
           <tr>
-            <th class="sticky-col">模型</th>
-            <th>Model ID</th>
-            <th class="num">每日 Token 配额</th>
-            <th class="num">每分钟 Token 配额</th>
-            <th class="num">日 ÷ 分</th>
+            <th class="sticky-col arn-col sortable" tabindex="0" aria-sort="none"
+                data-sort-type="text">ARN ID</th>
+            <th class="account-col sortable" tabindex="0" aria-sort="none"
+                data-sort-type="text">账号</th>
+            <th class="sortable" tabindex="0" aria-sort="none"
+                data-sort-type="text">模型名称</th>
+            <th class="sortable" tabindex="0" aria-sort="none"
+                data-sort-type="text">模型 ID</th>
+            <th class="region-col sortable" tabindex="0" aria-sort="none"
+                data-sort-type="text">区域</th>
+            <th class="num sortable" tabindex="0" aria-sort="none"
+                data-sort-type="number">TPM</th>
+            <th class="num sortable" tabindex="0" aria-sort="none"
+                data-sort-type="number">TPD</th>
           </tr>
         </thead>
         <tbody>
           {% for row in report.rows %}
-            <tr>
-              <td class="sticky-col">
+            {# 同一个模型的四个区相邻，组首一道细分隔线，几十行才扫得动。
+               自定义排序之后这条前提不成立了，那时由 CSS 把线隐掉。 #}
+            <tr{% if not loop.first and row.display != loop.previtem.display %} class="group-start"{% endif %}>
+              <td class="sticky-col arn-col" data-sort="{{ row.profile_id }}">
+                {%- if row.has_arn %}<code>{{ row.profile_id }}</code>
+                {%- else %}<span class="tone-muted">无权限</span>{% endif -%}
+              </td>
+              <td class="account-col" data-sort="{{ row.account }}">
+                <code title="{{ row.partner }}">{{ row.account }}</code>
+              </td>
+              <td data-sort="{{ row.display }}">
                 {{ row.display }}
-                {% if row.is_long_context %}<span class="calc">独立配额，与同名模型不共享</span>{% endif %}
+                {%- if row.is_long_context %}<span class="calc">独立配额，与同名模型不共享</span>{% endif %}
+                {%- if row.has_arn and not row.matched %}
+                  <span class="calc tone-warn">该区配额清单里没有对应条目</span>{% endif %}
               </td>
-              <td class="model-id">
+              <td class="model-id" data-sort="{{ row.model_id }}">
                 {%- if row.model_id %}<code>{{ row.model_id }}</code>
-                {%- else %}<span class="tone-muted">—</span>
-                  <span class="calc">没有对应的 global 跨区配置</span>{% endif -%}
+                {%- else %}<span class="tone-muted">—</span>{% endif -%}
               </td>
-              <td class="num strong">
-                {%- if row.day is none %}<span class="tone-muted">未列出</span>
-                {%- else %}{{ row.day | compact }}
-                  <span class="calc">{{ '{:,.0f}'.format(row.day) }} ·
-                    {% if row.day_adjustable %}可申请提额{% else %}不可调{% endif %}</span>
-                {%- endif -%}
+              <td class="region-col" data-sort="{{ row.region }}"><code>{{ row.region }}</code></td>
+              <td class="num strong {% if row.below_best %}tone-warn{% endif %}"
+                  data-sort="{{ (row.tpm | int) if row.tpm is not none else '' }}">
+                {%- if row.tpm is none %}<span class="tone-muted">未列出</span>
+                {%- else %}{{ '{:,.0f}'.format(row.tpm) }}{% endif -%}
               </td>
-              <td class="num strong">
-                {%- if row.minute is none %}<span class="tone-muted">未列出</span>
-                {%- else %}{{ row.minute | compact }}
-                  <span class="calc">{{ '{:,.0f}'.format(row.minute) }} ·
-                    {% if row.minute_adjustable %}<span class="tone-ok">可申请提额</span>
-                    {%- else %}不可调{% endif %}</span>
-                {%- endif -%}
-              </td>
-              <td class="num {% if not row.balanced %}tone-warn{% else %}tone-muted{% endif %}">
-                {%- if row.minutes_to_exhaust is none %}—
-                {%- else %}{{ '{:,.0f}'.format(row.minutes_to_exhaust) }} 分{% endif -%}
+              <td class="num strong {% if row.below_best %}tone-warn{% endif %}"
+                  data-sort="{{ (row.tpd | int) if row.tpd is not none else '' }}">
+                {%- if row.tpd is none %}<span class="tone-muted">未列出</span>
+                {%- else %}{{ '{:,.0f}'.format(row.tpd) }}{% endif -%}
               </td>
             </tr>
           {% else %}
-            <tr><td colspan="5" class="empty">没有读到任何 Claude token 配额。</td></tr>
+            <tr><td colspan="7" class="empty">
+              {% if report.error %}读不到 Service Quotas，见上方提示。
+              {% elif report.is_filtered %}当前筛选下没有匹配的行。
+              {% else %}没有读到任何 Claude token 配额。{% endif %}
+            </td></tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
   </section>
 
-  <section class="card">
-    <div class="card-head"><h2>这一页怎么读</h2></div>
-    <div class="notes-body">
-      <ul>
-        <li><strong>配额是账号级的全局池，不分区域。</strong>
-          名字里的 Global cross-region 就是字面意思：四个美区共用同一份额度。实测四个区
-          返回的值完全相同，所以这一页没有区域维度，只查一个区（<code>{{ quota_region }}</code>，
-          它列出的模型最全）。</li>
-        <li><strong>配额口径是输入 + 输出 token 合计</strong>，
-          覆盖 Converse、ConverseStream、InvokeModel、InvokeModelWithResponseStream 全部请求。</li>
-        <li><strong>「日 ÷ 分」是两条配额自己的比值</strong>，不涉及任何实际用量。
-          正常应该是 1440（分钟配额跑满 24 小时刚好等于日配额）。
-          偏离 1440 的会标黄——说明这个模型的两条配额不是按整天配的，
-          实际瓶颈会先落在其中一条上。</li>
-        <li><strong>Model ID 是调用时真正要传的那个</strong>，
-          取自 <code>bedrock:ListInferenceProfiles</code> 的 <code>SYSTEM_DEFINED</code>
-          跨区推理配置（<code>global.anthropic.*</code>），不是从配额名拼出来的。
-          配额名里只有显示名，没有可调用的 ID。</li>
-        <li><strong>1M 上下文长度是独立的一条配额</strong>，
-          和同名模型的普通配额各走各的，不共享额度。它没有单独的 global 配置，
-          所以 Model ID 一列是空的——用普通模型的 ID 调用，靠请求里的上下文设置区分。</li>
-        <li><strong>两条配额的可调性不一样</strong>：日配额 <code>Adjustable=false</code>，
-          改不了；分钟配额 <code>Adjustable=true</code>，可以直接在 Service Quotas
-          控制台申请提额。实测 12 个模型全部是这个组合，所以 TPM 撞上限时是有办法的，
-          日配额撞上限只能找 AWS。</li>
-        <li>配额和实际用量的对比不在这一页——「模型用量」页有各模型按时间的
-          token 走势，需要的时候可以拿这里的数字去比。</li>
-      </ul>
-    </div>
-  </section>
+  {% if report.orphan_models %}
+    <section class="card">
+      <div class="card-head">
+        <h2>有配额，但账号下没有应用推理配置</h2>
+        <span class="card-note">
+          {{ report.orphan_models | length }} 个模型 · 只能直连调用，流量不带标签
+        </span>
+      </div>
+      <div class="table-scroll">
+        <table class="quota-table">
+          <thead>
+            <tr>
+              <th class="account-col">账号</th>
+              <th>模型名称</th>
+              <th class="num">TPM</th>
+              <th class="num">TPD</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in report.orphan_models %}
+              <tr>
+                <td class="account-col"><code>{{ item.account }}</code></td>
+                <td>{{ item.name }}</td>
+                <td class="num strong">
+                  {%- if item.tpm is none %}<span class="tone-muted">未列出</span>
+                  {%- else %}{{ '{:,.0f}'.format(item.tpm) }}{% endif -%}
+                </td>
+                <td class="num strong">
+                  {%- if item.tpd is none %}<span class="tone-muted">未列出</span>
+                  {%- else %}{{ '{:,.0f}'.format(item.tpd) }}{% endif -%}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="notes-body">
+        <ul>
+          <li>这些模型有配额，但账号下没有对应的应用推理配置。走它们的调用只能
+            直连原厂模型 ID，<strong>不会带上台账里那个成本分配标签</strong>，
+            在「模型用量」页会被算成无标签流量。要归到 MAP 上就得先建配置。</li>
+          <li>1M 上下文长度那条是<strong>独立配额</strong>，本来就没有单独的推理配置——
+            用普通模型的配置调用，靠请求里的上下文设置区分，出现在这里属正常。</li>
+        </ul>
+      </div>
+    </section>
+  {% endif %}
 {% endif %}
 
 <footer class="meta">
-  <span>数据源：Service Quotas <code>{{ quota_service }}</code> @ <code>{{ quota_region }}</code></span>
-  <span>缓存 {{ quota_cache_hours }} 小时（配额几乎不变）· 生成于 {{ generated_at }}</span>
+  <span>数据源：Service Quotas <code>{{ quota_service }}</code> ·
+    <code>bedrock:ListInferenceProfiles</code>（APPLICATION）·
+    {{ report.regions | join(' / ') if report.regions else quota_regions | join(' / ') }}</span>
+  <span>首次加载 40~50 秒（Service Quotas 按账号限流）· 之后缓存
+    {{ quota_cache_hours }} 小时 · 生成于 {{ generated_at }}</span>
   <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
 </footer>
 
 <script>
 (function () {
-  const form = document.getElementById('quota-filters');
-  if (!form) return;
-  const content = document.querySelector('.content');
-  let pending = false;
-  for (const field of form.querySelectorAll('select, input')) {
-    field.addEventListener('change', function () {
-      if (pending) return;
-      pending = true;
-      if (content) content.classList.add('is-loading');
-      form.submit();
+  // 只管主表。下面「有配额没配置」那张只有几行，不值得加交互
+  const table = document.querySelector('.quota-table.wide-table');
+  if (!table) return;
+  const body = table.tBodies[0];
+  const heads = [...table.querySelectorAll('thead th.sortable')];
+  // 服务端排好的顺序（账号 -> 模型按最高 TPD -> 区域），第三次点击回到它
+  const original = [...body.rows];
+  if (original.length < 2) return;
+
+  // 渲染出来的文字带千分位、还有「未列出」「无权限」「—」，直接拿 textContent
+  // 排会错，所以每个单元格上都标了 data-sort 作为规范值
+  const value = (row, index) => {
+    const cell = row.cells[index];
+    if (!cell) return '';
+    const raw = cell.dataset.sort;
+    return raw === undefined ? cell.textContent.trim() : raw;
+  };
+
+  function reorder(index, type, dir) {
+    // 每次都从原始顺序重排，而不是在上一次结果上再排：
+    // 这样「降序」是原始顺序的真反转，同值行的相对次序也稳定
+    const rows = [...original];
+    const sign = dir === 'asc' ? 1 : -1;
+    rows.sort((a, b) => {
+      const x = value(a, index);
+      const y = value(b, index);
+      // 空值永远沉底，不跟着升降翻转——「未列出」不是 0，「无权限」不是空字符串排头
+      if (!x && !y) return 0;
+      if (!x) return 1;
+      if (!y) return -1;
+      if (type === 'number') return sign * (Number(x) - Number(y));
+      return sign * x.localeCompare(y, 'en');
+    });
+    body.append(...rows);
+  }
+
+  for (const head of heads) {
+    const go = function () {
+      const current = head.getAttribute('aria-sort');
+      const next = current === 'none' ? 'ascending'
+                 : current === 'ascending' ? 'descending' : 'none';
+      for (const other of heads) other.setAttribute('aria-sort', 'none');
+      head.setAttribute('aria-sort', next);
+      if (next === 'none') {
+        body.append(...original);
+        table.classList.remove('is-sorted');
+        return;
+      }
+      // 自定义排序下「同一模型四个区相邻」不再成立，分组线会散落在
+      // 没有意义的位置，所以排序期间由 CSS 把它隐掉
+      table.classList.add('is-sorted');
+      reorder(head.cellIndex, head.dataset.sortType, next === 'ascending' ? 'asc' : 'desc');
+    };
+    head.addEventListener('click', go);
+    head.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        go();
+      }
     });
   }
 })();

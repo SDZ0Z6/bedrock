@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from flask import Flask
 
 from . import chart, config
 from .auth import csrf_token
+
+# 等待动效的素材。webm 优先——带 alpha 通道的版本只能是 webm（mp4 的 alpha
+# 只有 Safari 认），有就用它；没有就退回 mp4。每次请求 stat 一下，换文件刷新
+# 页面即生效，不用重启。
+LOADING_MEDIA = ("loading.webm", "loading.mp4")
 
 
 def money(value: float | None) -> str:
@@ -33,6 +40,17 @@ def compact(value: float | None) -> str:
     return chart.compact_number(value)
 
 
+def loading_media(static_folder: str | None) -> str:
+    """挑一个存在的等待动效素材，都没有就返回空串（模板里会跳过 video）。"""
+    if not static_folder:
+        return ""
+    folder = Path(static_folder)
+    for name in LOADING_MEDIA:
+        if (folder / name).is_file():
+            return name
+    return ""
+
+
 def register_filters(app: Flask) -> None:
     app.jinja_env.filters.update(money=money, pct=pct, ratio=ratio, compact=compact)
     # 图表色板的唯一来源是 chart.py，模板里的图例和表格色块取同一套值，
@@ -40,3 +58,9 @@ def register_filters(app: Flask) -> None:
     app.jinja_env.globals["series_color"] = chart.color_for
     # 表单里的隐藏域直接调它，不用每个视图都往模板塞一遍
     app.jinja_env.globals["csrf_token"] = csrf_token
+
+    # 等待动效在 shell.html 里，每个页面都要用，所以走 context_processor
+    # 而不是让每个视图各传一遍
+    @app.context_processor
+    def _loading_media():
+        return {"loading_media": loading_media(app.static_folder)}
