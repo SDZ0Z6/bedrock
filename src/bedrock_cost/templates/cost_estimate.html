@@ -1,6 +1,7 @@
 {% extends "shell.html" %}
 {% block title %}预估成本 · Bedrock 成本监控{% endblock %}
 {% block page_title %}预估成本{% endblock %}
+{% block loading_label %}正在拉用量和单价{% endblock %}
 
 {% block content %}
 
@@ -162,33 +163,6 @@
 
 {% endif %}
 
-<script>
-(function () {
-  // 参数改动即提交，和其余几个页面一个做法
-  const form = document.getElementById('estimate-filters');
-  if (!form) return;
-  const content = document.querySelector('.content');
-  let pending = false;
-
-  function go() {
-    if (pending) return;
-    pending = true;
-    // 不闪骨架屏：把当前内容压暗，等新页面替换，避免布局跳动
-    if (content) content.classList.add('is-loading');
-    form.submit();
-  }
-
-  for (const field of form.querySelectorAll('select, input')) {
-    field.addEventListener('change', go);
-  }
-  // 快捷区间是链接，点了也压暗
-  for (const chip of form.querySelectorAll('.chip')) {
-    chip.addEventListener('click', function () {
-      if (content) content.classList.add('is-loading');
-    });
-  }
-})();
-</script>
 
 <footer class="meta">
   <span>数据源：CloudWatch <code>AWS/Bedrock</code> 的四个 token 指标 × AWS 官方价目表</span>

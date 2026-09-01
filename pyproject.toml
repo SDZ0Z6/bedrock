@@ -26,7 +26,8 @@ bedrock-cost = "bedrock_cost.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-bedrock_cost = ["templates/*.html", "static/*.css"]
+# static 下不只有 css：图标、logo、loading.mp4 都得跟着包走
+bedrock_cost = ["templates/*.html", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

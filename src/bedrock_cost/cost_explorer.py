@@ -57,7 +57,7 @@ class CostSplit:
         return self.tag_raw + self.untag_raw
 
 
-def _redact(message: str, account: Account) -> str:
+def redact(message: str, account: Account) -> str:
     """错误信息可能带上凭证片段，落到页面前先擦掉。"""
     cleaned = _AK_PATTERN.sub("[已隐藏]", message)
     for secret in (account.ak, account.sk):
@@ -84,10 +84,10 @@ def friendly_error(exc: Exception, account: Account) -> str:
         label = f"{code}: {detail}" if code else detail
         if hint:
             label = f"{hint}（{code}）"
-        return _redact(label, account)
+        return redact(label, account)
     if isinstance(exc, BotoCoreError):
-        return _redact(f"网络或凭证错误：{exc}", account)
-    return _redact(f"{type(exc).__name__}: {exc}", account)
+        return redact(f"网络或凭证错误：{exc}", account)
+    return redact(f"{type(exc).__name__}: {exc}", account)
 
 
 def build_filter() -> dict | None:

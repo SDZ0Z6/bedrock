@@ -316,17 +316,22 @@ def model_quota():
     except Exception as exc:
         fatal = f"{type(exc).__name__}: {exc}"
 
-    # 配额和限流都是按账号算的，没有「全部账号」这个选项：把多个账号合起来会
-    # 把一个快满的账号藏在平均值里，真限流时页面上还显示一切正常
-    chosen = None
-    selected = (request.args.get("account") or "").strip()
+    # 「全部账号」在这一页是安全的：表格逐行列 ARN，不做任何跨账号汇总。
+    # （早先禁掉它是怕求和/求平均把一个快满的账号藏起来，那对逐行清单不成立。）
+    chosen: list[Account] = []
+    selected = (request.args.get("account") or "all").strip()
     if accounts:
         by_key = {a.key: a for a in accounts}
-        if selected and selected not in by_key:
-            notes.append("所选账号已不在台账中，已切回第一个账号。")
-            selected = ""
-        chosen = by_key.get(selected) or accounts[0]
-        selected = chosen.key
+        if selected != "all" and selected not in by_key:
+            notes.append("所选账号已不在台账中，已切回全部账号。")
+            selected = "all"
+        chosen = accounts if selected == "all" else [by_key[selected]]
+
+    model = (request.args.get("model") or "").strip()
+    region = (request.args.get("region") or "").strip()
+    if region and region not in quotas.QUOTA_REGIONS:
+        notes.append("区域参数无效，已取消区域筛选。")
+        region = ""
 
     report = quotas.QuotaReport()
     if not fatal:
@@ -334,6 +339,13 @@ def model_quota():
             report = quotas.build_quota_report(chosen, refresh=refresh)
         except Exception as exc:
             fatal = f"{type(exc).__name__}: {exc}"
+
+    # 切换账号后原来选的模型可能就不在范围里了，这时空着一张表很莫名，
+    # 直接取消筛选并说一声，比让人自己发现要好
+    if model and model not in report.model_options:
+        notes.append(f"「{model}」不在当前账号范围内，已取消模型筛选。")
+        model = ""
+    report.apply_filters(model=model, region=region)
 
     if report.error:
         notes.append(f"读不到 Service Quotas：{report.error}")
@@ -346,7 +358,9 @@ def model_quota():
         notes=notes,
         accounts=accounts,
         selected_account=selected,
-        quota_region=quotas.QUOTA_REGION,
+        selected_model=model,
+        selected_region=region,
+        quota_regions=quotas.QUOTA_REGIONS,
         quota_service=quotas.SERVICE_CODE,
         quota_cache_hours=round(quotas.QUOTA_CACHE_TTL / 3600),
         **page_meta(),

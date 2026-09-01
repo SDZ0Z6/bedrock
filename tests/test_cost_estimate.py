@@ -452,8 +452,10 @@ def test_筛选条改动即提交(logged_in, ledger, fake_prices, fake_cloudwatc
     """账号和日期改了要自动重查。这一页的表单没有查询按钮，脚本丢了就等于失灵。"""
     html = logged_in.get("/cost-estimate").get_data(as_text=True)
     assert "estimate-filters" in html
-    # 脚本必须绑到这个表单上，光有 filters-auto 这个类是不起作用的
-    assert "getElementById('estimate-filters')" in html
+    # 脚本在 shell.html 里按类统一绑，所以表单必须带上 filters-auto——
+    # 光有 id 不起作用
+    assert "filters-auto" in html
+    assert "querySelectorAll('form.filters-auto')" in html
     assert "form.submit()" in html
 
 

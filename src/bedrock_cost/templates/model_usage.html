@@ -1,6 +1,7 @@
 {% extends "shell.html" %}
 {% block title %}模型用量 · Bedrock 成本监控{% endblock %}
 {% block page_title %}模型用量{% endblock %}
+{% block loading_label %}正在拉 CloudWatch 指标{% endblock %}
 
 {% block content %}
 
@@ -246,28 +247,6 @@
   <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
 </footer>
 
-<script>
-(function () {
-  const form = document.getElementById('metric-filters');
-  if (!form) return;
-  const content = document.querySelector('.content');
-  let pending = false;
-  function go() {
-    if (pending) return;
-    pending = true;
-    if (content) content.classList.add('is-loading');
-    form.submit();
-  }
-  for (const field of form.querySelectorAll('select, input')) {
-    field.addEventListener('change', go);
-  }
-  for (const chip of form.querySelectorAll('.chip')) {
-    chip.addEventListener('click', function () {
-      if (content) content.classList.add('is-loading');
-    });
-  }
-})();
-</script>
 
 {% if not fatal and report.series %}
   <div id="chart-tip" class="chart-tip" hidden></div>

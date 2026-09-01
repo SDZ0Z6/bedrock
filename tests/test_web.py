@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from datetime import date
 
+from pathlib import Path
+from urllib.parse import quote
+
 import pytest
 
 from bedrock_cost import auth, config
@@ -198,7 +201,9 @@ class TestCostUsagePage:
         assert "强制刷新" not in form
         # 只在 noscript 里保留一个兜底提交按钮
         assert form.count("<button") == form.count("<noscript><button") == 1
-        assert "addEventListener('change', go)" in html
+        # 脚本在 shell.html 里按类统一绑，filters-auto 丢了表单就变哑巴
+        assert "querySelectorAll('form.filters-auto')" in html
+        assert "form.submit()" in html
         assert "is-loading" in html  # 提交时压暗，不闪骨架屏
 
     @pytest.mark.parametrize(
@@ -363,7 +368,7 @@ class TestModelUsagePage:
         form = html[html.index('id="metric-filters"') : html.index("</form>")]
         assert "filters-auto" in html
         assert form.count("<button") == form.count("<noscript><button") == 1
-        assert "addEventListener('change', go)" in html
+        assert "querySelectorAll('form.filters-auto')" in html
 
     def test_line_chart_not_stacked_bars(self, logged_in, ledger, fake_cloudwatch):
         html = logged_in.get("/model-usage").get_data(as_text=True)
@@ -396,31 +401,310 @@ class TestCacheClear:
         assert response.status_code == 302
 
 
+class TestQuotaSorting:
+    """表头点一次升、再一次降、第三次回到服务端排好的默认分组。
+
+    排序在客户端做，所以这里只能守住「料齐不齐」：aria-sort、排序类型、
+    以及每个单元格的规范值 data-sort——渲染出来的文字带千分位、还有
+    「未列出」「无权限」，直接拿 textContent 排必错。
+    """
+
+    def head(self, logged_in):
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        return html, html[html.index("<thead>") : html.index("</thead>")]
+
+    def test_every_column_is_sortable(self, logged_in, ledger, fake_service_quotas):
+        _html, thead = self.head(logged_in)
+        assert thead.count("sortable") == 7          # 七列全带
+        assert thead.count('aria-sort="none"') == 7
+        assert thead.count('data-sort-type="number"') == 2   # TPM / TPD
+        assert thead.count('data-sort-type="text"') == 5
+
+    def test_cells_carry_a_canonical_sort_value(
+        self, logged_in, ledger, fake_service_quotas
+    ):
+        html, _thead = self.head(logged_in)
+        body = html[html.index("<tbody>") : html.index("</tbody>")]
+        # 数字用未格式化的原值，不是带千分位的显示文本
+        assert 'data-sort="30000000"' in body
+        assert 'data-sort="43200000000"' in body
+        assert 'data-sort="us-east-1"' in body
+        assert 'data-sort="111111111111"' in body
+        assert 'data-sort="Claude Opus 4.8"' in body
+
+    def test_the_script_is_there(self, logged_in, ledger, fake_service_quotas):
+        html, _thead = self.head(logged_in)
+        assert "th.sortable" in html
+        assert "aria-sort" in html
+        assert "cellIndex" in html
+
+    def test_no_account_separator_line(self, logged_in, ledger, fake_service_quotas):
+        """账号之间那道重线已移除，只留模型分组的细线。"""
+        html, _thead = self.head(logged_in)
+        assert "account-start" not in html
+        assert "group-start" in html
+
+    def test_account_separator_css_is_gone(self):
+        from bedrock_cost import filters
+
+        css = (Path(filters.__file__).parent / "static" / "style.css").read_text(
+            encoding="utf-8"
+        )
+        assert "tr.account-start" not in css
+        # 自定义排序时分组线要隐掉，不然线会散落在没意义的位置
+        assert ".quota-table.is-sorted tr.group-start td { border-top: none; }" in css
+
+
+class TestOverviewTagNote:
+    """标签值没匹配上时的提示条已从概览页撤掉，但数据层照旧在算。"""
+
+    def test_page_has_no_note_row(self, logged_in, ledger, fake_costs):
+        html = logged_in.get("/").get_data(as_text=True)
+        assert 'class="row-note"' not in html
+
+    def test_data_layer_still_computes_it(self):
+        """只是不渲染，逻辑没删——想恢复只改模板。"""
+        import inspect
+
+        from bedrock_cost import cost_explorer
+        from bedrock_cost.cost_explorer import CostSplit
+
+        # note 是在 _query 里算的（两个分支都还在）
+        source = inspect.getsource(cost_explorer._query)
+        assert "未匹配到任何消费" in source
+        assert "全部计入 UNTAG" in source
+        assert "note" in inspect.signature(CostSplit).parameters
+
+
+class TestAlertIcons:
+    """报错和告警前面要有图标。这件事只能在 CSS 里表达，所以直接查静态文件——
+    走 ::before 是为了一处改动覆盖全站 15 处 alert，包括 flash 那种运行时才
+    知道类别的。"""
+
+    def css(self):
+        from bedrock_cost import filters
+
+        return (Path(filters.__file__).parent / "static" / "style.css").read_text(
+            encoding="utf-8"
+        )
+
+    def test_error_and_warn_have_icons(self):
+        text = self.css()
+        assert '.alert-error::before { content: "❌"; }' in text
+        assert '.alert-warn::before  { content: "⚠️"; }' in text
+
+    def test_success_stays_plain(self):
+        """只有报错和告警要图标，成功消息不加。"""
+        assert ".alert-ok::before" not in self.css()
+
+    def test_a_real_warning_renders_with_the_class(
+        self, logged_in, ledger, fake_service_quotas
+    ):
+        """图标靠类名生效，所以告警必须真的带上 alert-warn。"""
+        html = logged_in.get("/model-quota?account=nope").get_data(as_text=True)
+        assert "alert alert-warn" in html
+        assert "已切回全部账号" in html
+
+
+class TestLoadingOverlay:
+    """等待动效。全站服务端同步渲染，动效盖在旧页面上，脚本丢了就只剩白等。"""
+
+    def test_overlay_is_on_every_shell_page(self, logged_in, ledger, fake_costs):
+        html = logged_in.get("/").get_data(as_text=True)
+        assert 'id="page-loading"' in html
+        assert 'class="page-loading-art"' in html
+        assert "/static/loading." in html   # 具体是 webm 还是 mp4 由素材决定
+        # 三个点：第一个常亮，后两个靠 CSS 动画依次出现
+        assert "<i>.</i><i>.</i><i>.</i>" in html
+
+    def test_prefers_the_alpha_webm(self, tmp_path):
+        """带 alpha 的只能是 webm，有就优先用；都没有就不渲染 video。"""
+        from bedrock_cost.filters import loading_media
+
+        assert loading_media(str(tmp_path)) == ""
+        (tmp_path / "loading.mp4").write_bytes(b"x")
+        assert loading_media(str(tmp_path)) == "loading.mp4"
+        (tmp_path / "loading.webm").write_bytes(b"x")
+        assert loading_media(str(tmp_path)) == "loading.webm"
+
+    def test_overlay_sits_outside_the_dimmed_content(self, logged_in, ledger, fake_costs):
+        """.content.is-loading 是整块压暗，动效在里面会被一起压暗。"""
+        html = logged_in.get("/").get_data(as_text=True)
+        assert html.index("</main>") < html.index('id="page-loading"')
+
+    def test_script_covers_links_and_forms(self, logged_in, ledger, fake_costs):
+        html = logged_in.get("/").get_data(as_text=True)
+        assert "a[href]" in html                                # 站内链接点了就盖
+        assert "querySelectorAll('form.filters-auto')" in html  # 筛选改动即提交
+        assert "addEventListener('submit'" in html              # POST 表单
+
+    def test_nav_links_carry_the_destination_text(self, logged_in, ledger, fake_costs):
+        """文案说的是**目标页**在等什么，所以挂在链接上。"""
+        html = logged_in.get("/").get_data(as_text=True)
+        assert 'data-loading="正在拉四个区的配额"' in html
+        assert 'data-loading="正在拉 CloudWatch 指标"' in html
+
+    def test_each_page_has_its_own_text(self, logged_in, ledger, fake_service_quotas):
+        """筛选提交后还留在同一页，用的是本页自己的文案。"""
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert "正在拉四个区的配额" in html
+        assert "首次约 45 秒" in html
+
+    def test_quota_refresh_link_says_it_skips_the_cache(
+        self, logged_in, ledger, fake_service_quotas
+    ):
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert 'data-loading="正在重新拉四个区的配额"' in html
+
+
 class TestModelQuotaPage:
-    """纯配额页：不查 CloudWatch，只列 Service Quotas 的两类 token 配额。"""
+    """配额页：不查 CloudWatch，按应用推理配置的 ARN 逐条列 TPM / TPD。"""
 
     def test_renders(self, logged_in, ledger, fake_service_quotas):
         html = logged_in.get("/model-quota").get_data(as_text=True)
         assert "模型配额" in html
-        assert "每日 Token 配额" in html
-        assert "每分钟 Token 配额" in html
+        for header in ("ARN ID", "模型名称", "模型 ID", "区域", "TPM", "TPD"):
+            assert f">{header}</th>" in html
+
+    def test_ratio_column_is_gone(self, logged_in, ledger, fake_service_quotas):
+        """「日 ÷ 分」是两条配额自己的比值，跟实际限流无关，已移除。"""
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert "日 ÷ 分" not in html
+        assert "每日 Token 配额" not in html
+        assert "每分钟 Token 配额" not in html
+
+    def test_lists_one_row_per_arn(self, logged_in, ledger, fake_service_quotas):
+        """默认全部账号：2 账号 × 2 模型 × 4 区 = 16 条 ARN，每条一行。"""
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        for acct in ("111111111111", "222222222222"):
+            for region in ("us-east-1", "us-east-2", "us-west-1", "us-west-2"):
+                for index in (0, 1):
+                    assert f"{acct[:2]}{region.replace('-', '')}{index}" in html
+        # 完整 ARN 每行都是同一套前缀，重复十六遍没有信息量，不显示
+        assert "application-inference-profile/" not in html
+
+    def test_shows_base_model_id_from_the_arn(self, logged_in, ledger, fake_service_quotas):
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert "anthropic.claude-opus-4-6-v1" in html
+
+    def test_shows_the_model_name_not_the_profile_name(
+        self, logged_in, ledger, fake_service_quotas
+    ):
+        """模型名称一列放配额名，账号自己起的配置名不显示。"""
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert "Claude Opus 4.6 V1" in html
+        assert "claude46Oupsauto_wjc_0529" not in html
+
+    def test_region_column_is_just_the_code(self, logged_in, ledger, fake_service_quotas):
+        """区域列只放区域码，中文名去掉。"""
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert "<code>us-east-1</code>" in html
+        for chinese in ("弗吉尼亚", "俄亥俄", "北加州", "俄勒冈"):
+            assert chinese not in html
+
+    def test_quotas_show_the_exact_number(self, logged_in, ledger, fake_service_quotas):
+        """TPM / TPD 显示完整数目，不是 30.0M 这种压缩写法。"""
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert "30,000,000" in html
+        assert "43,200,000,000" in html
+        assert "43.20B" not in html
+        # 可调性副行去掉了：日配额永远不可调、分钟配额永远可提额，逐行重复没意义
+        assert "可申请提额" not in html
+        assert "不可调" not in html
+
+    def test_flags_regions_that_missed_a_quota_increase(
+        self, logged_in, ledger, fake_service_quotas
+    ):
+        """提额按区批：us-east-1 提到了 6M，另外三个区还是 3M，必须标出来。"""
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert "个模型的配额四区不一致" in html
+        assert "6,000,000" in html and "3,000,000" in html
+        body = html[html.index("<tbody>") : html.index("</tbody>")]
+        lagging = [r for r in body.split("<tr") if "tone-warn" in r]
+        assert len(lagging) == 3
+        # 只有提过额那个账号的 Opus 4.6 会标，而且 us-east-1 自己不算
+        assert all("111111111111" in r and "Claude Opus 4.6 V1" in r for r in lagging)
+        assert not any('data-sort="us-east-1"' in r for r in lagging)
 
     def test_sidebar_has_four_entries(self, logged_in, ledger, fake_service_quotas):
         html = logged_in.get("/model-quota").get_data(as_text=True)
         for href in ('href="/"', 'href="/cost-usage"', 'href="/model-usage"', 'href="/model-quota"'):
             assert href in html
 
-    def test_no_region_filter(self, logged_in, ledger, fake_service_quotas):
-        """配额是账号级的全局池，四区共用，所以不该有区域维度。"""
+    def test_has_three_filters(self, logged_in, ledger, fake_service_quotas):
+        """账号 / 模型名称 / 区域三个筛选，都在同一个自动提交的表单里。"""
         html = logged_in.get("/model-quota").get_data(as_text=True)
         form = html[html.index('id="quota-filters"') : html.index("</form>")]
-        assert 'name="region"' not in form
+        for name in ('name="account"', 'name="model"', 'name="region"'):
+            assert name in form
+        assert "filters-auto" in html   # 类在 <form> 标签上，在切片之前
+        # 区域默认全部一起列，差异才比得出来；筛选是想单看某个区时才用
+        assert '<option value="" selected>全部区域</option>' in form
+        assert ">区域</th>" in html
 
-    def test_no_all_accounts_option(self, logged_in, ledger, fake_service_quotas):
-        """配额按账号发，合起来看没意义（也不能相加）。"""
+    def test_region_filter_narrows_the_table(self, logged_in, ledger, fake_service_quotas):
+        html = logged_in.get("/model-quota?region=us-east-2").get_data(as_text=True)
+        body = html[html.index("<tbody>") : html.index("</tbody>")]
+        assert "us-east-2" in body
+        assert "us-west-2" not in body
+        assert "已筛选" in html
+
+    def test_model_filter_narrows_the_table(self, logged_in, ledger, fake_service_quotas):
+        html = logged_in.get("/model-quota?model=Claude+Opus+4.8").get_data(as_text=True)
+        body = html[html.index("<tbody>") : html.index("</tbody>")]
+        assert "Claude Opus 4.8" in body
+        assert "Claude Opus 4.6 V1" not in body
+        # 下拉里别的模型还得在，不然筛完就换不回去了
+        form = html[html.index('id="quota-filters"') : html.index("</form>")]
+        assert "Claude Opus 4.6 V1" in form
+
+    def test_bad_filters_are_dropped_with_a_note(self, logged_in, ledger, fake_service_quotas):
+        html = logged_in.get("/model-quota?region=eu-west-9").get_data(as_text=True)
+        assert "区域参数无效" in html
+        html = logged_in.get("/model-quota?model=Claude+Nonexistent+9").get_data(as_text=True)
+        assert "已取消模型筛选" in html
+
+    def test_all_accounts_is_the_default(self, logged_in, ledger, fake_service_quotas):
+        """逐行列 ARN、不做跨账号汇总，所以「全部账号」在这一页是安全的。
+
+        早先禁掉它是怕求和/求平均把一个快满的账号藏进平均值里，
+        那个顾虑对「一行一条 ARN」的清单不成立。
+        """
         html = logged_in.get("/model-quota").get_data(as_text=True)
         form = html[html.index('id="quota-filters"') : html.index("</form>")]
-        assert 'value="all"' not in form
+        assert '<option value="all" selected>全部账号</option>' in form
+        assert "全部账号（2 个）" in html
+
+    def test_account_column_shows_the_number(self, logged_in, ledger, fake_service_quotas):
+        """账号列放 12 位号码；上游名做悬浮提示，不占列宽。"""
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert ">账号</th>" in html
+        assert '<code title="ALPHA">111111111111</code>' in html
+        assert '<code title="BETA">222222222222</code>' in html
+
+    def test_single_account_narrows_the_table(self, logged_in, ledger, fake_service_quotas, accounts):
+        # key 里的 # 必须编码，否则会被当成 URL 片段、整个参数丢掉
+        # （浏览器提交表单时自己会编码，这里是手写 URL）
+        key = quote(accounts[0].key, safe='')
+        html = logged_in.get(f"/model-quota?account={key}").get_data(as_text=True)
+        body = html[html.index("<tbody>") : html.index("</tbody>")]
+        assert "111111111111" in body
+        assert "222222222222" not in body
+
+    def test_quota_increase_is_judged_per_account(
+        self, logged_in, ledger, fake_service_quotas
+    ):
+        """两个账号的配额池互不相干。ALPHA 的 us-east-1 提到了 6M，BETA 四个区
+        都是 3M——不能拿 ALPHA 的 6M 去把 BETA 整片标黄。
+        """
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        body = html[html.index("<tbody>") : html.index("</tbody>")]
+        rows = body.split("<tr")
+        alpha_lagging = [r for r in rows if "111111111111" in r and "tone-warn" in r]
+        beta_lagging = [r for r in rows if "222222222222" in r and "tone-warn" in r]
+        assert len(alpha_lagging) == 3      # us-east-2 / us-west-1 / us-west-2
+        assert beta_lagging == []
+        assert "1 个模型的配额四区不一致" in html
 
     def test_defaults_to_first_account(self, logged_in, ledger, fake_service_quotas, accounts):
         html = logged_in.get("/model-quota").get_data(as_text=True)
@@ -428,7 +712,7 @@ class TestModelQuotaPage:
 
     def test_unknown_account_falls_back(self, logged_in, ledger, fake_service_quotas):
         html = logged_in.get("/model-quota?account=nope").get_data(as_text=True)
-        assert "已切回第一个账号" in html
+        assert "已切回全部账号" in html
 
     def test_shows_only_claude(self, logged_in, ledger, fake_service_quotas):
         html = logged_in.get("/model-quota").get_data(as_text=True)
@@ -436,15 +720,19 @@ class TestModelQuotaPage:
         assert "Nova" not in html
         assert "Cohere" not in html
 
-    def test_marks_long_context_as_separate(self, logged_in, ledger, fake_service_quotas):
+    def test_long_context_shows_up_as_having_no_profile(
+        self, logged_in, ledger, fake_service_quotas
+    ):
+        """1M 上下文是独立配额、没有对应的应用配置，要落在下面那张表里。"""
         html = logged_in.get("/model-quota").get_data(as_text=True)
         assert "1M Context Length" in html
+        assert "有配额，但账号下没有应用推理配置" in html
         assert "独立配额" in html
 
-    def test_explains_the_key_facts(self, logged_in, ledger, fake_service_quotas):
+    def test_no_how_to_read_section(self, logged_in, ledger, fake_service_quotas):
+        """说明卡整块移除，页面只留表格。"""
         html = logged_in.get("/model-quota").get_data(as_text=True)
-        for fact in ("账号级的全局池", "输入 + 输出 token 合计", "两条配额的可调性不一样"):
-            assert fact in html
+        assert "这一页怎么读" not in html
 
     def test_quota_api_failure_is_shown_not_fatal(self, logged_in, ledger, monkeypatch):
         from bedrock_cost import quotas
@@ -458,6 +746,23 @@ class TestModelQuotaPage:
         assert response.status_code == 200
         assert "读不到 Service Quotas" in response.get_data(as_text=True)
 
+    def test_degrades_when_profiles_are_denied(
+        self, logged_in, ledger, fake_service_quotas, monkeypatch
+    ):
+        """SCP 拒绝 ListInferenceProfiles 时，配额表照出，ARN 两列留空。"""
+        from bedrock_cost import quotas
+
+        monkeypatch.setattr(
+            quotas,
+            "fetch_app_profiles",
+            lambda account, region: ([], "AccessDeniedException: service control policy"),
+        )
+        quotas.clear_cache()
+        html = logged_in.get("/model-quota").get_data(as_text=True)
+        assert "Claude Opus 4.8" in html          # 配额本身照常
+        assert "无权限" in html                    # ARN 一列
+        assert "service control policy" in html   # 原因留给用户
+
     def test_no_credential_leak(self, logged_in, ledger, fake_service_quotas):
         html = logged_in.get("/model-quota").get_data(as_text=True)
         for secret in ("AKIAFAKEALPHA0000000", "x" * 40, TEST_PASSWORD):
@@ -468,9 +773,3 @@ class TestModelQuotaPage:
         assert response.status_code == 302
         assert "/login" in response.headers["Location"]
 
-    def test_shows_adjustability_per_quota(self, logged_in, ledger, fake_service_quotas):
-        """日配额改不了、分钟配额能申请提额——两者必须分开显示。"""
-        html = logged_in.get("/model-quota").get_data(as_text=True)
-        assert "不可调" in html
-        assert "可申请提额" in html
-        assert "可自助调整" not in html   # 旧的合并列已移除
