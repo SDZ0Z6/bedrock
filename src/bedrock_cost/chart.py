@@ -10,9 +10,10 @@ assign_slots 按名字哈希分配色槽，换了色相等于所有人记住的�
 全部作废，而这次要解决的只是底色变浅带来的对比度问题。
 
 绘制规范：
-  · 每条序列是一条堆叠的面积带，实色填充，层与层之间用一条底色发丝线分开
-  · 填充**不用半透明**：半透明只在单条序列时成立，9 条叠起来会互相透叠，
-    实际对比度掉到 3:1 以下，把 validate_palette 保证的东西全作废
+  · 每条序列是一条堆叠的面积带：上沿一条实色线，下方同色半透明填充
+  · 线负责识别、面积只负责体量感。线用的就是 SERIES_COLORS 里那个值，也就是
+    validate_palette 校验过 ≥3:1 的那个，所以校验结论对承载信息的元素依然成立
+  · 堆叠的各条带几何上互不重叠，半透明只是各自对着纸底变淡，不会互相透叠
   · 零线是实线，其余网格线用虚线后退一步——面积图的色块本来就重
   · 只在最高的那个点上做一处直接标注，其余交给坐标轴、悬浮提示和明细表
   · 文字一律用文本色，不用序列色
@@ -57,7 +58,11 @@ PLOT_H = 260
 MIN_BAND = 6.0
 MAX_BAND = 56.0
 IDEAL_W = 900
-SEG_GAP = 2.0   # 相邻两层之间那条底色发丝线的粗细
+# 上沿实色线的粗细。1.8px 在浅底上够醒目，又不会粗到把窄峰糊成一块。
+LINE_W = 1.8
+# 面积填充的不透明度。线负责识别，面积只负责体量感，所以可以压得比较淡；
+# 太浓的话 9 条叠起来整张图会闷，稀疏数据里那几个孤立的峰更是重得刺眼。
+AREA_FILL_OPACITY = 0.28
 
 
 def color_for(slot: int) -> str:
@@ -202,10 +207,14 @@ def render_stacked_areas(report, symbol: str = "$") -> Chart:
     # 每条序列画成一条堆叠的面积带：下沿是它下面所有序列的累计值，上沿是加上
     # 自己之后的累计值，首尾闭合成多边形。
     #
-    # 填充用**实色**而不是截图里那种半透明。半透明只在单条序列时成立；9 条叠
-    # 起来会互相透叠，实际对比度掉到 3:1 以下，把 validate_palette 保证的东西
-    # 全作废。所以这里用实色，band 之间靠一条底色的发丝线分隔——和原来柱状图
-    # 留 2px 间隙是同一个思路。
+    # 上沿画一条**实色的线**，面积用同色**半透明**填充。分工是刻意的：
+    #   · 线负责识别 —— 它用的就是 SERIES_COLORS 里那个颜色，也就是
+    #     scripts/validate_palette.py 校验过 ≥3:1 的那个值，所以那份校验
+    #     结论对「真正承载信息的元素」依然成立；
+    #   · 面积只负责体量感 —— 它是装饰，淡一点反而更好读。
+    #
+    # 堆叠的各条带在几何上互不重叠（一条压在另一条之上，不是叠在一起），
+    # 所以半透明只是各自对着纸底变淡，不会互相透叠成一团脏色。
     def point_x(index: int) -> float:
         return x0 + band * index + band / 2
 
@@ -215,24 +224,31 @@ def render_stacked_areas(report, symbol: str = "$") -> Chart:
         upper = [
             lower[i] - series.marked[i] * scale for i in range(count)
         ]
-        # 整条都是 0 的序列不画，免得在零线上留一条多余的描边
+        # 整条都是 0 的序列不画，免得在零线上留一条多余的线
         if all(abs(upper[i] - lower[i]) < 1e-9 for i in range(count)):
             continue
 
+        color = color_for(series.slot)
         top_edge = " ".join(f"{point_x(i):.2f},{upper[i]:.2f}" for i in range(count))
         bottom_edge = " ".join(
             f"{point_x(i):.2f},{lower[i]:.2f}" for i in reversed(range(count))
         )
         # 面积：上沿正序 + 下沿倒序，闭合
         parts.append(
-            f'<polygon fill="{color_for(series.slot)}" '
+            f'<polygon fill="{color}" fill-opacity="{AREA_FILL_OPACITY}" '
             f'points="{top_edge} {bottom_edge}"></polygon>'
         )
-        # 上沿描一条底色的发丝线，把相邻两层分开。单桶时没有「线」可言，跳过。
+        # 上沿的实色线。单桶时没有「线」可言，画个点代替，否则那一天什么都看不见。
         if count > 1:
             parts.append(
-                f'<polyline fill="none" stroke="{SURFACE}" stroke-width="{SEG_GAP:.1f}" '
-                f'stroke-linejoin="round" points="{top_edge}"></polyline>'
+                f'<polyline fill="none" stroke="{color}" stroke-width="{LINE_W}" '
+                f'stroke-linejoin="round" stroke-linecap="round" '
+                f'points="{top_edge}"></polyline>'
+            )
+        else:
+            parts.append(
+                f'<circle fill="{color}" cx="{point_x(0):.2f}" '
+                f'cy="{upper[0]:.2f}" r="{LINE_W}"></circle>'
             )
         lower = upper
     parts.append("</g>")

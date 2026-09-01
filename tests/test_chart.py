@@ -111,28 +111,44 @@ class TestRender:
         从零开始，两条带会完全重合，图上只看得到一个颜色。
         """
         rendered = chart.render_stacked_areas(make_report([[100.0] * 17, [100.0] * 17]))
-        polygons = re.findall(r'<polygon fill="([^"]+)" points="([^"]+)"', rendered.svg)
+        polygons = re.findall(r'<polygon [^>]*points="([^"]+)"', rendered.svg)
         assert len(polygons) == 2
         # 每条带取第一个点的 y，上面那条应当更高（y 更小）
-        first_y = [float(pts.split()[0].split(",")[1]) for _, pts in polygons]
+        first_y = [float(pts.split()[0].split(",")[1]) for pts in polygons]
         assert first_y[1] < first_y[0], "第二条带没有叠在第一条之上"
 
-    def test_fills_are_opaque(self):
-        """堆叠层不能用半透明填充。
+    def test_line_is_solid_and_fill_is_translucent(self):
+        """线实色、面积半透明——分工不能反过来。
 
-        截图里那种「细线 + 20% 填充」只在单条序列时成立；9 条叠起来会互相
-        透叠，实际对比度掉到 3:1 以下，scripts/validate_palette.py 保证的
-        东西就全作废了。
+        识别信息由线承载，所以线必须用 SERIES_COLORS 里那个校验过 ≥3:1 的原值，
+        不能带透明度；面积只负责体量感，淡一点更好读。反过来做的话，
+        scripts/validate_palette.py 校验的就不是实际承载信息的那个元素了。
         """
         rendered = chart.render_stacked_areas(make_report([[100.0] * 17, [50.0] * 17]))
-        assert "fill-opacity" not in rendered.svg
-        assert "opacity=" not in rendered.svg
+        polygons = re.findall(r"<polygon [^>]*>", rendered.svg)
+        polylines = re.findall(r"<polyline [^>]*>", rendered.svg)
+        assert len(polygons) == 2 and len(polylines) == 2
 
-    def test_layers_separated_by_a_surface_hairline(self):
-        """层与层之间靠一条底色发丝线分开，而不是靠描边或间隙。"""
+        assert all(f'fill-opacity="{chart.AREA_FILL_OPACITY}"' in p for p in polygons)
+        # 线上不许有任何透明度
+        assert all("opacity" not in line for line in polylines)
+        assert all(f'stroke-width="{chart.LINE_W}"' in line for line in polylines)
+
+    def test_line_uses_the_validated_palette_colour(self):
+        """线的颜色必须原样来自色板，不能自作主张调深调浅。"""
         rendered = chart.render_stacked_areas(make_report([[100.0] * 17, [50.0] * 17]))
-        assert f'stroke="{chart.SURFACE}"' in rendered.svg
-        assert rendered.svg.count("<polyline") == 2
+        strokes = re.findall(r'<polyline [^>]*stroke="([^"]+)"', rendered.svg)
+        assert strokes
+        assert all(s in chart.SERIES_COLORS or s == chart.OTHER_COLOR for s in strokes)
+
+    def test_single_bucket_draws_a_dot_not_a_line(self):
+        """只有一个时间桶时没有「线」可言，得画个点，否则那一天什么都看不见。"""
+        report = make_report([[100.0]], granularity="monthly")
+        report.dates, report.labels = ["2026-08-01"], ["8月"]
+        report.series[0].raw = report.series[0].marked = [100.0]
+        rendered = chart.render_stacked_areas(report)
+        assert "<circle" in rendered.svg
+        assert "<polyline" not in rendered.svg
 
     def test_gridlines_are_dashed_except_the_baseline(self):
         """零线是基准要站得住，其余虚线后退——面积图的色块本来就重。"""
