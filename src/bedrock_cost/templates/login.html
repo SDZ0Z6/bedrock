@@ -5,7 +5,11 @@
 {% block body %}
 <main class="login-card">
   <div class="login-head">
-    <div class="login-mark">📊</div>
+    {# 登录页是这张 16:9 插画唯一有足够宽度舒展开的地方，所以放大图。
+       alt 留空：它纯装饰，旁边的 h1 已经把身份说清楚了，读屏软件再念一遍
+       只是噪音。 #}
+    <img class="login-mark" src="{{ url_for('static', filename='logo-hero.png') }}"
+         alt="" width="640" height="636" decoding="async">
     <h1>Bedrock 成本监控</h1>
     <p>请登录后查看账号消费与预算使用情况</p>
   </div>
