@@ -585,41 +585,77 @@ tfoot td {
 }
 
 /* ------------------------------------------------------- 登录页 */
-.login-page {
+/* 左右两栏：左边品牌 + 标题 + 表单卡片，右边一张大图。 */
+.login-page { background: var(--bg); }
+
+.login-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(32px, 5vw, 72px);
+  min-height: 100vh;
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: 40px clamp(24px, 5vw, 64px);
+}
+
+.login-panel {
+  display: flex;
+  flex-direction: column;
+  /* 表单不该跟着屏幕一起变宽——输入框太长反而难扫视 */
+  max-width: 420px;
+  width: 100%;
+  justify-self: end;
+}
+
+/* 品牌：小 logo + 名字，和标题不重复——标题已经把名字说了一遍，
+   所以这里字号压得很小，只当页眉用 */
+.login-brand {
   display: flex;
   align-items: center;
-  justify-content: center;
-  min-height: 100vh;
-  padding: 24px;
-  background: radial-gradient(1100px 560px at 50% -10%, #f7f4ee 0%, var(--bg) 62%);
+  gap: 9px;
+  margin-bottom: clamp(28px, 8vh, 64px);
+  font-size: 15px;
+  font-weight: 600;
 }
+.login-brand img { width: 26px; height: 26px; object-fit: contain; }
+
+.login-title {
+  margin: 0 0 10px;
+  font-family: var(--font-display);
+  font-size: clamp(30px, 4.2vw, 46px);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+.login-sub {
+  margin: 0 0 26px;
+  color: var(--text-dim);
+  font-size: 15px;
+}
+
 .login-card {
-  width: 100%;
-  max-width: 372px;
-  padding: 32px 30px;
+  padding: 22px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 14px;
-  box-shadow: var(--shadow-lg);
 }
-.login-head { text-align: center; margin-bottom: 22px; }
-.login-mark { font-size: 32px; }
-.login-head h1 { margin: 8px 0 6px; font-size: 19px; font-weight: 600; }
-.login-head p { margin: 0; font-size: 12.5px; color: var(--text-dim); }
 .login-card form { display: flex; flex-direction: column; gap: 14px; }
-.login-card label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-dim); }
+.login-card label { display: flex; flex-direction: column; gap: 6px; }
+.login-card label span { font-size: 12.5px; color: var(--text-dim); }
 .login-card input {
-  height: 38px;
+  height: 40px;
   padding: 0 12px;
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 8px;
   color: var(--text);
   font-size: 14px;
+  color-scheme: light;
 }
-.login-card input:focus { outline: none; border-color: var(--accent); }
+.login-card input:focus { outline: none; border-color: var(--accent); background: var(--panel); }
 .login-card button {
-  height: 38px;
+  height: 40px;
   margin-top: 4px;
   border: none;
   border-radius: 8px;
@@ -630,7 +666,25 @@ tfoot td {
   font-weight: 500;
   cursor: pointer;
 }
-.login-card button:hover { background: #333029; border-color: #333029; }
+.login-card button:hover { background: #333029; }
+.login-card .alert { margin-bottom: 14px; }
+
+/* 右栏插画。正方形不裁切——九个小人是完整构图，切掉一排就不成立了 */
+.login-art { justify-self: start; width: 100%; max-width: 520px; }
+.login-art img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+}
+
+/* 窄屏：插画退场，表单居中。它是气氛不是信息，手机上没必要挤进来 */
+@media (max-width: 900px) {
+  .login-shell { grid-template-columns: minmax(0, 1fr); justify-items: center; }
+  .login-panel { justify-self: center; }
+  .login-art { display: none; }
+}
 
 @media (max-width: 900px) {
   .shell { flex-direction: column; }
@@ -894,10 +948,3 @@ a:hover { color: var(--accent-dim); }
   object-fit: contain;
 }
 
-/* 登录页主视觉。插画本身四周已经留白，这里不再加额外边距 */
-.login-mark {
-  display: block;
-  width: min(230px, 62%);
-  height: auto;
-  margin: 0 auto 6px;
-}

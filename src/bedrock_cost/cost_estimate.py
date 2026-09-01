@@ -176,7 +176,7 @@ class EstimateReport:
     end: date
     rows: list[EstimateRow] = field(default_factory=list)
     # 下面三个字段的形状是照着 usage_explorer.UsageReport 来的，这样
-    # chart.render_stacked_bars 能直接吃，配色也和成本页共用同一套色槽
+    # chart.render_stacked_areas 能直接吃，配色也和成本页共用同一套色槽
     dates: list[str] = field(default_factory=list)           # 每个桶的 ISO 日期
     labels: list[str] = field(default_factory=list)          # 轴上的短标签
     series: list[Series] = field(default_factory=list)       # 每个模型每天的钱
@@ -186,7 +186,7 @@ class EstimateReport:
     price_stale: bool = False
     price_error: str | None = None
 
-    # chart.render_stacked_bars 会读这两个属性来写 SVG 的 aria-label。
+    # chart.render_stacked_areas 会读这两个属性来写 SVG 的 aria-label。
     # 这一页永远按日、永远按模型分线，所以是常量。
     granularity: str = "daily"
     dimension_label: str = "模型"

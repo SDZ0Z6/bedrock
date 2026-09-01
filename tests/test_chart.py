@@ -83,60 +83,86 @@ class TestNiceStep:
 
 class TestRender:
     def test_empty_report_renders_a_placeholder(self):
-        rendered = chart.render_stacked_bars(make_report([]))
+        rendered = chart.render_stacked_areas(make_report([]))
         assert rendered.empty is True
         assert "没有消费数据" in rendered.svg
         assert rendered.height >= chart.PLOT_H
 
     def test_all_zero_report_is_treated_as_empty(self):
-        rendered = chart.render_stacked_bars(make_report([[0.0] * 17]))
+        rendered = chart.render_stacked_areas(make_report([[0.0] * 17]))
         assert rendered.empty is True
 
     def test_basic_structure(self):
-        rendered = chart.render_stacked_bars(make_report([[100.0] * 17, [50.0] * 17]))
+        rendered = chart.render_stacked_areas(make_report([[100.0] * 17, [50.0] * 17]))
         assert 'viewBox="0 0' in rendered.svg
         assert "aria-label=" in rendered.svg
         assert rendered.empty is False
 
-    def test_rounded_data_end_uses_a_clip_per_column(self):
-        """圆角必须落在整根柱子的轮廓上，否则顶端是细条时等于没加。"""
-        report = make_report([[100.0] * 17, [0.01] * 17])
-        rendered = chart.render_stacked_bars(report)
-        columns_with_cost = sum(1 for v in report.column_totals if v > 0)
-        assert rendered.svg.count("<clipPath") == columns_with_cost
-        assert "<path d=" in rendered.svg
+    def test_one_area_band_per_series(self):
+        """每条有数据的序列画一条面积带；全零的序列不画，免得在零线上留描边。"""
+        report = make_report([[100.0] * 17, [50.0] * 17, [0.0] * 17])
+        rendered = chart.render_stacked_areas(report)
+        assert rendered.svg.count("<polygon") == 2
 
-    def test_gridlines_are_solid_never_dashed(self):
-        rendered = chart.render_stacked_bars(make_report([[100.0] * 17]))
-        assert "dasharray" not in rendered.svg
+    def test_bands_are_stacked_not_overlaid(self):
+        """第二条带的下沿必须压在第一条的上沿上，而不是各自从零线起画。
 
-    def test_bar_width_is_capped(self):
-        """柱子不许填满整个 band，留白是设计的一部分。"""
-        rendered = chart.render_stacked_bars(make_report([[100.0, 100.0, 100.0]]))
-        widths = [float(w) for w in re.findall(r'<rect fill="[^"]+" x="[^"]+" y="[^"]+" width="([\d.]+)"', rendered.svg)]
-        assert widths
-        assert max(widths) <= chart.MAX_BAR_W
+        两条等量序列：下面那条占 0~50%，上面那条占 50~100%。如果画错成各自
+        从零开始，两条带会完全重合，图上只看得到一个颜色。
+        """
+        rendered = chart.render_stacked_areas(make_report([[100.0] * 17, [100.0] * 17]))
+        polygons = re.findall(r'<polygon fill="([^"]+)" points="([^"]+)"', rendered.svg)
+        assert len(polygons) == 2
+        # 每条带取第一个点的 y，上面那条应当更高（y 更小）
+        first_y = [float(pts.split()[0].split(",")[1]) for _, pts in polygons]
+        assert first_y[1] < first_y[0], "第二条带没有叠在第一条之上"
+
+    def test_fills_are_opaque(self):
+        """堆叠层不能用半透明填充。
+
+        截图里那种「细线 + 20% 填充」只在单条序列时成立；9 条叠起来会互相
+        透叠，实际对比度掉到 3:1 以下，scripts/validate_palette.py 保证的
+        东西就全作废了。
+        """
+        rendered = chart.render_stacked_areas(make_report([[100.0] * 17, [50.0] * 17]))
+        assert "fill-opacity" not in rendered.svg
+        assert "opacity=" not in rendered.svg
+
+    def test_layers_separated_by_a_surface_hairline(self):
+        """层与层之间靠一条底色发丝线分开，而不是靠描边或间隙。"""
+        rendered = chart.render_stacked_areas(make_report([[100.0] * 17, [50.0] * 17]))
+        assert f'stroke="{chart.SURFACE}"' in rendered.svg
+        assert rendered.svg.count("<polyline") == 2
+
+    def test_gridlines_are_dashed_except_the_baseline(self):
+        """零线是基准要站得住，其余虚线后退——面积图的色块本来就重。"""
+        rendered = chart.render_stacked_areas(make_report([[100.0] * 17]))
+        lines = re.findall(r"<line [^>]*></line>", rendered.svg)
+        assert len(lines) >= 2
+        solid = [ln for ln in lines if "dasharray" not in ln]
+        assert len(solid) == 1, "应当恰好只有零线是实线"
+        assert chart.BASELINE in solid[0]
 
     def test_height_includes_the_x_axis_band(self):
         """容器高度要含轴标签，否则卡片里会出现一条小小的纵向滚动条。"""
-        rendered = chart.render_stacked_bars(make_report([[100.0] * 17]))
+        rendered = chart.render_stacked_areas(make_report([[100.0] * 17]))
         assert rendered.height == chart.PAD_T + chart.PLOT_H + chart.PAD_B
         assert chart.PAD_B >= 40
 
     def test_one_hit_area_per_bucket_and_keyboard_reachable(self):
         report = make_report([[100.0] * 17])
-        rendered = chart.render_stacked_bars(report)
+        rendered = chart.render_stacked_areas(report)
         assert rendered.svg.count('class="chart-hit"') == len(report.dates)
         assert rendered.svg.count('tabindex="0"') == len(report.dates)
 
     def test_exactly_one_direct_label(self):
         """只在最高那根柱子上标一处，不给每根都写数字。"""
-        rendered = chart.render_stacked_bars(make_report([[10.0] * 16 + [900.0]]))
+        rendered = chart.render_stacked_areas(make_report([[10.0] * 16 + [900.0]]))
         assert rendered.svg.count('font-weight="600"') == 1
 
     def test_tooltip_payload_carries_both_amounts(self):
         report = make_report([[100.0] * 17, [50.0] * 17])
-        rendered = chart.render_stacked_bars(report)
+        rendered = chart.render_stacked_areas(report)
         assert len(rendered.tooltip) == len(report.dates)
         rows = [row for bucket in rendered.tooltip for row in bucket["rows"]]
         assert rows
@@ -144,7 +170,7 @@ class TestRender:
 
     def test_tooltip_rows_sorted_by_amount(self):
         report = make_report([[10.0] * 17, [500.0] * 17])
-        rendered = chart.render_stacked_bars(report)
+        rendered = chart.render_stacked_areas(report)
         amounts = [row["marked"] for row in rendered.tooltip[0]["rows"]]
         assert amounts == sorted(amounts, reverse=True)
 
@@ -155,7 +181,7 @@ class TestRender:
         long_report.dates, long_report.labels = long_dates, long_labels
         long_report.series[0].raw = [1.0] * len(long_dates)
         long_report.series[0].marked = [1.0] * len(long_dates)
-        rendered = chart.render_stacked_bars(long_report)
+        rendered = chart.render_stacked_areas(long_report)
         assert rendered.width > chart.IDEAL_W
         assert len(long_dates) > 300
 
@@ -165,14 +191,14 @@ class TestRender:
         long_report.dates, long_report.labels = long_dates, long_labels
         long_report.series[0].raw = [1.0] * len(long_dates)
         long_report.series[0].marked = [1.0] * len(long_dates)
-        rendered = chart.render_stacked_bars(long_report)
+        rendered = chart.render_stacked_areas(long_report)
         shown = rendered.svg.count('text-anchor="middle"')
         assert shown < len(long_dates)
 
     def test_escapes_series_and_label_text(self):
         report = make_report([[100.0] * 17])
         report.labels[0] = '<script>"&'
-        rendered = chart.render_stacked_bars(report)
+        rendered = chart.render_stacked_areas(report)
         assert "<script>" not in rendered.svg
         assert "&lt;script&gt;" in rendered.svg
 

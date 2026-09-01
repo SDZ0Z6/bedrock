@@ -1,4 +1,4 @@
-"""堆叠柱状图（SVG，无外部依赖）。
+"""堆叠面积图（SVG，无外部依赖）。
 
 配色是 dataviz 规范的分类色板，用 scripts/validate_palette.py 对本项目的卡片
 底色跑过检查：对比度、亮度带、色度下限、色觉障碍分离度。**改色或换底色都要
@@ -10,11 +10,11 @@ assign_slots 按名字哈希分配色槽，换了色相等于所有人记住的�
 全部作废，而这次要解决的只是底色变浅带来的对比度问题。
 
 绘制规范：
-  · 柱子最粗 24px，band 里剩下的留白不填满
-  · 堆叠段之间留 2px 底色间隙做分隔，不画描边
-  · 最顶端的数据端 4px 圆角，贴基线的一端是方角
-  · 网格线是 1px 实线，比底色深一档，尽量后退
-  · 只在最高的那根柱子上做一处直接标注，其余交给坐标轴、悬浮提示和明细表
+  · 每条序列是一条堆叠的面积带，实色填充，层与层之间用一条底色发丝线分开
+  · 填充**不用半透明**：半透明只在单条序列时成立，9 条叠起来会互相透叠，
+    实际对比度掉到 3:1 以下，把 validate_palette 保证的东西全作废
+  · 零线是实线，其余网格线用虚线后退一步——面积图的色块本来就重
+  · 只在最高的那个点上做一处直接标注，其余交给坐标轴、悬浮提示和明细表
   · 文字一律用文本色，不用序列色
 """
 
@@ -51,12 +51,13 @@ LABEL_TEXT = "#1a1918"
 
 PAD_L, PAD_R, PAD_T, PAD_B = 76, 20, 26, 48
 PLOT_H = 260
-MAX_BAR_W = 24.0
-MIN_BAND = 15.0
+# 面积图的每个桶只是折线上的一个点，不像柱子那样需要宽度，所以 MIN_BAND 比
+# 柱状图时代小得多：一年按日是 365 个桶，柱状图要 5475px 画布，面积图 2190px
+# 就够，横向滚动的距离少了一大半。下限 6px 是为了悬浮命中区还点得中。
+MIN_BAND = 6.0
 MAX_BAND = 56.0
 IDEAL_W = 900
-SEG_GAP = 2.0
-CORNER = 4.0
+SEG_GAP = 2.0   # 相邻两层之间那条底色发丝线的粗细
 
 
 def color_for(slot: int) -> str:
@@ -115,22 +116,6 @@ def _nice_step(span: float, intervals: int = 4) -> float:
     return base * 10
 
 
-def _top_rounded_path(x: float, y: float, w: float, h: float, r: float) -> str:
-    """顶端圆角、底端方角的矩形路径。"""
-    r = max(0.0, min(r, w / 2, h))
-    if r <= 0.2:
-        return (
-            f'<rect x="{x:.2f}" y="{y:.2f}" width="{w:.2f}" height="{h:.2f}"></rect>'
-        )
-    bottom = y + h
-    d = (
-        f"M{x:.2f},{bottom:.2f} L{x:.2f},{y + r:.2f} "
-        f"A{r:.2f},{r:.2f} 0 0 1 {x + r:.2f},{y:.2f} "
-        f"L{x + w - r:.2f},{y:.2f} "
-        f"A{r:.2f},{r:.2f} 0 0 1 {x + w:.2f},{y + r:.2f} "
-        f"L{x + w:.2f},{bottom:.2f} Z"
-    )
-    return f'<path d="{d}"></path>'
 
 
 @dataclass
@@ -142,10 +127,14 @@ class Chart:
     empty: bool = False
 
 
-def render_stacked_bars(report, symbol: str = "$") -> Chart:
-    """把 UsageReport 画成堆叠柱状图。
+def render_stacked_areas(report, symbol: str = "$") -> Chart:
+    """把 UsageReport 画成堆叠面积图。
 
-    序列已按加价后总额降序排好，所以金额大的堆在下面，视觉上更稳。
+    序列已按总额降序排好，所以金额大的堆在下面，视觉上更稳。
+
+    report 只需要满足几个属性：dates / labels / series / column_totals / peak /
+    granularity / dimension_label。usage_explorer.UsageReport 和
+    cost_estimate.EstimateReport 都是照着这个形状来的。
     """
     dates = report.dates
     count = len(dates)
@@ -172,7 +161,6 @@ def render_stacked_bars(report, symbol: str = "$") -> Chart:
     height = PAD_T + PLOT_H + PAD_B
     # 桶少的时候把绘图区居中，避免整张图挤在左边
     x0 = PAD_L + max(0.0, (width - PAD_L - PAD_R - plot_w) / 2)
-    bar_w = min(MAX_BAR_W, max(4.0, band - 6))
     plot_bottom = PAD_T + PLOT_H
 
     # ---------------------------------------------------------- Y 轴
@@ -187,18 +175,20 @@ def render_stacked_bars(report, symbol: str = "$") -> Chart:
         f'<svg class="chart-svg" viewBox="0 0 {width} {height}" '
         f'width="{width}" height="{height}" role="img" '
         f'aria-label="按{"月" if report.granularity == "monthly" else "日"}'
-        f'的{html.escape(report.dimension_label)}成本堆叠柱状图，'
+        f'的{html.escape(report.dimension_label)}成本堆叠面积图，'
         f'共 {count} 个时间桶，{len(report.series)} 条序列">'
     )
 
-    # 网格线与刻度（发丝实线，从不用虚线）
+    # 网格线与刻度。零线是实线（它是基准，要能站住），其余用虚线后退一步——
+    # 面积图的色块本来就重，实线网格会和它抢。
     parts.append('<g class="chart-grid">')
     for tick in range(tick_count + 1):
         value = step * tick
         y = plot_bottom - value * scale
+        dash = "" if tick == 0 else ' stroke-dasharray="3 4"'
         parts.append(
             f'<line x1="{PAD_L:.0f}" y1="{y:.2f}" x2="{width - PAD_R:.0f}" y2="{y:.2f}" '
-            f'stroke="{BASELINE if tick == 0 else GRID}" stroke-width="1"></line>'
+            f'stroke="{BASELINE if tick == 0 else GRID}" stroke-width="1"{dash}></line>'
         )
         parts.append(
             f'<text x="{PAD_L - 10:.0f}" y="{y + 4:.2f}" text-anchor="end" '
@@ -208,55 +198,43 @@ def render_stacked_bars(report, symbol: str = "$") -> Chart:
         )
     parts.append("</g>")
 
-    # ---------------------------------------------------------- 柱体
-    # 圆角要落在整根柱子的轮廓上，不能只给最上面那一段：堆叠图里顶端常常是
-    # 一条亚像素的细条（比如「其他」只有几分钱），给它加圆角等于没加。
-    # 所以按列生成一个「顶端圆角」的裁剪路径，再把各段裁进去。
-    parts.append("<defs>")
-    for index in range(count):
-        if totals[index] <= 0:
+    # ---------------------------------------------------------- 面积带
+    # 每条序列画成一条堆叠的面积带：下沿是它下面所有序列的累计值，上沿是加上
+    # 自己之后的累计值，首尾闭合成多边形。
+    #
+    # 填充用**实色**而不是截图里那种半透明。半透明只在单条序列时成立；9 条叠
+    # 起来会互相透叠，实际对比度掉到 3:1 以下，把 validate_palette 保证的东西
+    # 全作废。所以这里用实色，band 之间靠一条底色的发丝线分隔——和原来柱状图
+    # 留 2px 间隙是同一个思路。
+    def point_x(index: int) -> float:
+        return x0 + band * index + band / 2
+
+    lower = [plot_bottom] * count           # 当前累计的上沿，逐层往上抬
+    parts.append('<g class="chart-areas">')
+    for series in report.series:
+        upper = [
+            lower[i] - series.marked[i] * scale for i in range(count)
+        ]
+        # 整条都是 0 的序列不画，免得在零线上留一条多余的描边
+        if all(abs(upper[i] - lower[i]) < 1e-9 for i in range(count)):
             continue
-        band_x = x0 + band * index
-        bar_x = band_x + (band - bar_w) / 2
-        h = totals[index] * scale
-        parts.append(
-            f'<clipPath id="cubar{index}">'
-            f"{_top_rounded_path(bar_x, plot_bottom - h, bar_w, h, CORNER)}"
-            f"</clipPath>"
+
+        top_edge = " ".join(f"{point_x(i):.2f},{upper[i]:.2f}" for i in range(count))
+        bottom_edge = " ".join(
+            f"{point_x(i):.2f},{lower[i]:.2f}" for i in reversed(range(count))
         )
-    parts.append("</defs>")
-
-    parts.append('<g class="chart-bars">')
-    for index in range(count):
-        if totals[index] <= 0:
-            continue
-        band_x = x0 + band * index
-        bar_x = band_x + (band - bar_w) / 2
-        # 该列最上面一个非零段：它上面没有东西，所以不留间隙
-        top_series = -1
-        for position, series in enumerate(report.series):
-            if series.marked[index] > 0:
-                top_series = position
-
-        parts.append(f'<g clip-path="url(#cubar{index})">')
-        y_base = plot_bottom
-        for position, series in enumerate(report.series):
-            value = series.marked[index]
-            if value <= 0:
-                continue
-            h = value * scale
-            gap = 0.0 if position == top_series else SEG_GAP
-            draw_h = h - gap
-            if draw_h < 1.0:
-                draw_h = min(h, 1.0)
-            # 间隙留在段的上沿，堆叠边界仍落在真实的累计位置上
+        # 面积：上沿正序 + 下沿倒序，闭合
+        parts.append(
+            f'<polygon fill="{color_for(series.slot)}" '
+            f'points="{top_edge} {bottom_edge}"></polygon>'
+        )
+        # 上沿描一条底色的发丝线，把相邻两层分开。单桶时没有「线」可言，跳过。
+        if count > 1:
             parts.append(
-                f'<rect fill="{color_for(series.slot)}" x="{bar_x:.2f}" '
-                f'y="{y_base - draw_h:.2f}" width="{bar_w:.2f}" '
-                f'height="{draw_h:.2f}"></rect>'
+                f'<polyline fill="none" stroke="{SURFACE}" stroke-width="{SEG_GAP:.1f}" '
+                f'stroke-linejoin="round" points="{top_edge}"></polyline>'
             )
-            y_base -= h
-        parts.append("</g>")
+        lower = upper
     parts.append("</g>")
 
     # ---------------------------------------------------------- 唯一一处直接标注：最高的柱子

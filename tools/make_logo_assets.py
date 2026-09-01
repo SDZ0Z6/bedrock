@@ -18,9 +18,10 @@
 品牌色也在。
 
 产物（都提交进仓库，部署时不需要跑这个脚本）：
-    logo-hero.png    登录页主视觉，宽 640，整幅构图
-    logo-mark.png    侧边栏品牌区，96×96，侧脸特写
+    logo-mark.png    侧边栏与登录页品牌区，96×96，侧脸特写
     favicon.png      浏览器标签页，64×64，侧脸特写
+
+登录页右侧那张大图是另一个文件（static/login-art.webp），不由这个脚本生成。
 """
 
 from __future__ import annotations
@@ -153,7 +154,6 @@ def main() -> None:
     print(f"侧脸特写：{head.size[0]}×{head.size[1]}")
 
     print("生成：")
-    save(full, "logo-hero.png", width=640)
     save(head, "logo-mark.png", box=96)
     save(head, "favicon.png", box=64)
 
