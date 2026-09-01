@@ -16,7 +16,10 @@
   <aside class="sidebar">
     <div class="side-head">
       <div class="side-brand">
-        <span class="mark">📊</span>
+        {# 小尺寸用的是只截侧脸的那一版，整幅缩到 24px 会糊成彩点，
+           见 tools/make_logo_assets.py #}
+        <img class="mark" src="{{ url_for('static', filename='logo-mark.png') }}"
+             alt="" width="96" height="96" decoding="async">
         <span class="side-brand-text">Bedrock<br>成本监控</span>
       </div>
       <button class="side-toggle" type="button" aria-expanded="true" aria-label="收起侧边栏">

@@ -1,15 +1,21 @@
-"""堆叠柱状图（SVG，无外部依赖）。
+"""堆叠面积图（SVG，无外部依赖）。
 
-配色是 dataviz 规范的深色分类色板，已用 scripts/validate_palette.py 对本项目
-的卡片底色 #1a1e2a 跑过全部检查：亮度带、色度下限、CVD 分离度（最差相邻
-ΔE 8.4）、常视觉下限（19.3）、对比度全部 PASS。改色请重新跑一遍验证。
+配色是 dataviz 规范的分类色板，用 scripts/validate_palette.py 对本项目的卡片
+底色跑过检查：对比度、亮度带、色度下限、色觉障碍分离度。**改色或换底色都要
+重跑一遍**——对比度是跟着底色变的，2026-09 换浅色主题时黄和紫就是这么被揪出来
+要压暗的。
+
+色相沿用改主题之前那一套，只把黄和紫压暗到浅底上够 3:1。不换色相是有意的：
+assign_slots 按名字哈希分配色槽，换了色相等于所有人记住的「哪个模型是什么颜色」
+全部作废，而这次要解决的只是底色变浅带来的对比度问题。
 
 绘制规范：
-  · 柱子最粗 24px，band 里剩下的留白不填满
-  · 堆叠段之间留 2px 底色间隙做分隔，不画描边
-  · 最顶端的数据端 4px 圆角，贴基线的一端是方角
-  · 网格线是 1px 实线，比底色深一档，尽量后退
-  · 只在最高的那根柱子上做一处直接标注，其余交给坐标轴、悬浮提示和明细表
+  · 每条序列是一条堆叠的面积带：上沿一条实色线，下方同色半透明填充
+  · 线负责识别、面积只负责体量感。线用的就是 SERIES_COLORS 里那个值，也就是
+    validate_palette 校验过 ≥3:1 的那个，所以校验结论对承载信息的元素依然成立
+  · 堆叠的各条带几何上互不重叠，半透明只是各自对着纸底变淡，不会互相透叠
+  · 零线是实线，其余网格线用虚线后退一步——面积图的色块本来就重
+  · 只在最高的那个点上做一处直接标注，其余交给坐标轴、悬浮提示和明细表
   · 文字一律用文本色，不用序列色
 """
 
@@ -24,28 +30,39 @@ SERIES_COLORS = [
     "#3987e5",  # 1 blue
     "#d95926",  # 2 orange
     "#199e70",  # 3 aqua
-    "#c98500",  # 4 yellow
+    "#c48200",  # 4 yellow   浅底上 2.92:1 不够，压暗到 3.06
     "#d55181",  # 5 magenta
     "#008300",  # 6 green
-    "#9085e9",  # 7 violet
+    "#9384e0",  # 7 violet   同上。注意不能只压暗：单纯压暗会让它在红色盲下
+                #           和蓝色更难分（ΔE 1.8 -> 0.7），所以色相同时往洋红
+                #           挪了 3°，对比度 3.02、红色盲 ΔE 反而升到 2.0
     "#e66767",  # 8 red
 ]
-OTHER_COLOR = "#7a8496"  # 「其他」用中性灰，不占分类色槽（对比度 4.41:1）
+OTHER_COLOR = "#7a8496"  # 「其他」用中性灰，不占分类色槽
 
-SURFACE = "#1a1e2a"  # 卡片底色，同时充当段间间隙的颜色
-GRID = "#2a3040"     # 比底色深一档的发丝网格线
-BASELINE = "#383f52"
-TICK_TEXT = "#9aa3b5"
-LABEL_TEXT = "#e6e9f0"
+# 这几个值要和 style.css 的令牌对上：SURFACE = --panel，GRID = --line-soft，
+# BASELINE = --line，TICK_TEXT = --text-mute，LABEL_TEXT = --text。
+# SVG 里用不了 CSS 变量（图是在服务端拼字符串生成的），只能各写一份，
+# 所以改主题时两边都要动。
+SURFACE = "#fbf9f6"  # 卡片底色，同时充当段间间隙的颜色
+GRID = "#e4ded4"     # 比底色深一档的发丝网格线
+BASELINE = "#d5cec2"
+TICK_TEXT = "#6f6861"
+LABEL_TEXT = "#1a1918"
 
 PAD_L, PAD_R, PAD_T, PAD_B = 76, 20, 26, 48
 PLOT_H = 260
-MAX_BAR_W = 24.0
-MIN_BAND = 15.0
+# 面积图的每个桶只是折线上的一个点，不像柱子那样需要宽度，所以 MIN_BAND 比
+# 柱状图时代小得多：一年按日是 365 个桶，柱状图要 5475px 画布，面积图 2190px
+# 就够，横向滚动的距离少了一大半。下限 6px 是为了悬浮命中区还点得中。
+MIN_BAND = 6.0
 MAX_BAND = 56.0
 IDEAL_W = 900
-SEG_GAP = 2.0
-CORNER = 4.0
+# 上沿实色线的粗细。1.8px 在浅底上够醒目，又不会粗到把窄峰糊成一块。
+LINE_W = 1.8
+# 面积填充的不透明度。线负责识别，面积只负责体量感，所以可以压得比较淡；
+# 太浓的话 9 条叠起来整张图会闷，稀疏数据里那几个孤立的峰更是重得刺眼。
+AREA_FILL_OPACITY = 0.28
 
 
 def color_for(slot: int) -> str:
@@ -104,22 +121,6 @@ def _nice_step(span: float, intervals: int = 4) -> float:
     return base * 10
 
 
-def _top_rounded_path(x: float, y: float, w: float, h: float, r: float) -> str:
-    """顶端圆角、底端方角的矩形路径。"""
-    r = max(0.0, min(r, w / 2, h))
-    if r <= 0.2:
-        return (
-            f'<rect x="{x:.2f}" y="{y:.2f}" width="{w:.2f}" height="{h:.2f}"></rect>'
-        )
-    bottom = y + h
-    d = (
-        f"M{x:.2f},{bottom:.2f} L{x:.2f},{y + r:.2f} "
-        f"A{r:.2f},{r:.2f} 0 0 1 {x + r:.2f},{y:.2f} "
-        f"L{x + w - r:.2f},{y:.2f} "
-        f"A{r:.2f},{r:.2f} 0 0 1 {x + w:.2f},{y + r:.2f} "
-        f"L{x + w:.2f},{bottom:.2f} Z"
-    )
-    return f'<path d="{d}"></path>'
 
 
 @dataclass
@@ -131,10 +132,14 @@ class Chart:
     empty: bool = False
 
 
-def render_stacked_bars(report, symbol: str = "$") -> Chart:
-    """把 UsageReport 画成堆叠柱状图。
+def render_stacked_areas(report, symbol: str = "$") -> Chart:
+    """把 UsageReport 画成堆叠面积图。
 
-    序列已按加价后总额降序排好，所以金额大的堆在下面，视觉上更稳。
+    序列已按总额降序排好，所以金额大的堆在下面，视觉上更稳。
+
+    report 只需要满足几个属性：dates / labels / series / column_totals / peak /
+    granularity / dimension_label。usage_explorer.UsageReport 和
+    cost_estimate.EstimateReport 都是照着这个形状来的。
     """
     dates = report.dates
     count = len(dates)
@@ -161,7 +166,6 @@ def render_stacked_bars(report, symbol: str = "$") -> Chart:
     height = PAD_T + PLOT_H + PAD_B
     # 桶少的时候把绘图区居中，避免整张图挤在左边
     x0 = PAD_L + max(0.0, (width - PAD_L - PAD_R - plot_w) / 2)
-    bar_w = min(MAX_BAR_W, max(4.0, band - 6))
     plot_bottom = PAD_T + PLOT_H
 
     # ---------------------------------------------------------- Y 轴
@@ -176,18 +180,20 @@ def render_stacked_bars(report, symbol: str = "$") -> Chart:
         f'<svg class="chart-svg" viewBox="0 0 {width} {height}" '
         f'width="{width}" height="{height}" role="img" '
         f'aria-label="按{"月" if report.granularity == "monthly" else "日"}'
-        f'的{html.escape(report.dimension_label)}成本堆叠柱状图，'
+        f'的{html.escape(report.dimension_label)}成本堆叠面积图，'
         f'共 {count} 个时间桶，{len(report.series)} 条序列">'
     )
 
-    # 网格线与刻度（发丝实线，从不用虚线）
+    # 网格线与刻度。零线是实线（它是基准，要能站住），其余用虚线后退一步——
+    # 面积图的色块本来就重，实线网格会和它抢。
     parts.append('<g class="chart-grid">')
     for tick in range(tick_count + 1):
         value = step * tick
         y = plot_bottom - value * scale
+        dash = "" if tick == 0 else ' stroke-dasharray="3 4"'
         parts.append(
             f'<line x1="{PAD_L:.0f}" y1="{y:.2f}" x2="{width - PAD_R:.0f}" y2="{y:.2f}" '
-            f'stroke="{BASELINE if tick == 0 else GRID}" stroke-width="1"></line>'
+            f'stroke="{BASELINE if tick == 0 else GRID}" stroke-width="1"{dash}></line>'
         )
         parts.append(
             f'<text x="{PAD_L - 10:.0f}" y="{y + 4:.2f}" text-anchor="end" '
@@ -197,55 +203,54 @@ def render_stacked_bars(report, symbol: str = "$") -> Chart:
         )
     parts.append("</g>")
 
-    # ---------------------------------------------------------- 柱体
-    # 圆角要落在整根柱子的轮廓上，不能只给最上面那一段：堆叠图里顶端常常是
-    # 一条亚像素的细条（比如「其他」只有几分钱），给它加圆角等于没加。
-    # 所以按列生成一个「顶端圆角」的裁剪路径，再把各段裁进去。
-    parts.append("<defs>")
-    for index in range(count):
-        if totals[index] <= 0:
+    # ---------------------------------------------------------- 面积带
+    # 每条序列画成一条堆叠的面积带：下沿是它下面所有序列的累计值，上沿是加上
+    # 自己之后的累计值，首尾闭合成多边形。
+    #
+    # 上沿画一条**实色的线**，面积用同色**半透明**填充。分工是刻意的：
+    #   · 线负责识别 —— 它用的就是 SERIES_COLORS 里那个颜色，也就是
+    #     scripts/validate_palette.py 校验过 ≥3:1 的那个值，所以那份校验
+    #     结论对「真正承载信息的元素」依然成立；
+    #   · 面积只负责体量感 —— 它是装饰，淡一点反而更好读。
+    #
+    # 堆叠的各条带在几何上互不重叠（一条压在另一条之上，不是叠在一起），
+    # 所以半透明只是各自对着纸底变淡，不会互相透叠成一团脏色。
+    def point_x(index: int) -> float:
+        return x0 + band * index + band / 2
+
+    lower = [plot_bottom] * count           # 当前累计的上沿，逐层往上抬
+    parts.append('<g class="chart-areas">')
+    for series in report.series:
+        upper = [
+            lower[i] - series.marked[i] * scale for i in range(count)
+        ]
+        # 整条都是 0 的序列不画，免得在零线上留一条多余的线
+        if all(abs(upper[i] - lower[i]) < 1e-9 for i in range(count)):
             continue
-        band_x = x0 + band * index
-        bar_x = band_x + (band - bar_w) / 2
-        h = totals[index] * scale
-        parts.append(
-            f'<clipPath id="cubar{index}">'
-            f"{_top_rounded_path(bar_x, plot_bottom - h, bar_w, h, CORNER)}"
-            f"</clipPath>"
+
+        color = color_for(series.slot)
+        top_edge = " ".join(f"{point_x(i):.2f},{upper[i]:.2f}" for i in range(count))
+        bottom_edge = " ".join(
+            f"{point_x(i):.2f},{lower[i]:.2f}" for i in reversed(range(count))
         )
-    parts.append("</defs>")
-
-    parts.append('<g class="chart-bars">')
-    for index in range(count):
-        if totals[index] <= 0:
-            continue
-        band_x = x0 + band * index
-        bar_x = band_x + (band - bar_w) / 2
-        # 该列最上面一个非零段：它上面没有东西，所以不留间隙
-        top_series = -1
-        for position, series in enumerate(report.series):
-            if series.marked[index] > 0:
-                top_series = position
-
-        parts.append(f'<g clip-path="url(#cubar{index})">')
-        y_base = plot_bottom
-        for position, series in enumerate(report.series):
-            value = series.marked[index]
-            if value <= 0:
-                continue
-            h = value * scale
-            gap = 0.0 if position == top_series else SEG_GAP
-            draw_h = h - gap
-            if draw_h < 1.0:
-                draw_h = min(h, 1.0)
-            # 间隙留在段的上沿，堆叠边界仍落在真实的累计位置上
+        # 面积：上沿正序 + 下沿倒序，闭合
+        parts.append(
+            f'<polygon fill="{color}" fill-opacity="{AREA_FILL_OPACITY}" '
+            f'points="{top_edge} {bottom_edge}"></polygon>'
+        )
+        # 上沿的实色线。单桶时没有「线」可言，画个点代替，否则那一天什么都看不见。
+        if count > 1:
             parts.append(
-                f'<rect fill="{color_for(series.slot)}" x="{bar_x:.2f}" '
-                f'y="{y_base - draw_h:.2f}" width="{bar_w:.2f}" '
-                f'height="{draw_h:.2f}"></rect>'
+                f'<polyline fill="none" stroke="{color}" stroke-width="{LINE_W}" '
+                f'stroke-linejoin="round" stroke-linecap="round" '
+                f'points="{top_edge}"></polyline>'
             )
-            y_base -= h
-        parts.append("</g>")
+        else:
+            parts.append(
+                f'<circle fill="{color}" cx="{point_x(0):.2f}" '
+                f'cy="{upper[0]:.2f}" r="{LINE_W}"></circle>'
+            )
+        lower = upper
     parts.append("</g>")
 
     # ---------------------------------------------------------- 唯一一处直接标注：最高的柱子
@@ -362,6 +367,10 @@ PANEL_PAD_R = 14
 PANEL_PAD_T = 12
 PANEL_PAD_B = 32
 PANEL_MARKER_MAX_POINTS = 20
+# 小图线下渐变填充的**顶端**不透明度，往零线方向渐隐到 0。
+# 比堆叠面积图的 0.28 低：那里各层互不重叠，这里的线是叠在一起的，
+# 每条的填充都铺到零线，浓度会累加。
+PANEL_FILL_OPACITY = 0.22
 
 
 @dataclass
@@ -407,15 +416,17 @@ def render_small_multiples(report) -> list[Panel]:
             f'{html.escape(report.unit)}">'
         ]
 
-        # 网格与刻度（四张图完全相同，因为共用刻度）
+        # 网格与刻度（四张图完全相同，因为共用刻度）。零线实线，其余虚线，
+        # 和堆叠面积图一个规矩。
         parts.append('<g class="chart-grid">')
         for tick in range(tick_count + 1):
             value = step_value * tick
             y = y_at(value)
+            dash = "" if tick == 0 else ' stroke-dasharray="3 4"'
             parts.append(
                 f'<line x1="{PANEL_PAD_L:.0f}" y1="{y:.2f}" '
                 f'x2="{PANEL_W - PANEL_PAD_R:.0f}" y2="{y:.2f}" '
-                f'stroke="{BASELINE if tick == 0 else GRID}" stroke-width="1"></line>'
+                f'stroke="{BASELINE if tick == 0 else GRID}" stroke-width="1"{dash}></line>'
             )
             parts.append(
                 f'<text x="{PANEL_PAD_L - 8:.0f}" y="{y + 4:.2f}" text-anchor="end" '
@@ -440,12 +451,56 @@ def render_small_multiples(report) -> list[Panel]:
             )
             continue
 
+        # 线下的渐变填充。折线图和堆叠面积图不一样：这里的线是**互相重叠**的，
+        # 每条的填充都从自己那条线一直铺到零线，靠近底部会层层叠加——两层 28%
+        # 叠出 48%，三层 63%，五六条模型下来底部就糊成一团脏色了。
+        #
+        # 所以用渐变而不是平涂：紧贴线的地方最浓，往下渐隐到全透明。重叠因此
+        # 发生在各自已经很淡的区域，既有「线下有面积」的观感，又不会互相糊掉。
+        drawable = [s for s in panel_data.series if s.peak > 0]
+        if drawable and count > 1:
+            parts.append("<defs>")
+            for series in drawable:
+                # id 必须带上区域：四张小图在同一个页面上，SVG 的 id 是全文档
+                # 共享的，只用 slot 会让四张图抢同一个渐变
+                parts.append(
+                    f'<linearGradient id="fade-{html.escape(panel_data.region)}-{series.slot}" '
+                    f'x1="0" y1="{PANEL_PAD_T:.0f}" x2="0" y2="{plot_bottom:.0f}" '
+                    f'gradientUnits="userSpaceOnUse">'
+                    f'<stop offset="0" stop-color="{color_for(series.slot)}" '
+                    f'stop-opacity="{PANEL_FILL_OPACITY}"></stop>'
+                    f'<stop offset="1" stop-color="{color_for(series.slot)}" '
+                    f'stop-opacity="0"></stop>'
+                    f"</linearGradient>"
+                )
+            parts.append("</defs>")
+
+        # 先把所有填充画完，再画所有线。混在一起画的话，后一条序列的填充会
+        # 盖在前一条的线上——填充最浓的那一段正好紧贴线，压上去很明显。
+        geometry = {
+            series.slot: [(x_at(i), y_at(series.values[i])) for i in range(count)]
+            for series in drawable
+        }
+
+        if count > 1:
+            parts.append('<g class="chart-fills">')
+            for series in drawable:
+                points = geometry[series.slot]
+                # 面积：沿线走一遍，再从末端落到零线、沿零线回到起点，闭合
+                area = (
+                    f"{_line_path(points)} L {points[-1][0]:.2f} {plot_bottom:.2f} "
+                    f"L {points[0][0]:.2f} {plot_bottom:.2f} Z"
+                )
+                parts.append(
+                    f'<path d="{area}" fill="url(#fade-'
+                    f'{html.escape(panel_data.region)}-{series.slot})" stroke="none"></path>'
+                )
+            parts.append("</g>")
+
         parts.append('<g class="chart-lines">')
-        for series in panel_data.series:
-            if series.peak <= 0:
-                continue  # 这个区没跑过这个模型，不画一条贴地的直线
+        for series in drawable:
             colour = color_for(series.slot)
-            points = [(x_at(i), y_at(series.values[i])) for i in range(count)]
+            points = geometry[series.slot]
             if count == 1:
                 parts.append(
                     f'<circle cx="{points[0][0]:.2f}" cy="{points[0][1]:.2f}" '

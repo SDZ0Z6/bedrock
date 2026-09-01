@@ -83,60 +83,102 @@ class TestNiceStep:
 
 class TestRender:
     def test_empty_report_renders_a_placeholder(self):
-        rendered = chart.render_stacked_bars(make_report([]))
+        rendered = chart.render_stacked_areas(make_report([]))
         assert rendered.empty is True
         assert "没有消费数据" in rendered.svg
         assert rendered.height >= chart.PLOT_H
 
     def test_all_zero_report_is_treated_as_empty(self):
-        rendered = chart.render_stacked_bars(make_report([[0.0] * 17]))
+        rendered = chart.render_stacked_areas(make_report([[0.0] * 17]))
         assert rendered.empty is True
 
     def test_basic_structure(self):
-        rendered = chart.render_stacked_bars(make_report([[100.0] * 17, [50.0] * 17]))
+        rendered = chart.render_stacked_areas(make_report([[100.0] * 17, [50.0] * 17]))
         assert 'viewBox="0 0' in rendered.svg
         assert "aria-label=" in rendered.svg
         assert rendered.empty is False
 
-    def test_rounded_data_end_uses_a_clip_per_column(self):
-        """圆角必须落在整根柱子的轮廓上，否则顶端是细条时等于没加。"""
-        report = make_report([[100.0] * 17, [0.01] * 17])
-        rendered = chart.render_stacked_bars(report)
-        columns_with_cost = sum(1 for v in report.column_totals if v > 0)
-        assert rendered.svg.count("<clipPath") == columns_with_cost
-        assert "<path d=" in rendered.svg
+    def test_one_area_band_per_series(self):
+        """每条有数据的序列画一条面积带；全零的序列不画，免得在零线上留描边。"""
+        report = make_report([[100.0] * 17, [50.0] * 17, [0.0] * 17])
+        rendered = chart.render_stacked_areas(report)
+        assert rendered.svg.count("<polygon") == 2
 
-    def test_gridlines_are_solid_never_dashed(self):
-        rendered = chart.render_stacked_bars(make_report([[100.0] * 17]))
-        assert "dasharray" not in rendered.svg
+    def test_bands_are_stacked_not_overlaid(self):
+        """第二条带的下沿必须压在第一条的上沿上，而不是各自从零线起画。
 
-    def test_bar_width_is_capped(self):
-        """柱子不许填满整个 band，留白是设计的一部分。"""
-        rendered = chart.render_stacked_bars(make_report([[100.0, 100.0, 100.0]]))
-        widths = [float(w) for w in re.findall(r'<rect fill="[^"]+" x="[^"]+" y="[^"]+" width="([\d.]+)"', rendered.svg)]
-        assert widths
-        assert max(widths) <= chart.MAX_BAR_W
+        两条等量序列：下面那条占 0~50%，上面那条占 50~100%。如果画错成各自
+        从零开始，两条带会完全重合，图上只看得到一个颜色。
+        """
+        rendered = chart.render_stacked_areas(make_report([[100.0] * 17, [100.0] * 17]))
+        polygons = re.findall(r'<polygon [^>]*points="([^"]+)"', rendered.svg)
+        assert len(polygons) == 2
+        # 每条带取第一个点的 y，上面那条应当更高（y 更小）
+        first_y = [float(pts.split()[0].split(",")[1]) for pts in polygons]
+        assert first_y[1] < first_y[0], "第二条带没有叠在第一条之上"
+
+    def test_line_is_solid_and_fill_is_translucent(self):
+        """线实色、面积半透明——分工不能反过来。
+
+        识别信息由线承载，所以线必须用 SERIES_COLORS 里那个校验过 ≥3:1 的原值，
+        不能带透明度；面积只负责体量感，淡一点更好读。反过来做的话，
+        scripts/validate_palette.py 校验的就不是实际承载信息的那个元素了。
+        """
+        rendered = chart.render_stacked_areas(make_report([[100.0] * 17, [50.0] * 17]))
+        polygons = re.findall(r"<polygon [^>]*>", rendered.svg)
+        polylines = re.findall(r"<polyline [^>]*>", rendered.svg)
+        assert len(polygons) == 2 and len(polylines) == 2
+
+        assert all(f'fill-opacity="{chart.AREA_FILL_OPACITY}"' in p for p in polygons)
+        # 线上不许有任何透明度
+        assert all("opacity" not in line for line in polylines)
+        assert all(f'stroke-width="{chart.LINE_W}"' in line for line in polylines)
+
+    def test_line_uses_the_validated_palette_colour(self):
+        """线的颜色必须原样来自色板，不能自作主张调深调浅。"""
+        rendered = chart.render_stacked_areas(make_report([[100.0] * 17, [50.0] * 17]))
+        strokes = re.findall(r'<polyline [^>]*stroke="([^"]+)"', rendered.svg)
+        assert strokes
+        assert all(s in chart.SERIES_COLORS or s == chart.OTHER_COLOR for s in strokes)
+
+    def test_single_bucket_draws_a_dot_not_a_line(self):
+        """只有一个时间桶时没有「线」可言，得画个点，否则那一天什么都看不见。"""
+        report = make_report([[100.0]], granularity="monthly")
+        report.dates, report.labels = ["2026-08-01"], ["8月"]
+        report.series[0].raw = report.series[0].marked = [100.0]
+        rendered = chart.render_stacked_areas(report)
+        assert "<circle" in rendered.svg
+        assert "<polyline" not in rendered.svg
+
+    def test_gridlines_are_dashed_except_the_baseline(self):
+        """零线是基准要站得住，其余虚线后退——面积图的色块本来就重。"""
+        rendered = chart.render_stacked_areas(make_report([[100.0] * 17]))
+        lines = re.findall(r"<line [^>]*></line>", rendered.svg)
+        assert len(lines) >= 2
+        solid = [ln for ln in lines if "dasharray" not in ln]
+        assert len(solid) == 1, "应当恰好只有零线是实线"
+        assert chart.BASELINE in solid[0]
 
     def test_height_includes_the_x_axis_band(self):
         """容器高度要含轴标签，否则卡片里会出现一条小小的纵向滚动条。"""
-        rendered = chart.render_stacked_bars(make_report([[100.0] * 17]))
+        rendered = chart.render_stacked_areas(make_report([[100.0] * 17]))
         assert rendered.height == chart.PAD_T + chart.PLOT_H + chart.PAD_B
         assert chart.PAD_B >= 40
 
     def test_one_hit_area_per_bucket_and_keyboard_reachable(self):
         report = make_report([[100.0] * 17])
-        rendered = chart.render_stacked_bars(report)
+        rendered = chart.render_stacked_areas(report)
         assert rendered.svg.count('class="chart-hit"') == len(report.dates)
         assert rendered.svg.count('tabindex="0"') == len(report.dates)
 
     def test_exactly_one_direct_label(self):
         """只在最高那根柱子上标一处，不给每根都写数字。"""
-        rendered = chart.render_stacked_bars(make_report([[10.0] * 16 + [900.0]]))
+        rendered = chart.render_stacked_areas(make_report([[10.0] * 16 + [900.0]]))
         assert rendered.svg.count('font-weight="600"') == 1
 
     def test_tooltip_payload_carries_both_amounts(self):
         report = make_report([[100.0] * 17, [50.0] * 17])
-        rendered = chart.render_stacked_bars(report)
+        rendered = chart.render_stacked_areas(report)
         assert len(rendered.tooltip) == len(report.dates)
         rows = [row for bucket in rendered.tooltip for row in bucket["rows"]]
         assert rows
@@ -144,7 +186,7 @@ class TestRender:
 
     def test_tooltip_rows_sorted_by_amount(self):
         report = make_report([[10.0] * 17, [500.0] * 17])
-        rendered = chart.render_stacked_bars(report)
+        rendered = chart.render_stacked_areas(report)
         amounts = [row["marked"] for row in rendered.tooltip[0]["rows"]]
         assert amounts == sorted(amounts, reverse=True)
 
@@ -155,7 +197,7 @@ class TestRender:
         long_report.dates, long_report.labels = long_dates, long_labels
         long_report.series[0].raw = [1.0] * len(long_dates)
         long_report.series[0].marked = [1.0] * len(long_dates)
-        rendered = chart.render_stacked_bars(long_report)
+        rendered = chart.render_stacked_areas(long_report)
         assert rendered.width > chart.IDEAL_W
         assert len(long_dates) > 300
 
@@ -165,14 +207,14 @@ class TestRender:
         long_report.dates, long_report.labels = long_dates, long_labels
         long_report.series[0].raw = [1.0] * len(long_dates)
         long_report.series[0].marked = [1.0] * len(long_dates)
-        rendered = chart.render_stacked_bars(long_report)
+        rendered = chart.render_stacked_areas(long_report)
         shown = rendered.svg.count('text-anchor="middle"')
         assert shown < len(long_dates)
 
     def test_escapes_series_and_label_text(self):
         report = make_report([[100.0] * 17])
         report.labels[0] = '<script>"&'
-        rendered = chart.render_stacked_bars(report)
+        rendered = chart.render_stacked_areas(report)
         assert "<script>" not in rendered.svg
         assert "&lt;script&gt;" in rendered.svg
 
@@ -381,8 +423,39 @@ class TestSmallMultiples:
              "us-west-1": [[5.0] * 12, [0.0] * 12], "us-west-2": [[5.0] * 12, [0.0] * 12]}
         )
         panels = chart.render_small_multiples(report)
-        assert panels[0].svg.count('<path d="M') == 2
-        assert panels[1].svg.count('<path d="M') == 1
+        # 每条序列现在是「一条线 + 一块填充」两个 path，所以只数线
+        def line_count(svg: str) -> int:
+            return len(re.findall(r'<path d="M[^"]*" fill="none" stroke="#', svg))
+
+        assert line_count(panels[0].svg) == 2
+        assert line_count(panels[1].svg) == 1
+
+    def test_each_line_gets_a_fade_fill_behind_it(self):
+        """线下的面积用渐变而不是平涂。
+
+        这里的线是互相重叠的（不像堆叠面积图那样各占一段），每条的填充都铺到
+        零线，平涂的话底部会层层叠加：两层 28% 叠出 48%，三层 63%，几条模型
+        下来就糊成一团。渐变让重叠发生在各自已经很淡的区域。
+        """
+        report = make_panels({r: [[5.0] * 12, [3.0] * 12] for r in REGIONS})
+        panels = chart.render_small_multiples(report)
+        svg = panels[0].svg
+        assert svg.count("<linearGradient") == 2
+        assert svg.count('fill="url(#fade-') == 2
+        # 渐变必须收到全透明，否则等于换了个写法的平涂
+        assert 'stop-opacity="0"' in svg
+
+    def test_gradient_ids_are_unique_across_panels(self):
+        """四张小图在同一个页面上，SVG 的 id 是全文档共享的。
+
+        只用色槽编号做 id 的话，四张图会抢同一个渐变——后渲染的把先渲染的覆盖掉，
+        表现是某几张图的填充颜色莫名其妙变成了别的区的。
+        """
+        report = make_panels({r: [[5.0] * 12] for r in REGIONS})
+        panels = chart.render_small_multiples(report)
+        ids = [i for p in panels for i in re.findall(r'<linearGradient id="([^"]+)"', p.svg)]
+        assert len(ids) == 4
+        assert len(set(ids)) == 4, f"渐变 id 撞车了：{ids}"
 
     def test_each_panel_has_its_own_cursor_and_overlay(self):
         report = make_panels({r: [[5.0] * 12] for r in REGIONS})
@@ -411,9 +484,15 @@ class TestSmallMultiples:
         xs = {tuple(b["x"] for b in p.tooltip) for p in panels}
         assert len(xs) == 1
 
-    def test_gridlines_solid(self):
+    def test_gridlines_are_dashed_except_the_baseline(self):
+        """和主图一个规矩：零线实线站住基准，其余虚线后退。"""
         report = make_panels({r: [[5.0] * 12] for r in REGIONS})
-        assert all("dasharray" not in p.svg for p in chart.render_small_multiples(report))
+        for panel in chart.render_small_multiples(report):
+            # 只看网格线：十字准星也是 <line>，但它带 class，且本来就该是实线
+            grid = re.findall(r'<line x1="[^>]*></line>', panel.svg)
+            solid = [line for line in grid if "dasharray" not in line]
+            assert len(solid) == 1, "应当恰好只有零线是实线"
+            assert chart.BASELINE in solid[0]
 
     def test_svg_scales_by_viewbox(self):
         report = make_panels({r: [[5.0] * 12] for r in REGIONS})

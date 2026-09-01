@@ -128,7 +128,7 @@ def cost_usage():
         except Exception as exc:
             fatal = f"{type(exc).__name__}: {exc}"
 
-    rendered = chart.render_stacked_bars(report, config.CURRENCY_SYMBOL)
+    rendered = chart.render_stacked_areas(report, config.CURRENCY_SYMBOL)
     bucket_count = len(report.dates) or 1
 
     return render_template(
@@ -273,7 +273,7 @@ def estimate():
         "cost_estimate.html",
         active_page="cost_estimate",
         report=report,
-        chart=chart.render_stacked_bars(report, config.CURRENCY_SYMBOL),
+        chart=chart.render_stacked_areas(report, config.CURRENCY_SYMBOL),
         fatal=fatal,
         notes=notes,
         start=start,

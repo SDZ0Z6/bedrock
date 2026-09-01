@@ -3,30 +3,45 @@
 {% block body_class %}login-page{% endblock %}
 
 {% block body %}
-<main class="login-card">
-  <div class="login-head">
-    <div class="login-mark">📊</div>
-    <h1>Bedrock 成本监控</h1>
-    <p>请登录后查看账号消费与预算使用情况</p>
-  </div>
+{# 左右两栏：左边是品牌 + 标题 + 表单，右边一张大图。窄屏下右栏隐藏，
+   左栏自己居中——插画是气氛，不是信息，手机上没必要挤进来。 #}
+<div class="login-shell">
+  <section class="login-panel">
+    <div class="login-brand">
+      <img src="{{ url_for('static', filename='logo-mark.png') }}"
+           alt="" width="96" height="96" decoding="async">
+      <span>Bedrock 成本监控</span>
+    </div>
 
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% for category, message in messages %}
-      <div class="alert alert-{{ category }}">{{ message }}</div>
-    {% endfor %}
-  {% endwith %}
+    <h1 class="login-title">Bedrock 成本监控</h1>
+    <p class="login-sub">请登录后查看账号消费与预算使用情况</p>
 
-  <form method="post" autocomplete="off">
-    <input type="hidden" name="next" value="{{ request.args.get('next', '') }}">
-    <label>
-      <span>用户名</span>
-      <input type="text" name="username" required autofocus autocomplete="username">
-    </label>
-    <label>
-      <span>密码</span>
-      <input type="password" name="password" required autocomplete="current-password">
-    </label>
-    <button type="submit">登录</button>
-  </form>
-</main>
+    <main class="login-card">
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endwith %}
+
+      <form method="post" autocomplete="off">
+        <input type="hidden" name="next" value="{{ request.args.get('next', '') }}">
+        <label>
+          <span>用户名</span>
+          <input type="text" name="username" required autofocus autocomplete="username">
+        </label>
+        <label>
+          <span>密码</span>
+          <input type="password" name="password" required autocomplete="current-password">
+        </label>
+        <button type="submit">登录</button>
+      </form>
+    </main>
+  </section>
+
+  {# 纯装饰，alt 留空：读屏软件念一遍「九个像素小人」对登录毫无帮助 #}
+  <aside class="login-art" aria-hidden="true">
+    <img src="{{ url_for('static', filename='login-art.webp') }}"
+         alt="" width="1200" height="1200" decoding="async">
+  </aside>
+</div>
 {% endblock %}
