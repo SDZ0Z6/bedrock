@@ -367,6 +367,10 @@ PANEL_PAD_R = 14
 PANEL_PAD_T = 12
 PANEL_PAD_B = 32
 PANEL_MARKER_MAX_POINTS = 20
+# 小图线下渐变填充的**顶端**不透明度，往零线方向渐隐到 0。
+# 比堆叠面积图的 0.28 低：那里各层互不重叠，这里的线是叠在一起的，
+# 每条的填充都铺到零线，浓度会累加。
+PANEL_FILL_OPACITY = 0.22
 
 
 @dataclass
@@ -412,15 +416,17 @@ def render_small_multiples(report) -> list[Panel]:
             f'{html.escape(report.unit)}">'
         ]
 
-        # 网格与刻度（四张图完全相同，因为共用刻度）
+        # 网格与刻度（四张图完全相同，因为共用刻度）。零线实线，其余虚线，
+        # 和堆叠面积图一个规矩。
         parts.append('<g class="chart-grid">')
         for tick in range(tick_count + 1):
             value = step_value * tick
             y = y_at(value)
+            dash = "" if tick == 0 else ' stroke-dasharray="3 4"'
             parts.append(
                 f'<line x1="{PANEL_PAD_L:.0f}" y1="{y:.2f}" '
                 f'x2="{PANEL_W - PANEL_PAD_R:.0f}" y2="{y:.2f}" '
-                f'stroke="{BASELINE if tick == 0 else GRID}" stroke-width="1"></line>'
+                f'stroke="{BASELINE if tick == 0 else GRID}" stroke-width="1"{dash}></line>'
             )
             parts.append(
                 f'<text x="{PANEL_PAD_L - 8:.0f}" y="{y + 4:.2f}" text-anchor="end" '
@@ -445,12 +451,56 @@ def render_small_multiples(report) -> list[Panel]:
             )
             continue
 
+        # 线下的渐变填充。折线图和堆叠面积图不一样：这里的线是**互相重叠**的，
+        # 每条的填充都从自己那条线一直铺到零线，靠近底部会层层叠加——两层 28%
+        # 叠出 48%，三层 63%，五六条模型下来底部就糊成一团脏色了。
+        #
+        # 所以用渐变而不是平涂：紧贴线的地方最浓，往下渐隐到全透明。重叠因此
+        # 发生在各自已经很淡的区域，既有「线下有面积」的观感，又不会互相糊掉。
+        drawable = [s for s in panel_data.series if s.peak > 0]
+        if drawable and count > 1:
+            parts.append("<defs>")
+            for series in drawable:
+                # id 必须带上区域：四张小图在同一个页面上，SVG 的 id 是全文档
+                # 共享的，只用 slot 会让四张图抢同一个渐变
+                parts.append(
+                    f'<linearGradient id="fade-{html.escape(panel_data.region)}-{series.slot}" '
+                    f'x1="0" y1="{PANEL_PAD_T:.0f}" x2="0" y2="{plot_bottom:.0f}" '
+                    f'gradientUnits="userSpaceOnUse">'
+                    f'<stop offset="0" stop-color="{color_for(series.slot)}" '
+                    f'stop-opacity="{PANEL_FILL_OPACITY}"></stop>'
+                    f'<stop offset="1" stop-color="{color_for(series.slot)}" '
+                    f'stop-opacity="0"></stop>'
+                    f"</linearGradient>"
+                )
+            parts.append("</defs>")
+
+        # 先把所有填充画完，再画所有线。混在一起画的话，后一条序列的填充会
+        # 盖在前一条的线上——填充最浓的那一段正好紧贴线，压上去很明显。
+        geometry = {
+            series.slot: [(x_at(i), y_at(series.values[i])) for i in range(count)]
+            for series in drawable
+        }
+
+        if count > 1:
+            parts.append('<g class="chart-fills">')
+            for series in drawable:
+                points = geometry[series.slot]
+                # 面积：沿线走一遍，再从末端落到零线、沿零线回到起点，闭合
+                area = (
+                    f"{_line_path(points)} L {points[-1][0]:.2f} {plot_bottom:.2f} "
+                    f"L {points[0][0]:.2f} {plot_bottom:.2f} Z"
+                )
+                parts.append(
+                    f'<path d="{area}" fill="url(#fade-'
+                    f'{html.escape(panel_data.region)}-{series.slot})" stroke="none"></path>'
+                )
+            parts.append("</g>")
+
         parts.append('<g class="chart-lines">')
-        for series in panel_data.series:
-            if series.peak <= 0:
-                continue  # 这个区没跑过这个模型，不画一条贴地的直线
+        for series in drawable:
             colour = color_for(series.slot)
-            points = [(x_at(i), y_at(series.values[i])) for i in range(count)]
+            points = geometry[series.slot]
             if count == 1:
                 parts.append(
                     f'<circle cx="{points[0][0]:.2f}" cy="{points[0][1]:.2f}" '

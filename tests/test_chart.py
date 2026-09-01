@@ -423,8 +423,39 @@ class TestSmallMultiples:
              "us-west-1": [[5.0] * 12, [0.0] * 12], "us-west-2": [[5.0] * 12, [0.0] * 12]}
         )
         panels = chart.render_small_multiples(report)
-        assert panels[0].svg.count('<path d="M') == 2
-        assert panels[1].svg.count('<path d="M') == 1
+        # 每条序列现在是「一条线 + 一块填充」两个 path，所以只数线
+        def line_count(svg: str) -> int:
+            return len(re.findall(r'<path d="M[^"]*" fill="none" stroke="#', svg))
+
+        assert line_count(panels[0].svg) == 2
+        assert line_count(panels[1].svg) == 1
+
+    def test_each_line_gets_a_fade_fill_behind_it(self):
+        """线下的面积用渐变而不是平涂。
+
+        这里的线是互相重叠的（不像堆叠面积图那样各占一段），每条的填充都铺到
+        零线，平涂的话底部会层层叠加：两层 28% 叠出 48%，三层 63%，几条模型
+        下来就糊成一团。渐变让重叠发生在各自已经很淡的区域。
+        """
+        report = make_panels({r: [[5.0] * 12, [3.0] * 12] for r in REGIONS})
+        panels = chart.render_small_multiples(report)
+        svg = panels[0].svg
+        assert svg.count("<linearGradient") == 2
+        assert svg.count('fill="url(#fade-') == 2
+        # 渐变必须收到全透明，否则等于换了个写法的平涂
+        assert 'stop-opacity="0"' in svg
+
+    def test_gradient_ids_are_unique_across_panels(self):
+        """四张小图在同一个页面上，SVG 的 id 是全文档共享的。
+
+        只用色槽编号做 id 的话，四张图会抢同一个渐变——后渲染的把先渲染的覆盖掉，
+        表现是某几张图的填充颜色莫名其妙变成了别的区的。
+        """
+        report = make_panels({r: [[5.0] * 12] for r in REGIONS})
+        panels = chart.render_small_multiples(report)
+        ids = [i for p in panels for i in re.findall(r'<linearGradient id="([^"]+)"', p.svg)]
+        assert len(ids) == 4
+        assert len(set(ids)) == 4, f"渐变 id 撞车了：{ids}"
 
     def test_each_panel_has_its_own_cursor_and_overlay(self):
         report = make_panels({r: [[5.0] * 12] for r in REGIONS})
@@ -453,9 +484,15 @@ class TestSmallMultiples:
         xs = {tuple(b["x"] for b in p.tooltip) for p in panels}
         assert len(xs) == 1
 
-    def test_gridlines_solid(self):
+    def test_gridlines_are_dashed_except_the_baseline(self):
+        """和主图一个规矩：零线实线站住基准，其余虚线后退。"""
         report = make_panels({r: [[5.0] * 12] for r in REGIONS})
-        assert all("dasharray" not in p.svg for p in chart.render_small_multiples(report))
+        for panel in chart.render_small_multiples(report):
+            # 只看网格线：十字准星也是 <line>，但它带 class，且本来就该是实线
+            grid = re.findall(r'<line x1="[^>]*></line>', panel.svg)
+            solid = [line for line in grid if "dasharray" not in line]
+            assert len(solid) == 1, "应当恰好只有零线是实线"
+            assert chart.BASELINE in solid[0]
 
     def test_svg_scales_by_viewbox(self):
         report = make_panels({r: [[5.0] * 12] for r in REGIONS})
