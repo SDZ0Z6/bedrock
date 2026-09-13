@@ -19,7 +19,7 @@ import pytest
 from bedrock_cost import cost_estimate, pricing
 from bedrock_cost.cloudwatch_metrics import ProfileInfo
 
-from .conftest import LEDGER_ROWS
+from .conftest import LEDGER_ROWS, ledger_value
 
 OPUS5 = "Claude Opus 5 (Amazon Bedrock Edition)"
 SONNET46 = "Claude Sonnet 4.6 (Amazon Bedrock Edition)"
@@ -409,9 +409,9 @@ def test_页面不泄露凭证(logged_in, ledger, fake_prices, fake_cloudwatch):
         "us-east-1": {"global.anthropic.claude-opus-5": tokens(inp=1_000_000)}
     }
     html = logged_in.get("/cost-estimate").get_data(as_text=True)
-    for _, _, _, _, _, ak, sk, _ in LEDGER_ROWS:
-        assert ak not in html
-        assert sk not in html
+    for row in LEDGER_ROWS:
+        assert ledger_value(row, "AK") not in html
+        assert ledger_value(row, "SK") not in html
 
 
 def test_没有单价的模型会在页面上提示(logged_in, ledger, fake_prices, fake_cloudwatch):

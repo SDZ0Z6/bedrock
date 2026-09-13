@@ -70,7 +70,7 @@ def _flag(name: str, default: bool = False) -> bool:
 
 
 # ---------------------------------------------------------------- 数据源
-# 账号台账（上游 / 账号 / 预算 / 比率 / AK / SK）
+# 账号台账（上游 / 账号 / 额度 / 启用日期 / 比率 / AK / SK）
 EXCEL_PATH = Path(_text("EXCEL_PATH", "cred.xlsx"))
 if not EXCEL_PATH.is_absolute():
     EXCEL_PATH = BASE_DIR / EXCEL_PATH

@@ -12,12 +12,20 @@ from __future__ import annotations
 import re
 
 import openpyxl
+from datetime import date, timedelta
+
 import pytest
 
 from bedrock_cost import excel_source
 from bedrock_cost.excel_source import LedgerConflict, load_accounts
 
-from .conftest import LEDGER_HEADER, LEDGER_ROWS, write_ledger
+from .conftest import (
+    LEDGER_HEADER,
+    LEDGER_ROWS,
+    ledger_value,
+    ledger_without,
+    write_ledger,
+)
 
 CSRF_PATTERN = re.compile(r'name="csrf" value="([^"]+)"')
 # <dialog id="…" … data-reopen> —— 属性形式，不会误命中脚本里的 dialog[data-reopen]
@@ -107,9 +115,9 @@ def test_页面列出全部账号且不泄露凭证(admin):
         assert partner in html
         assert str(account) in html
     # SK 任何形式都不能出现；AK 只能是掩码
-    for _, _, _, _, _, ak, sk, _ in LEDGER_ROWS:
-        assert sk not in html
-        assert ak not in html
+    for row in LEDGER_ROWS:
+        assert ledger_value(row, "SK") not in html
+        assert ledger_value(row, "AK") not in html
     assert "AKIAFAKE…" in html
 
 
@@ -217,8 +225,8 @@ def test_新增时预算接受千分位和货币符号(admin, ledger):
         ("account", "123", "12 位数字"),
         ("account", "12345678901x", "12 位数字"),
         ("partner", "", "上游不能为空"),
-        ("budget", "abc", "预算要填数字"),
-        ("budget", "-1", "预算不能是负数"),
+        ("budget", "abc", "额度要填数字"),
+        ("budget", "-1", "额度不能是负数"),
         ("tag_ratio", "0", "必须大于 0"),
         ("untag_ratio", "-2", "必须大于 0"),
         ("tag_ratio", "1000", "看起来不对"),
@@ -318,6 +326,8 @@ def test_编辑没有实际改动时不写文件(admin, ledger):
         admin, "/accounts/update",
         key=target.key, partner=target.partner, account=target.account,
         budget="500000", tag_ratio="1", untag_ratio="1.05", tag_spec=target.tag_spec,
+        # 弹窗里这个字段是带初值的，不原样带上就等于把它清空，那确实算一次改动
+        start_date=target.start_date.isoformat(),
     )
     assert response.status_code == 302
     assert ledger.stat().st_mtime_ns == before
@@ -444,11 +454,8 @@ def test_写入时自动补上缺失的ENABLED列(admin, ledger):
 
 
 def test_没有TAG列的台账也能新增(admin, ledger):
-    write_ledger(
-        ledger,
-        header=[name for name in LEDGER_HEADER if name != "TAG"],
-        rows=[row[:-1] for row in LEDGER_ROWS],
-    )
+    header, rows = ledger_without("TAG")
+    write_ledger(ledger, header=header, rows=rows)
     excel_source.clear_cache()
 
     response = post(admin, "/accounts/create", **NEW_FORM)
@@ -514,3 +521,85 @@ def test_写入不会留下临时文件(admin, ledger):
     post(admin, "/accounts/create", **NEW_FORM)
     leftovers = [p.name for p in ledger.parent.glob(".*.tmp")]
     assert leftovers == []
+
+
+class TestStartDate:
+    """启用日期是概览页累计消费的起点，所以它既要能改，也要改不坏。"""
+
+    def test_column_and_form_field_exist(self, admin, ledger):
+        html = admin.get("/accounts/").get_data(as_text=True)
+        assert ">启用日期</th>" in html
+        assert 'name="start_date"' in html
+        assert "<code>2026-08-01</code>" in html
+
+    def test_unset_is_called_out(self, admin, ledger):
+        """没填不是「空着好看」——概览页会拿 CE 最早可查日兜底，要让人知道去填。"""
+        header, rows = ledger_without("START_DATE")
+        write_ledger(ledger, header=header, rows=rows)
+        excel_source.clear_cache()
+        html = admin.get("/accounts/").get_data(as_text=True)
+        assert "未设置" in html
+
+    def test_can_be_changed(self, admin, ledger):
+        target = by_account("111111111111")
+        response = post(
+            admin, "/accounts/update",
+            key=target.key, partner=target.partner, account=target.account,
+            budget="500000", tag_ratio="1", untag_ratio="1.05", tag_spec=target.tag_spec,
+            start_date="2026-05-06",
+        )
+        assert response.status_code == 302
+        assert by_account("111111111111").start_date == date(2026, 5, 6)
+
+    def test_can_be_cleared(self, admin, ledger):
+        target = by_account("111111111111")
+        post(
+            admin, "/accounts/update",
+            key=target.key, partner=target.partner, account=target.account,
+            budget="500000", tag_ratio="1", untag_ratio="1.05", tag_spec=target.tag_spec,
+            start_date="",
+        )
+        assert by_account("111111111111").start_date is None
+
+    def test_rejects_an_unparseable_date(self, admin, ledger):
+        target = by_account("111111111111")
+        response = post(
+            admin, "/accounts/update",
+            key=target.key, partner=target.partner, account=target.account,
+            budget="500000", tag_ratio="1", untag_ratio="1.05", tag_spec=target.tag_spec,
+            start_date="下周一",
+        )
+        assert "认不出来" in response.get_data(as_text=True)
+        assert by_account("111111111111").start_date == date(2026, 8, 1)  # 没被改坏
+
+    def test_rejects_a_future_date(self, admin, ledger):
+        """未来日期会让累计区间退化成今天一天，拦在写入之前。"""
+        target = by_account("111111111111")
+        later = (date.today() + timedelta(days=1)).isoformat()
+        response = post(
+            admin, "/accounts/update",
+            key=target.key, partner=target.partner, account=target.account,
+            budget="500000", tag_ratio="1", untag_ratio="1.05", tag_spec=target.tag_spec,
+            start_date=later,
+        )
+        assert "不能晚于今天" in response.get_data(as_text=True)
+        assert by_account("111111111111").start_date == date(2026, 8, 1)
+
+    def test_new_account_can_set_it(self, admin, ledger):
+        post(admin, "/accounts/create", **NEW_FORM, start_date="2026-07-15")
+        assert by_account("333333333333").start_date == date(2026, 7, 15)
+
+    def test_new_account_may_leave_it_empty(self, admin, ledger):
+        """启用日期不是必填——老台账迁过来时还没人填。"""
+        response = post(admin, "/accounts/create", **NEW_FORM)
+        assert response.status_code == 302
+        assert by_account("333333333333").start_date is None
+
+    def test_added_to_a_ledger_that_lacks_the_column(self, admin, ledger):
+        """老台账没有这一列，写入时自动补上。"""
+        header, rows = ledger_without("START_DATE")
+        write_ledger(ledger, header=header, rows=rows)
+        excel_source.clear_cache()
+
+        post(admin, "/accounts/create", **NEW_FORM, start_date="2026-07-15")
+        assert by_account("333333333333").start_date == date(2026, 7, 15)

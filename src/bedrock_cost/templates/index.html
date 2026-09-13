@@ -10,30 +10,16 @@
   </div>
 {%- endmacro %}
 
+{# 这一页没有日期筛选：额度是一次性发的，拿某个可选区间的消费去比它没有意义。
+   消费和余额都是「从各账号的启用日期累计到今天」，区间由台账决定。
+   只剩「强制刷新」一个按钮，就挪到标题旁，不为它单留一整张筛选卡片。 #}
+{% block page_actions %}
+  <a class="btn btn-ghost" href="{{ url_for('main.index', refresh=1) }}"
+     title="跳过缓存，重新调用 Cost Explorer"
+     data-loading="正在重新查 Cost Explorer" data-loading-note="跳过缓存">强制刷新</a>
+{% endblock %}
+
 {% block content %}
-
-<!-- ------------------------------------------------ 日期范围 -->
-<form class="filters" method="get" action="{{ url_for('main.index') }}">
-  <div class="field">
-    <label for="start">开始日期</label>
-    <input type="date" id="start" name="start" value="{{ start.isoformat() }}" max="{{ today.isoformat() }}">
-  </div>
-  <div class="field">
-    <label for="end">结束日期</label>
-    <input type="date" id="end" name="end" value="{{ end.isoformat() }}" max="{{ today.isoformat() }}">
-  </div>
-  <button class="btn btn-primary" type="submit">查询</button>
-  <a class="btn btn-ghost" href="{{ url_for('main.index', start=start.isoformat(), end=end.isoformat(), refresh=1) }}"
-     title="跳过缓存，重新调用 Cost Explorer">强制刷新</a>
-
-  <div class="presets">
-    {% set presets = [('mtd','本月'), ('last_month','上月'), ('last7','近 7 天'), ('last30','近 30 天'), ('ytd','今年')] %}
-    {% for key, label in presets %}
-      <a class="chip {% if active_preset == key %}chip-on{% endif %}"
-         href="{{ url_for('main.index', preset=key) }}">{{ label }}</a>
-    {% endfor %}
-  </div>
-</form>
 
 {% if fatal %}
   <div class="alert alert-error"><strong>无法生成报表：</strong> {{ fatal }}</div>
@@ -42,11 +28,11 @@
   <!-- ------------------------------------------------ 汇总 -->
   <section class="summary">
     <div class="tile">
-      <span class="tile-label">总预算</span>
+      <span class="tile-label">总额度</span>
       <span class="tile-value">{{ report.total_budget | money }}</span>
     </div>
     <div class="tile">
-      <span class="tile-label">总消费</span>
+      <span class="tile-label">累计消费</span>
       <span class="tile-value">{{ report.total_cost | money }}</span>
       <span class="tile-sub">TAG {{ report.total_tag | money }} + UNTAG {{ report.total_untag | money }}</span>
     </div>
@@ -65,9 +51,11 @@
     <div class="card-head">
       <h2>账号明细</h2>
       <span class="card-note">
-        {{ start.isoformat() }} ~ {{ end.isoformat() }} ·
+        各账号自启用日期累计至 {{ report.end.isoformat() }} ·
         {{ report.rows | length }} 个账号
         {% if report.failed_count %}· <span class="tone-danger">{{ report.failed_count }} 个查询失败</span>{% endif %}
+        {% if report.incomplete_rows %}·
+          <span class="tone-warn">{{ report.incomplete_rows | length }} 个账号区间不完整</span>{% endif %}
         {% if report.any_cached %}· <span class="tone-muted">部分数据来自缓存</span>{% endif %}
       </span>
     </div>
@@ -78,7 +66,8 @@
           <tr>
             <th>上游</th>
             <th>账号</th>
-            <th class="num">预算</th>
+            <th>启用日期</th>
+            <th class="num">额度</th>
             <th class="num">TAG 消费</th>
             <th class="num">UNTAG 消费</th>
             <th class="num">总消费</th>
@@ -92,6 +81,10 @@
               <tr class="row-error">
                 <td>{{ row.partner }}</td>
                 <td class="mono">{{ row.account }}</td>
+                <td>
+                  {%- if row.start_date %}<code>{{ row.start_date.isoformat() }}</code>
+                  {%- else %}<span class="tone-warn">未设置</span>{% endif -%}
+                </td>
                 <td class="num">{{ row.budget | money }}</td>
                 <td colspan="5" class="err-cell">查询失败：{{ row.error }}</td>
               </tr>
@@ -101,6 +94,15 @@
                 <td class="mono">
                   {{ row.account }}
                   <span class="calc">{{ row.tag_label }}</span>
+                </td>
+                {# 列里是台账填的启用日期；副行只在「实际起算点和它对不上」时出现
+                   ——没填、或早于 CE 保留期。两者一致时再写一遍纯属噪音。 #}
+                <td {% if row.range_hint %}title="{{ row.range_hint }}"{% endif %}>
+                  {%- if row.start_date %}<code>{{ row.start_date.isoformat() }}</code>
+                  {%- else %}<span class="tone-warn">未设置</span>{% endif -%}
+                  {% if row.range_incomplete and row.range_start %}
+                    <span class="calc tone-warn">⚠ 实际自 {{ row.range_start.isoformat() }} 起算</span>
+                  {% endif %}
                 </td>
                 <td class="num">{{ row.budget | money }}</td>
                 <td class="num">
@@ -118,17 +120,19 @@
               {# 标签值没匹配上时的提示条已撤掉。数据层照旧在算
                  （cost_explorer 的 split.note，两个分支都还在），report.py 也照旧
                  传到 row.note 上，只是这里不渲染。想恢复就把下面三行放回来：
-                   <tr class="row-note"><td colspan="8">⚠ {{ row.note }}</td></tr>
+                   <tr class="row-note"><td colspan="9">⚠ {{ row.note }}</td></tr>
                  .row-note 的样式也留着，没删。 #}
             {% endif %}
           {% else %}
-            <tr><td colspan="8" class="empty">{{ excel_name }} 里没有账号记录。</td></tr>
+            <tr><td colspan="9" class="empty">{{ excel_name }} 里没有账号记录。</td></tr>
           {% endfor %}
         </tbody>
         {% if report.rows %}
         <tfoot>
           <tr>
-            <td colspan="2">合计{% if report.failed_count %}<span class="calc">不含查询失败的账号</span>{% endif %}</td>
+            <td colspan="3">合计<span class="calc">
+              {%- if report.failed_count %}不含查询失败的账号{% else %}各账号区间不同，仅为金额加总{% endif -%}
+            </span></td>
             <td class="num">{{ report.total_budget | money }}</td>
             <td class="num">{{ report.total_tag | money }}</td>
             <td class="num">{{ report.total_untag | money }}</td>
@@ -146,6 +150,8 @@
 <footer class="meta">
   <span>数据源：Cost Explorer（{{ cost_metric }}，{{ service_scope }}）+ {{ excel_name }}</span>
   <span>TAG/UNTAG 依据 {{ excel_name }} 的 <code>TAG</code> 列逐账号判定，其余消费归 UNTAG（缺省标签键 <code>{{ tag_key }}</code>）</span>
+  <span>消费和余额自各账号的启用日期（{{ excel_name }} 的 <code>START_DATE</code> 列）累计至今天；
+    没填的按 Cost Explorer 最早可查日 <code>{{ earliest.isoformat() }}</code> 起算</span>
   <span>缓存 {{ cache_ttl_minutes }} 分钟 · 生成于 {{ generated_at }}</span>
   <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
 </footer>

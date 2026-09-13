@@ -17,7 +17,7 @@ import shutil
 import tempfile
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import openpyxl
@@ -35,12 +35,15 @@ REQUIRED_COLUMNS = {
     "SK": "sk",
 }
 
-# 可选列。老台账没有这两列也能正常读：
-#   TAG     缺失时回落到 .env 里的 TAG_KEY
-#   ENABLED 缺失时所有账号都算启用（软删用的开关，见 set_enabled）
+# 可选列。老台账没有这三列也能正常读：
+#   TAG        缺失时回落到 .env 里的 TAG_KEY
+#   ENABLED    缺失时所有账号都算启用（软删用的开关，见 set_enabled）
+#   START_DATE 账号的启用日期。概览页的消费和余额从这一天累计到今天，缺失时
+#              回落到 Cost Explorer 能查到的最早一天（见 dates.cumulative_range）
 OPTIONAL_COLUMNS = {
     "TAG": "tag_spec",
     "ENABLED": "enabled",
+    "START_DATE": "start_date",
 }
 
 COLUMNS = {**REQUIRED_COLUMNS, **OPTIONAL_COLUMNS}
@@ -93,6 +96,8 @@ class Account:
     row: int = 0
     tag_spec: str = ""
     enabled: bool = True
+    # 启用日期。概览页从这一天累计消费到今天；None = 台账里没填
+    start_date: date | None = None
 
     @property
     def ak_masked(self) -> str:
@@ -140,6 +145,32 @@ def _to_account_id(value: object) -> str:
     if text.endswith(".0") and text[:-2].isdigit():
         text = text[:-2]
     return text
+
+
+# START_DATE 认的几种写法。Excel 存成日期格式时 openpyxl 直接给 datetime，
+# 手打成文本时才要走字符串解析。
+_DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d", "%d/%m/%Y")
+
+
+def _to_date(value: object) -> date | None:
+    """解析启用日期。解析不出来返回 None，等同于「没填」。
+
+    刻意不猜：填了但认不出的值当成没填，页面上会显示「未设置」并提示，
+    比悄悄用一个猜出来的日期去算累计消费安全。
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = _clean(value)
+    if not text:
+        return None
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 # ENABLED 列里被当作「停用」的写法。空值一律算启用。
@@ -235,6 +266,7 @@ def _read_workbook(path: Path) -> list[Account]:
                     row=row_number,
                     tag_spec=_clean(cell(row, "tag_spec")),
                     enabled=_to_enabled(cell(row, "enabled")),
+                    start_date=_to_date(cell(row, "start_date")),
                 )
             )
         return accounts
@@ -252,7 +284,7 @@ def clear_cache() -> None:
 def load_accounts(force: bool = False, include_disabled: bool = False) -> list[Account]:
     """读取账号。文件没变动时直接返回缓存。
 
-    默认只返回启用中的账号——四个查询页都走这条路，停用的账号就此从预算汇总、
+    默认只返回启用中的账号——四个查询页都走这条路，停用的账号就此从额度汇总、
     图表和下拉里消失。只有账号管理页传 include_disabled=True 才看得到全部。
     缓存里存的始终是全量，过滤发生在返回时，所以两种视角共用一次文件读取。
     """
@@ -290,7 +322,9 @@ AUDIT_NAME = "ledger-audit.log"
 INTERNAL_TO_EXCEL = {internal: excel for excel, internal in COLUMNS.items()}
 
 # 可编辑字段。凭证不在其中，这就是「编辑不能改 AK/SK」的唯一定义处。
-EDITABLE = ("partner", "account", "budget", "tag_ratio", "untag_ratio", "tag_spec")
+EDITABLE = (
+    "partner", "account", "budget", "tag_ratio", "untag_ratio", "tag_spec", "start_date",
+)
 # 新建时还要额外收凭证
 CREATE_ONLY = ("ak", "sk")
 
@@ -304,6 +338,7 @@ _NORMALIZE = {
     "tag_ratio": lambda v: _to_number(v, 1.0),
     "untag_ratio": lambda v: _to_number(v, 1.0),
     "tag_spec": _clean,
+    "start_date": _to_date,
 }
 
 _ACCOUNT_ID = re.compile(r"^\d{12}$")
@@ -363,9 +398,9 @@ def validate(form: dict, others: list[Account], creating: bool) -> tuple[dict, l
 
     budget = _strict_number(data["budget"])
     if budget is None:
-        errors.append("预算要填数字。")
+        errors.append("额度要填数字。")
     elif budget < 0:
-        errors.append("预算不能是负数。")
+        errors.append("额度不能是负数。")
     else:
         data["budget"] = budget
 
@@ -384,6 +419,16 @@ def validate(form: dict, others: list[Account], creating: bool) -> tuple[dict, l
         tag_key, _ = parse_tag_spec(data["tag_spec"])
         if not tag_key:
             errors.append("TAG 解析不出标签键，正确写法形如 map-migrated=migXXXX。")
+
+    # 启用日期可以留空（概览页会回落到 CE 最早可查日并标出来），但填了就必须能解析
+    raw_start = data["start_date"]
+    start_date = _to_date(raw_start)
+    if raw_start and start_date is None:
+        errors.append("启用日期认不出来，填成 2026-09-01 这样的格式。")
+    elif start_date and start_date > date.today():
+        errors.append("启用日期不能晚于今天。")
+    else:
+        data["start_date"] = start_date
 
     if creating:
         # 新建必须给凭证：没有 AK/SK 的账号在所有查询页都是查不出数的空壳
@@ -577,9 +622,13 @@ def _mutate(action, actor: str) -> str:
 
 
 def _show(value: object) -> str:
-    """审计日志里的取值展示：2000.0 写成 2000，空值写成「空」。"""
+    """审计日志里的取值展示：2000.0 写成 2000，日期写成 2026-09-01，空值写成「空」。"""
     if isinstance(value, float):
         return f"{value:g}"
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
     return _clean(value) or "空"
 
 
@@ -595,7 +644,10 @@ def _write_editable(sheet, index: dict[str, int], row: int, data: dict) -> list[
         changes.append(
             f"{INTERNAL_TO_EXCEL[name]} {_show(before)} → {_show(after)}"
         )
-        sheet.cell(row=row, column=column, value=after)
+        # 必须写 .value，不能用 cell(..., value=after)：openpyxl 的 cell() 把
+        # value=None 当成「没给值」直接跳过，于是「把启用日期清空」会变成空操作
+        # ——审计日志记了「→ 空」，单元格却纹丝不动。
+        sheet.cell(row=row, column=column).value = after
     return changes
 
 
@@ -607,12 +659,13 @@ def create_account(data: dict, actor: str = "") -> str:
         row = _last_data_row(sheet, index) + 1
         # data["account"] 是字符串，写进去也是文本格式——AWS 账号 ID 可能有前导零，
         # 存成数字会被吃掉
-        for name in EDITABLE:
-            sheet.cell(row=row, column=_ensure_column(sheet, index, name), value=data[name])
-        for name in CREATE_ONLY:
-            sheet.cell(row=row, column=_ensure_column(sheet, index, name), value=data[name])
+        # 同样写 .value：新增时启用日期可以留空，value=None 会被 openpyxl 跳过
+        for name in (*EDITABLE, *CREATE_ONLY):
+            sheet.cell(row=row, column=_ensure_column(sheet, index, name)).value = data[name]
         sheet.cell(row=row, column=_ensure_column(sheet, index, "enabled"), value=True)
-        return f"新增账号 {data['account']}（{data['partner']}），预算 {data['budget']:g}"
+        started = data.get("start_date")
+        when = f"，启用日期 {started.isoformat()}" if started else "（未设启用日期）"
+        return f"新增账号 {data['account']}（{data['partner']}），额度 {data['budget']:g}{when}"
 
     return _mutate(action, actor)
 

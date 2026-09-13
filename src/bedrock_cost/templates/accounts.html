@@ -35,9 +35,16 @@
              placeholder="123456789012" value="{{ values.get('account', '') }}">
     </div>
     <div class="field">
-      <label for="{{ uid }}-budget">预算</label>
+      <label for="{{ uid }}-budget">额度</label>
       <input id="{{ uid }}-budget" name="budget" required inputmode="decimal"
              placeholder="100000" value="{{ values.get('budget', '') }}">
+    </div>
+    <div class="field">
+      {# 概览页的消费和余额从这一天累计到今天，所以改它会改变整个账号的口径 #}
+      <label for="{{ uid }}-start-date">启用日期</label>
+      <input id="{{ uid }}-start-date" name="start_date" type="date" max="{{ today.isoformat() }}"
+             title="概览页从这一天开始累计消费；留空则按 Cost Explorer 最早可查日起算"
+             value="{{ values.get('start_date', '') }}">
     </div>
     <div class="field">
       <label for="{{ uid }}-tag-ratio">TAG 比率</label>
@@ -113,7 +120,8 @@
           <th>状态</th>
           <th>上游</th>
           <th>账号 ID</th>
-          <th class="num">预算</th>
+          <th>启用日期</th>
+          <th class="num">额度</th>
           <th class="num">TAG 比率</th>
           <th class="num">UNTAG 比率</th>
           <th>TAG</th>
@@ -133,6 +141,12 @@
             </td>
             <td>{{ account.partner }}</td>
             <td class="cell-id">{{ account.account }}</td>
+            <td>
+              {%- if account.start_date %}<code>{{ account.start_date.isoformat() }}</code>
+              {%- else %}<span class="tone-warn"
+                    title="概览页会按 Cost Explorer 最早可查日起算，累计消费可能不是这个账号的全部消费">未设置</span>
+              {%- endif -%}
+            </td>
             <td class="num">{{ account.budget | money }}</td>
             <td class="num">{{ account.tag_ratio | ratio }}</td>
             <td class="num">{{ account.untag_ratio | ratio }}</td>
@@ -208,6 +222,7 @@
        'tag_ratio': account.tag_ratio | ratio,
        'untag_ratio': account.untag_ratio | ratio,
        'tag_spec': account.tag_spec,
+       'start_date': account.start_date.isoformat() if account.start_date else '',
      } %}
   {# 校验没过时回填用户刚填的值，别让人重打一遍 #}
   {% set values = edit_form if edit_key == account.key else current %}
@@ -255,7 +270,7 @@
             要停用 <strong>{{ account.partner }} / {{ account.account }}</strong> 吗？
           </p>
           <ul class="confirm-list">
-            <li>它会从概览、成本和使用情况、模型用量、模型配额四个页面消失，不再参与预算合计。</li>
+            <li>它会从概览、成本和使用情况、模型用量、模型配额四个页面消失，不再参与额度合计。</li>
             <li>不再对它发起 Cost Explorer 查询（省钱）。</li>
             <li>台账里的行、凭证和 TAG 配置都保留，随时可以在这一页恢复。</li>
           </ul>

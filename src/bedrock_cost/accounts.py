@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from flask import Blueprint, flash, redirect, render_template, request, session, url_for
 
 from . import config, excel_source
@@ -47,6 +49,7 @@ def _render(**extra):
         "active_page": "accounts",
         "accounts": accounts,
         "tag_key": config.TAG_KEY,  # TAG 列的占位提示
+        "today": date.today(),      # 启用日期输入框的 max，挡住未来日期
         "enabled_count": sum(1 for a in accounts if a.enabled),
         "fatal": fatal,
         "notes": [],

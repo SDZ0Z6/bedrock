@@ -20,10 +20,17 @@ TEST_USER = "tester"
 TEST_PASSWORD = "test-password-123"
 
 # 台账里的两个账号。SK 用假值，永远不会真的发出去。
-LEDGER_HEADER = ["PARTNER", "ACCOUNT", "BUDGET", "TAG_RATIO", "UNTAG_RATIO", "AK", "SK", "TAG"]
+# 两个账号的启用日期都填 RANGE_START：概览页按启用日期累计，下钻页按显式区间查，
+# 两边区间一致，「下钻各维度加总 == 概览总消费」这条不变量才比得起来。
+RANGE_START = date(2026, 8, 1)
+LEDGER_HEADER = [
+    "PARTNER", "ACCOUNT", "BUDGET", "TAG_RATIO", "UNTAG_RATIO", "AK", "SK", "TAG", "START_DATE",
+]
 LEDGER_ROWS = [
-    ["ALPHA", 111111111111, 500000, 1, 1.05, "AKIAFAKEALPHA0000000", "x" * 40, "map-migrated=migALPHA"],
-    ["BETA", 222222222222, 100000, 1, 1.10, "AKIAFAKEBETA00000000", "y" * 40, "map-migrated=migBETA"],
+    ["ALPHA", 111111111111, 500000, 1, 1.05, "AKIAFAKEALPHA0000000", "x" * 40,
+     "map-migrated=migALPHA", RANGE_START],
+    ["BETA", 222222222222, 100000, 1, 1.10, "AKIAFAKEBETA00000000", "y" * 40,
+     "map-migrated=migBETA", RANGE_START],
 ]
 
 # fake 的每日消费：打了台账标签的和没打的各一份。
@@ -31,6 +38,25 @@ LEDGER_ROWS = [
 # 「下钻各维度加总 == 概览总消费」这条不变量才测得有意义。
 DAILY_TAGGED_RAW = 100.0
 DAILY_UNTAGGED_RAW = 50.0
+
+
+def ledger_value(row: list, column: str):
+    """按表头名取台账行里的值。
+
+    别按下标取——台账加一列（比如 START_DATE）就会把所有位置解包的地方打断。
+    """
+    return row[LEDGER_HEADER.index(column)]
+
+
+def ledger_without(column: str) -> tuple[list, list]:
+    """去掉某一列之后的 (表头, 数据行)，用来测「老台账没有这一列」。"""
+    position = LEDGER_HEADER.index(column)
+    header = [name for name in LEDGER_HEADER if name != column]
+    rows = [
+        [value for index, value in enumerate(row) if index != position]
+        for row in LEDGER_ROWS
+    ]
+    return header, rows
 
 
 def day_count(start: date, end: date) -> int:
@@ -75,16 +101,18 @@ def accounts(ledger):
 def fake_costs(monkeypatch):
     """把两条 CE 通路都换成固定数值，互相对得上。"""
 
-    def fake_fetch_all(account_list, start, end, refresh=False):
-        days = day_count(start, end)
-        return {
-            account.key: CostSplit(
+    def fake_fetch_all(account_list, ranges, refresh=False):
+        # 区间按账号给：概览页每个账号的起点可能不同
+        splits = {}
+        for account in account_list:
+            start, end = ranges[account.key]
+            days = day_count(start, end)
+            splits[account.key] = CostSplit(
                 tag_raw=DAILY_TAGGED_RAW * days,
                 untag_raw=DAILY_UNTAGGED_RAW * days,
                 currency="USD",
             )
-            for account in account_list
-        }
+        return splits
 
     def fake_fetch_account(account, start, end, dimension, granularity, dates, refresh):
         width = len(dates)

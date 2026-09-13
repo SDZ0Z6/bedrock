@@ -16,7 +16,7 @@ from . import (
     usage_explorer,
 )
 from .auth import login_required
-from .dates import detect_preset, resolve_range
+from .dates import detect_preset, earliest_queryable, resolve_range
 from .excel_source import Account, ExcelSourceError, load_accounts
 from .report import build_report
 from .windows import PERIODS, WINDOWS, detect_window, resolve_window
@@ -43,18 +43,26 @@ def page_meta() -> dict:
 @bp.route("/")
 @login_required
 def index():
+    # 没有日期筛选：消费和余额都是「从各账号的启用日期累计到今天」。额度是一次性
+    # 发的，拿一个可选区间的消费去比它没有意义，要看的是额度用掉了多少。
     today = date.today()
-    start, end, notes = resolve_range(request.args, today)
     refresh = request.args.get("refresh") == "1"
+    notes: list[str] = []
 
     report = None
     fatal = None
     try:
-        report = build_report(start, end, refresh=refresh)
+        report = build_report(today, refresh=refresh)
     except ExcelSourceError as exc:
         fatal = str(exc)
     except Exception as exc:  # 兜底，避免整页 500
         fatal = f"{type(exc).__name__}: {exc}"
+
+    if report and report.incomplete_rows:
+        notes.append(
+            f"{len(report.incomplete_rows)} 个账号的累计区间不完整（未填启用日期，"
+            "或启用日期早于 Cost Explorer 的保留期），这些行的余额偏高，表格里已标出。"
+        )
 
     return render_template(
         "index.html",
@@ -62,10 +70,8 @@ def index():
         report=report,
         fatal=fatal,
         notes=notes,
-        start=start,
-        end=end,
         today=today,
-        active_preset=detect_preset(start, end, today),
+        earliest=earliest_queryable(today),
         tag_key=config.TAG_KEY,
         **page_meta(),
     )

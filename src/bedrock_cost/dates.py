@@ -10,7 +10,14 @@ import calendar
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 
-# Cost Explorer 大约保留 14 个月历史数据
+# Cost Explorer 默认能查的月份数，**含当月**。所以最早可查的是当月往前数
+# CE_HISTORY_MONTHS - 1 个月的 1 号，见 earliest_queryable。
+#
+# 这个「含当月」是拿真实账号量出来的，不是读文档猜的：2026-09-13 这天，
+# 起点填 2025-08-01 能查（当月 + 前 13 个月 = 14 个月），填 2025-07-01、
+# 07-13、07-14 全部报 ValidationException: You haven't enabled historical
+# data beyond 14 months。早先写成 month_shift(today, -14) 实际要了 15 个月，
+# 一律被拒。
 CE_HISTORY_MONTHS = 14
 
 # 快捷区间，顺序与页面上的排列一致
@@ -67,6 +74,40 @@ def detect_preset(start: date, end: date, today: date) -> str:
     return ""
 
 
+def earliest_queryable(today: date) -> date:
+    """Cost Explorer 还能查到的最早一天。
+
+    当月也算在 CE_HISTORY_MONTHS 里，所以是往前数 CE_HISTORY_MONTHS - 1 个月。
+    """
+    return month_shift(today, -(CE_HISTORY_MONTHS - 1))
+
+
+# cumulative_range 的第三个返回值，说明这个区间是不是打过折扣
+CUMULATIVE_OK = ""            # 按台账里的启用日期，完整
+CUMULATIVE_MISSING = "missing"  # 台账没填启用日期，按 CE 最早可查日兜底
+CUMULATIVE_CLAMPED = "clamped"  # 启用日期早于 CE 保留期，前面那段查不到
+CUMULATIVE_FUTURE = "future"    # 启用日期在今天之后，区间退化成今天一天
+
+
+def cumulative_range(start_date: date | None, today: date) -> tuple[date, date, str]:
+    """一个账号的累计统计区间：从启用日期到今天。
+
+    概览页不再让用户选区间——消费和余额都是「从这个账号启用那天算到现在」，
+    对着额度看才有意义。所以区间是每个账号各算各的，由这里统一决定。
+
+    第三个返回值说明区间是否打了折扣，页面据此给对应的行加标记：光看数字
+    分不出「这就是全部消费」和「更早的那段 CE 已经查不到了」。
+    """
+    earliest = earliest_queryable(today)
+    if start_date is None:
+        return earliest, today, CUMULATIVE_MISSING
+    if start_date > today:
+        return today, today, CUMULATIVE_FUTURE
+    if start_date < earliest:
+        return earliest, today, CUMULATIVE_CLAMPED
+    return start_date, today, CUMULATIVE_OK
+
+
 def resolve_range(args: Mapping[str, str], today: date) -> tuple[date, date, list[str]]:
     """从查询参数解析日期区间，返回 (开始, 结束, 给用户看的提示)。"""
     notes: list[str] = []
@@ -92,7 +133,7 @@ def resolve_range(args: Mapping[str, str], today: date) -> tuple[date, date, lis
         end = today
         notes.append("结束日期不能晚于今天，已调整为今天。")
 
-    earliest = month_shift(today, -CE_HISTORY_MONTHS)
+    earliest = earliest_queryable(today)
     if start < earliest:
         start = earliest
         notes.append(
