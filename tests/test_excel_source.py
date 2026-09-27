@@ -187,3 +187,32 @@ class TestStartDate:
     def test_is_read_from_the_ledger(self, ledger):
         excel_source.clear_cache()
         assert load_accounts(force=True)[0].start_date == date(2026, 8, 1)
+
+
+class TestTgChatIds:
+    """一个账号可以发到多个群：台账里一格存多个，逗号隔开。读的时候宽松，写回统一。"""
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            (None, ()),
+            ("", ()),
+            ("-1001111111111", ("-1001111111111",)),
+            (-1001111111111, ("-1001111111111",)),          # Excel 当成了数字
+            (-1001111111111.0, ("-1001111111111",)),
+            ("-1001111111111,-1002222222222", ("-1001111111111", "-1002222222222")),
+            ("-1001111111111，-1002222222222", ("-1001111111111", "-1002222222222")),  # 全角逗号
+            ("-1001111111111; @alerts_ch", ("-1001111111111", "@alerts_ch")),
+            ("-1001111111111\n-1002222222222", ("-1001111111111", "-1002222222222")),
+            ("-1002222222222, -1001111111111, -1002222222222", ("-1002222222222", "-1001111111111")),
+        ],
+    )
+    def test_splitting(self, raw, expected):
+        from bedrock_cost.excel_source import _split_chat_ids
+
+        assert _split_chat_ids(raw) == expected
+
+    def test_stored_as_one_comma_joined_cell(self):
+        from bedrock_cost.excel_source import _canon_chat_ids
+
+        assert _canon_chat_ids(" -1001111111111 ，-1002222222222 ") == "-1001111111111,-1002222222222"

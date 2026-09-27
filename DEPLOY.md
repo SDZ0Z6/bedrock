@@ -370,6 +370,144 @@ curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:5000/login
 
 期望 `200`。
 
+### 7.3 Telegram 告警（可选）
+
+两个定时任务：每天 09:00 发日报，每小时第 5 分钟查用量和额度。它们是**独立的短命
+进程**，由 systemd timer 调起、跑完就退出，不在 gunicorn 里——web 一重启就可能漏发
+或重发，以后改成多 worker 还会一条消息发 N 遍。timer 带 `Persistent=true`，服务器
+宕机回来会补跑一次。
+
+不配这一节，网站照常用，只是没有 TG 消息。
+
+**① 建 bot，拿 Token**
+
+在 Telegram 里找 **@BotFather**，发 `/newbot`，按提示起名字，最后它会给一串
+`123456789:AAE…` 形式的 Token。
+
+**② 把 bot 拉进群，拿群组 ID**
+
+把 bot 拉进要收告警的群。bot 默认开着隐私模式，只能看到提到它的消息，所以在群里发
+一条 `/start@你的bot名`，然后在服务器上：
+
+```bash
+curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | python3 -m json.tool | grep -A2 '"chat"'
+```
+
+`"id": -100…` 那一串就是群组 ID（超级群组以 `-100` 开头，别漏了负号）。
+
+一个账号可以发到几个群（弹窗里一行一个，最多 10 个），**每个群都要先把 bot 拉进去**。
+
+拿不准也没关系——填进账号管理页的弹窗后点「发测试消息」，它会往每个群各发一条，
+结果贴在各自那一行下面：成没成、失败是 ID 错了还是 bot 不在群里。
+
+**③ 把 Token 写进 `.env`，重启 web**
+
+```bash
+echo 'TELEGRAM_BOT_TOKEN=<TOKEN>' >> /opt/bedrock/.env
+```
+
+```bash
+systemctl restart bedrock
+```
+
+web 进程也要这个 Token：账号管理页的「发测试消息」是 web 发的。
+
+**④ 先 dry-run 看一眼**
+
+在账号管理页给至少一个账号填好群组 ID（修改弹窗里），再在表格的「TG 告警」列打开开关，然后：
+
+```bash
+cd /opt/bedrock && sudo -u bedrock .venv/bin/python -m bedrock_cost alerts daily --dry-run
+```
+
+`--dry-run` 只把要发的消息打印出来，不真的发，也不改告警状态。确认内容对了再往下走。
+
+**⑤ 两个 service**
+
+写 `/etc/systemd/system/bedrock-alerts-daily.service`：
+
+```ini
+[Unit]
+Description=Bedrock 成本监控 · Telegram 日报
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=bedrock
+Group=bedrock
+WorkingDirectory=/opt/bedrock
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/bedrock/.venv/bin/python -m bedrock_cost alerts daily
+# 查 CE 要几秒到几十秒；oneshot 默认 90 秒超时，留足余量
+TimeoutStartSec=300
+
+# 和 bedrock.service 同一套加固。alert-state.json 写在 /opt/bedrock 下
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/bedrock
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+```
+
+`/etc/systemd/system/bedrock-alerts-hourly.service` 和它一模一样，只改两行：
+
+```ini
+Description=Bedrock 成本监控 · Telegram 小时告警
+ExecStart=/opt/bedrock/.venv/bin/python -m bedrock_cost alerts hourly
+```
+
+**⑥ 两个 timer**
+
+`/etc/systemd/system/bedrock-alerts-daily.timer`：
+
+```ini
+[Unit]
+Description=每天 09:00 发 Telegram 日报
+
+[Timer]
+# 按系统时区算。服务器已设为 Asia/Kuala_Lumpur（见 DEPLOY-NOTES 2.5），即 UTC+8
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+`/etc/systemd/system/bedrock-alerts-hourly.timer`：
+
+```ini
+[Unit]
+Description=每小时查一次用量和额度
+
+[Timer]
+# 第 5 分钟而不是整点：CloudWatch 的指标要几分钟才落定，整点去查上一小时会漏数
+OnCalendar=*-*-* *:05:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+**⑦ 启用**
+
+```bash
+systemctl daemon-reload && systemctl enable --now bedrock-alerts-daily.timer bedrock-alerts-hourly.timer
+```
+
+```bash
+systemctl list-timers 'bedrock-alerts*' --no-pager
+```
+
+能看到两行、`NEXT` 是下一次触发的时间，就配好了。
+
+> **第一次跑小时任务不会发「开始有用量」**：它只记下当前状态当基线——否则一开启就收到
+> 一条「开始有用量」，而那其实是早就在用了。额度告警则会直接报当前已经到达的最高那一档
+> （比如已经 85% 就发一条「已用 80%」，不会连刷 50 / 80 两条）。
+
 ---
 
 ## 8. Nginx + HTTPS + 加固
@@ -521,6 +659,22 @@ journalctl -u bedrock -f
 tail -f /var/log/nginx/access.log
 ```
 
+### 看 Telegram 告警的日志
+
+```bash
+journalctl -u bedrock-alerts-hourly -n 50 --no-pager
+```
+
+```bash
+systemctl list-timers 'bedrock-alerts*' --no-pager
+```
+
+任务有任何发送或取数失败都以非零退出，`systemctl --failed` 里看得到。手动补发一次日报：
+
+```bash
+systemctl start bedrock-alerts-daily.service
+```
+
 ### 重启 / 停止
 
 ```bash
@@ -592,7 +746,8 @@ chown bedrock:bedrock /opt/bedrock/cred.xlsx && chmod 640 /opt/bedrock/cred.xlsx
 
 ### 备份
 
-要备的只有两个文件，都不在 git 里：
+要备的只有两个文件，都不在 git 里（`alert-state.json` 不用备：丢了最多重新建一次
+用量基线、把已经到达的额度档位再报一遍）：
 
 ```bash
 scp -i C:\path\to\your-key.pem root@<ECS_IP>:/opt/bedrock/.env ./backup-env-$(date +%F)

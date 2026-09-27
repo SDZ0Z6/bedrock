@@ -603,3 +603,419 @@ class TestStartDate:
 
         post(admin, "/accounts/create", **NEW_FORM, start_date="2026-07-15")
         assert by_account("333333333333").start_date == date(2026, 7, 15)
+
+
+# ------------------------------------------------------------------ Telegram 告警
+class TestTelegramSettings:
+    """弹窗里只管群组 ID；开关只在表格里（/accounts/tg-toggle），弹窗保存不碰它。"""
+
+    CHAT = "-1001234567890"
+    NO_TOKEN_NOTICE = "表格里开着的 TG 告警在配置好之前一条都不会发"
+
+    def edit(self, admin, target, **fields):
+        base = dict(
+            key=target.key, partner=target.partner, account=target.account,
+            budget=f"{target.budget:g}", tag_ratio="1", untag_ratio=f"{target.untag_ratio:g}",
+            tag_spec=target.tag_spec,
+            start_date=target.start_date.isoformat() if target.start_date else "",
+        )
+        base.update(fields)
+        return post(admin, "/accounts/update", **base)
+
+    def switch_on(self, admin):
+        """页面上开告警的唯一路径：弹窗里填好群，再在表格里点开关。"""
+        self.edit(admin, by_account("111111111111"), tg_chat_ids=self.CHAT)
+        post(admin, "/accounts/tg-toggle", key=by_account("111111111111").key, tg_enabled="1")
+        assert by_account("111111111111").tg_enabled is True
+
+    def test_off_by_default(self, admin, ledger):
+        """告警是往外发消息，必须主动开：老台账没这两列，一律算关。"""
+        assert by_account("111111111111").tg_enabled is False
+        html = admin.get("/accounts/").get_data(as_text=True)
+        assert ">TG 告警</th>" in html
+
+    def test_dialogs_have_chat_ids_but_no_switch(self, admin, ledger):
+        """开关只在表格里放一处，修改和新增弹窗里都不再放一次。"""
+        html = admin.get("/accounts/").get_data(as_text=True)
+        for marker in ('id="dlg-edit-1"', 'id="dlg-create"'):
+            dialog = _dialog(html, marker)
+            assert 'name="tg_chat_ids"' in dialog
+            assert 'name="tg_enabled"' not in dialog and 'role="switch"' not in dialog
+
+    def test_saving_chat_ids_does_not_switch_it_on(self, admin, ledger):
+        self.edit(admin, by_account("111111111111"), tg_chat_ids=self.CHAT)
+        after = by_account("111111111111")
+        assert after.tg_chat_ids == (self.CHAT,)
+        assert after.tg_enabled is False and after.tg_active is False
+
+    def test_saving_the_dialog_leaves_the_switch_alone(self, admin, ledger):
+        """最要紧的一条：弹窗里没有开关，表单里「没有这个字段」不能被当成关——
+        否则改一下额度，告警就被悄悄关掉了。"""
+        self.switch_on(admin)
+        self.edit(admin, by_account("111111111111"), budget="777", tg_chat_ids=self.CHAT)
+        after = by_account("111111111111")
+        assert after.budget == 777
+        assert after.tg_enabled is True
+
+    def test_a_stale_form_cannot_flip_the_switch(self, admin, ledger):
+        """上线前打开的旧页面（弹窗里还有开关）或者手搓的请求，带着 tg_enabled 也不算数。"""
+        self.edit(admin, by_account("111111111111"), tg_enabled="1", tg_chat_ids=self.CHAT)
+        assert by_account("111111111111").tg_enabled is False
+
+    def test_clearing_every_chat_switches_it_off(self, admin, ledger):
+        """群全删了开关还开着 = 开着却没处发。顺手关掉，并且在审计里说出来。"""
+        self.switch_on(admin)
+        self.edit(admin, by_account("111111111111"), tg_chat_ids="")
+        after = by_account("111111111111")
+        assert after.tg_chat_ids == ()
+        assert after.tg_enabled is False
+        log = (ledger.parent / "ledger-audit.log").read_text(encoding="utf-8")
+        assert "TG_ENABLED 开 → 关（群组 ID 全删了）" in log
+
+    def test_rejects_a_malformed_chat_id(self, admin, ledger):
+        response = self.edit(admin, by_account("111111111111"), tg_chat_ids="abc")
+        assert response.status_code == 400
+        assert "「abc」格式不对" in response.get_data(as_text=True)   # 点名是哪一个
+
+    def test_audit_log_speaks_plainly(self, admin, ledger):
+        self.edit(admin, by_account("111111111111"), tg_chat_ids=self.CHAT)
+        log = (ledger.parent / "ledger-audit.log").read_text(encoding="utf-8")
+        assert f"TG_CHAT_IDS 空 → {self.CHAT}" in log
+
+    def test_chat_id_stays_text_in_excel(self, admin, ledger):
+        """存成数字的话，一个长负数可能被 Excel 显示成科学计数法。"""
+        self.edit(admin, by_account("111111111111"), tg_chat_ids=self.CHAT)
+        header, *rows = raw_rows(ledger)
+        column = header.index("TG_CHAT_IDS")
+        assert rows[0][column] == self.CHAT
+
+    def test_new_account_starts_switched_off(self, admin, ledger):
+        """新增弹窗里也没有开关：建好之后在表格里开。表单里硬塞 tg_enabled 也不算数。"""
+        post(admin, "/accounts/create", **NEW_FORM, tg_enabled="1", tg_chat_ids=self.CHAT)
+        created = by_account("333333333333")
+        assert created.tg_chat_ids == (self.CHAT,)
+        assert created.tg_enabled is False
+        post(admin, "/accounts/tg-toggle", key=created.key, tg_enabled="1")
+        assert by_account("333333333333").tg_active is True
+
+    def test_new_row_does_not_inherit_a_leftover_switch(self, admin, ledger):
+        """追加的那一行可能是手工清空过内容、却留着旧开关值的行：新建时显式写成关。"""
+        header = [*LEDGER_HEADER, "TG_ENABLED", "TG_CHAT_IDS"]
+        leftover = [None] * len(LEDGER_HEADER) + [True, None]
+        write_ledger(ledger, header=header, rows=[*(row + [None, None] for row in LEDGER_ROWS), leftover])
+        excel_source.clear_cache()
+
+        post(admin, "/accounts/create", **NEW_FORM)
+        assert by_account("333333333333").tg_enabled is False
+
+    def test_disabled_account_never_sends(self, admin, ledger):
+        self.switch_on(admin)
+        post(admin, "/accounts/toggle", key=by_account("111111111111").key, enabled="0")
+        assert by_account("111111111111").tg_active is False
+
+    def test_page_warns_once_when_the_token_is_missing(self, admin, ledger, monkeypatch):
+        """开关旁边不放字了：没配 Token 就在页面上说一次，不是每行挂一个「未生效」。"""
+        from bedrock_cost import config
+
+        self.switch_on(admin)
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "")
+        html = admin.get("/accounts/").get_data(as_text=True)
+        assert html.count(self.NO_TOKEN_NOTICE) == 1
+        assert "未生效" not in html
+
+    def test_no_token_notice_when_nothing_would_be_sent(self, admin, ledger, monkeypatch):
+        from bedrock_cost import config
+
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "")
+        assert self.NO_TOKEN_NOTICE not in admin.get("/accounts/").get_data(as_text=True)
+
+
+class TestTelegramTestButton:
+    """弹窗里的「发测试消息」：测的是此刻填着的值，不写台账，测完原样回填。"""
+
+    CHAT = "-1001234567890"
+
+    @pytest.fixture
+    def outbox(self, monkeypatch):
+        from bedrock_cost import config, telegram
+
+        box = []
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:FAKE")
+        monkeypatch.setattr(telegram, "send_message", lambda chat, text: box.append((chat, text)))
+        return box
+
+    def test_sends_to_the_typed_chat_without_saving(self, admin, ledger, outbox):
+        target = by_account("111111111111")
+        before = ledger.stat().st_mtime_ns
+        response = post(
+            admin, "/accounts/tg-test",
+            key=target.key, partner=target.partner, account=target.account,
+            budget="500000", tg_chat_ids=self.CHAT,
+        )
+        assert response.status_code == 200
+        assert outbox[0][0] == self.CHAT
+        assert "测试消息" in outbox[0][1]
+        assert ledger.stat().st_mtime_ns == before       # 一个字节都没写
+
+    def test_reopens_the_same_dialog_with_the_input_kept(self, admin, ledger, outbox):
+        target = by_account("111111111111")
+        html = post(
+            admin, "/accounts/tg-test",
+            key=target.key, partner=target.partner, account=target.account,
+            budget="777", tg_chat_ids=self.CHAT,
+        ).get_data(as_text=True)
+        assert "全部发送成功" in html
+        assert f'value="{self.CHAT}"' in html
+        assert 'value="777"' in html                     # 没保存的其他字段也还在
+        dialog = html[html.index('data-reopen'):]
+        assert "全部发送成功" in dialog[: dialog.index("</dialog>")]
+
+    def test_explains_a_failure(self, admin, ledger, monkeypatch):
+        from bedrock_cost import config, telegram
+        from bedrock_cost.telegram import TelegramError
+
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:FAKE")
+
+        def boom(chat, text):
+            raise TelegramError("群组 ID 不对，或者 bot 还没有被拉进这个群")
+
+        monkeypatch.setattr(telegram, "send_message", boom)
+        target = by_account("111111111111")
+        html = post(admin, "/accounts/tg-test", key=target.key, tg_chat_ids=self.CHAT).get_data(as_text=True)
+        assert "bot 还没有被拉进这个群" in html
+
+    def test_names_the_account_but_not_the_partner(self, admin, ledger, outbox):
+        """和正式消息一样：群里只看得到账号 ID，看不到上游。"""
+        target = by_account("111111111111")
+        post(
+            admin, "/accounts/tg-test",
+            key=target.key, partner=target.partner, account=target.account, tg_chat_ids=self.CHAT,
+        )
+        text = outbox[0][1]
+        assert target.account in text
+        assert target.partner not in text
+
+    def test_asks_for_a_chat_id_first(self, admin, ledger, outbox):
+        target = by_account("111111111111")
+        html = post(admin, "/accounts/tg-test", key=target.key, tg_chat_ids="").get_data(as_text=True)
+        assert "先填群组 ID" in html
+        assert outbox == []
+
+    def test_works_from_the_new_account_dialog(self, admin, ledger, outbox):
+        html = post(admin, "/accounts/tg-test", account="333333333333", tg_chat_ids=self.CHAT).get_data(as_text=True)
+        assert outbox and "全部发送成功" in html
+        assert 'id="dlg-create" data-reopen' in html
+
+    def test_needs_csrf(self, admin, ledger, outbox):
+        """和其他 POST 一样：令牌不对就提示后退回，什么都不发。"""
+        response = admin.post("/accounts/tg-test", data={"tg_chat_ids": self.CHAT})
+        assert response.status_code == 302
+        assert outbox == []
+
+    def test_needs_login(self, client, ledger, outbox):
+        response = client.post("/accounts/tg-test", data={"tg_chat_ids": self.CHAT})
+        assert response.status_code == 302
+        assert outbox == []
+
+
+# ------------------------------------------------------------------ 多个群 / 表格里的开关 / 图标按钮
+def _edit(admin, target, **fields):
+    """提交修改弹窗：不传的字段按账号现值填。"""
+    base = dict(
+        key=target.key, partner=target.partner, account=target.account,
+        budget=f"{target.budget:g}", tag_ratio="1", untag_ratio=f"{target.untag_ratio:g}",
+        tag_spec=target.tag_spec,
+        start_date=target.start_date.isoformat() if target.start_date else "",
+    )
+    base.update(fields)
+    return post(admin, "/accounts/update", **base)
+
+
+def _dialog(html: str, marker: str) -> str:
+    """截出某个弹窗的 HTML。"""
+    part = html[html.index(marker) :]
+    return part[: part.index("</dialog>")]
+
+
+class TestMultipleChats:
+    A, B, C = "-1001111111111", "-1002222222222", "-1003333333333"
+
+    def test_saves_every_row(self, admin, ledger):
+        """一行一个框、同名字段有多个——全部要存下，不能只剩第一个。"""
+        _edit(admin, by_account("111111111111"), tg_chat_ids=[self.A, self.B])
+        assert by_account("111111111111").tg_chat_ids == (self.A, self.B)
+        header, *rows = raw_rows(ledger)
+        assert rows[0][header.index("TG_CHAT_IDS")] == f"{self.A},{self.B}"
+
+    def test_blank_rows_and_duplicates_are_dropped(self, admin, ledger):
+        _edit(admin, by_account("111111111111"), tg_chat_ids=[self.A, "", self.B, self.A, "  "])
+        assert by_account("111111111111").tg_chat_ids == (self.A, self.B)
+
+    def test_a_pasted_list_in_one_box_is_split(self, admin, ledger):
+        """有人会把一串 ID 一次粘进第一个框。"""
+        _edit(admin, by_account("111111111111"), tg_chat_ids=[f"{self.A}, {self.B}"])
+        assert by_account("111111111111").tg_chat_ids == (self.A, self.B)
+
+    def test_the_bad_one_is_named(self, admin, ledger):
+        response = _edit(admin, by_account("111111111111"), tg_chat_ids=[self.A, "oops", self.B])
+        assert response.status_code == 400
+        assert "「oops」格式不对" in response.get_data(as_text=True)
+        assert by_account("111111111111").tg_chat_ids == ()          # 一个都没存
+
+    def test_too_many_chats(self, admin, ledger):
+        many = [f"-100{n:010d}" for n in range(excel_source.MAX_TG_CHATS + 1)]
+        response = _edit(admin, by_account("111111111111"), tg_chat_ids=many)
+        assert response.status_code == 400
+        assert f"最多 {excel_source.MAX_TG_CHATS} 个群" in response.get_data(as_text=True)
+
+    def test_a_failed_save_keeps_every_row_in_the_form(self, admin, ledger):
+        """校验失败回填时，三行都得回来——只回填第一行等于让人重打。"""
+        html = _edit(
+            admin, by_account("111111111111"), budget="abc", tg_chat_ids=[self.A, self.B, self.C]
+        ).get_data(as_text=True)
+        dialog = _dialog(html, "data-reopen")
+        for chat in (self.A, self.B, self.C):
+            assert f'value="{chat}"' in dialog
+
+    def test_same_set_again_is_not_a_change(self, admin, ledger):
+        _edit(admin, by_account("111111111111"), tg_chat_ids=[self.A, self.B])
+        before = ledger.stat().st_mtime_ns
+        _edit(admin, by_account("111111111111"), tg_chat_ids=[f"{self.A} ,{self.B}"])
+        assert ledger.stat().st_mtime_ns == before
+
+    def test_edit_dialog_shows_one_row_per_chat(self, admin, ledger):
+        _edit(admin, by_account("111111111111"), tg_chat_ids=[self.A, self.B])
+        dialog = _dialog(admin.get("/accounts/").get_data(as_text=True), 'id="dlg-edit-1"')
+        assert dialog.count('name="tg_chat_ids"') == 2
+        assert "data-add-chat" in dialog and "data-remove-chat" in dialog
+
+    def test_empty_account_still_gets_one_box(self, admin, ledger):
+        dialog = _dialog(admin.get("/accounts/").get_data(as_text=True), 'id="dlg-edit-1"')
+        assert dialog.count('name="tg_chat_ids"') == 1
+
+    def test_test_button_reports_each_chat(self, admin, ledger, monkeypatch):
+        """挨个发，结果贴在各自那一行旁边：哪个 ID 错了一眼看到。"""
+        from bedrock_cost import config, telegram
+        from bedrock_cost.telegram import TelegramError
+
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:FAKE")
+        sent = []
+
+        def send(chat, text):
+            if chat == self.B:
+                raise TelegramError("bot 不在这个群里，先把它拉进来")
+            sent.append(chat)
+
+        monkeypatch.setattr(telegram, "send_message", send)
+        target = by_account("111111111111")
+        html = post(
+            admin, "/accounts/tg-test", key=target.key,
+            tg_chat_ids=[self.A, self.B, "nope"],
+        ).get_data(as_text=True)
+        assert sent == [self.A]                                  # 格式不对的根本没发
+        assert "3 个群里 1 个成功、2 个失败" in html
+        assert "✓ 已发送" in html
+        assert "✗ bot 不在这个群里" in html
+        assert "✗ 格式不对" in html
+
+
+class TestTableToggle:
+    """表格里的 TG 开关：点一下立刻写台账，只翻 TG_ENABLED 这一格。"""
+
+    CHAT = "-1001234567890"
+
+    def with_chat(self, admin):
+        _edit(admin, by_account("111111111111"), tg_chat_ids=self.CHAT)
+        return by_account("111111111111").key
+
+    @staticmethod
+    def cells(admin) -> list[str]:
+        """每一行的 TG 告警格，按台账顺序（第一个是 111111111111）。"""
+        html = admin.get("/accounts/").get_data(as_text=True)
+        return re.findall(r'<td class="col-tg">(.*?)</td>', html, re.S)
+
+    def test_switches_on_and_off(self, admin, ledger):
+        key = self.with_chat(admin)
+        post(admin, "/accounts/tg-toggle", key=key, tg_enabled="1")
+        assert by_account("111111111111").tg_enabled is True
+        post(admin, "/accounts/tg-toggle", key=key, tg_enabled="0")
+        assert by_account("111111111111").tg_enabled is False
+
+    def test_leaves_the_chat_ids_alone(self, admin, ledger):
+        post(admin, "/accounts/tg-toggle", key=self.with_chat(admin), tg_enabled="1")
+        assert by_account("111111111111").tg_chat_ids == (self.CHAT,)
+
+    def test_cannot_switch_on_without_a_chat(self, admin, ledger):
+        """页面上是灰的，但页面可能是几分钟前开的——写入时在锁里再判一次。"""
+        response = post(admin, "/accounts/tg-toggle", key=by_account("111111111111").key, tg_enabled="1")
+        assert response.status_code == 302
+        assert by_account("111111111111").tg_enabled is False
+        assert "先点「修改」填上再开" in admin.get("/accounts/").get_data(as_text=True)  # 提示条
+
+    def test_renders_as_a_switch(self, admin, ledger):
+        post(admin, "/accounts/tg-toggle", key=self.with_chat(admin), tg_enabled="1")
+        cell = self.cells(admin)[0]
+        assert 'role="switch"' in cell and 'aria-checked="true"' in cell
+        assert f'title="点一下关闭（1 个群：{self.CHAT}）"' in cell
+
+    def test_switch_is_disabled_without_a_chat(self, admin, ledger):
+        cell = self.cells(admin)[0]
+        assert "disabled" in cell
+        assert 'title="还没有填群组 ID，先点「修改」填上"' in cell
+
+    def test_no_text_beside_the_switch(self, admin, ledger):
+        """开关旁边不放字：群数、账号停用、没配 Token 都收进 title，悬停才看。"""
+        post(admin, "/accounts/tg-toggle", key=self.with_chat(admin), tg_enabled="1")
+        cells = self.cells(admin)
+        assert len(cells) == len(LEDGER_ROWS)                   # 开着有群的、没填群的都在
+        for cell in cells:
+            assert re.sub(r"<[^>]+>", "", cell).strip() == ""
+
+    def test_title_says_when_nothing_will_be_sent(self, admin, ledger, monkeypatch):
+        from bedrock_cost import config
+
+        key = self.with_chat(admin)
+        post(admin, "/accounts/tg-toggle", key=key, tg_enabled="1")
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "")
+        assert "。服务器没配 TELEGRAM_BOT_TOKEN，不会发" in self.cells(admin)[0]
+
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:FAKE")
+        assert "不会发" not in self.cells(admin)[0]
+        post(admin, "/accounts/toggle", key=key, enabled="0")
+        assert "。账号已停用，不会发" in self.cells(admin)[0]
+
+    def test_is_audited(self, admin, ledger):
+        post(admin, "/accounts/tg-toggle", key=self.with_chat(admin), tg_enabled="1")
+        log = (ledger.parent / "ledger-audit.log").read_text(encoding="utf-8")
+        assert "开启账号 111111111111 的 TG 告警" in log
+
+    def test_needs_csrf(self, admin, ledger):
+        key = self.with_chat(admin)
+        admin.post("/accounts/tg-toggle", data={"key": key, "tg_enabled": "1"})
+        assert by_account("111111111111").tg_enabled is False
+
+    def test_needs_login(self, client, ledger):
+        response = client.post("/accounts/tg-toggle", data={"key": "x", "tg_enabled": "1"})
+        assert response.status_code == 302 and "/login" in response.headers["Location"]
+
+
+class TestIconButtons:
+    """修改 / 停用 / 恢复换成了图标按钮：没有文字，靠 title 和 aria-label 说清是什么。"""
+
+    def test_edit_and_disable_are_icons(self, admin, ledger):
+        html = admin.get("/accounts/").get_data(as_text=True)
+        assert ">修改</button>" not in html and ">停用</button>" not in html
+        assert 'aria-label="修改 ALPHA / 111111111111"' in html
+        assert 'aria-label="停用 111111111111"' in html
+
+    def test_restore_is_an_icon(self, admin, ledger):
+        post(admin, "/accounts/toggle", key=by_account("111111111111").key, enabled="0")
+        html = admin.get("/accounts/").get_data(as_text=True)
+        assert ">恢复</button>" not in html
+        assert 'aria-label="恢复 111111111111"' in html
+
+    def test_icons_still_open_their_dialogs(self, admin, ledger):
+        """换的只是外观：弹窗照旧由 data-open 打开，停用照旧先确认。"""
+        html = admin.get("/accounts/").get_data(as_text=True)
+        assert html.count('data-open="dlg-edit-') == len(LEDGER_ROWS)
+        assert html.count('data-open="dlg-off-') == len(LEDGER_ROWS)

@@ -140,6 +140,44 @@ HOST = _text("HOST", "127.0.0.1")
 PORT = _number("PORT", 5000)
 DEBUG = _flag("DEBUG", False)
 
+# ---------------------------------------------------------------- Telegram 告警
+# 开关和群组 ID 是**每个账号**的，在台账里（TG_ENABLED / TG_CHAT_IDS 两列，一个账号
+# 可以填几个群），从账号管理页改。这里只放全局的几项。
+#
+# Bot Token 只放 .env，页面上看不到也改不了：能登录的人就能看到页面，Token 泄露
+# 等于别人能冒充这个 bot 往你的群里发消息。在 Telegram 里找 @BotFather 建 bot 拿到。
+TELEGRAM_BOT_TOKEN = _text("TELEGRAM_BOT_TOKEN")
+
+# API 地址。一般不用改——服务器在吉隆坡，直连可达；万一哪天要走自建反代再改。
+TELEGRAM_API_BASE = _text("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
+
+
+def _thresholds(raw: str) -> list[float]:
+    """额度告警档位。坏值忽略，最后兜底成默认的四档。"""
+    picked = set()
+    for piece in raw.split(","):
+        try:
+            value = float(piece.strip())
+        except ValueError:
+            continue
+        if value > 0:
+            picked.add(value)
+    return sorted(picked) or [50.0, 80.0, 90.0, 100.0]
+
+
+# 额度使用率达到这些百分比时各发一次告警
+TELEGRAM_THRESHOLDS = _thresholds(_text("TELEGRAM_THRESHOLDS", "50,80,90,100"))
+
+# 连续多少个整点小时零调用算「用量中断」。1 = 上一个整点小时没调用就发。
+# MAP 流量常有突发的空档，嫌吵就调大。
+TELEGRAM_IDLE_HOURS = max(1, _number("TELEGRAM_IDLE_HOURS", 1))
+
+# 告警要跨次运行记住的状态：上次有没有用量、哪些额度档位已经发过、CE 实账的缓存。
+# 和台账放一起，systemd 单元的 ReadWritePaths 已经覆盖。
+ALERT_STATE_PATH = Path(_text("ALERT_STATE_PATH", "alert-state.json"))
+if not ALERT_STATE_PATH.is_absolute():
+    ALERT_STATE_PATH = BASE_DIR / ALERT_STATE_PATH
+
 
 def startup_warnings() -> list[str]:
     """启动时需要提醒用户的配置问题。"""

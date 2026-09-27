@@ -35,15 +35,22 @@ REQUIRED_COLUMNS = {
     "SK": "sk",
 }
 
-# 可选列。老台账没有这三列也能正常读：
+# 可选列。老台账没有这几列也能正常读：
 #   TAG        缺失时回落到 .env 里的 TAG_KEY
 #   ENABLED    缺失时所有账号都算启用（软删用的开关，见 set_enabled）
 #   START_DATE 账号的启用日期。概览页的消费和余额从这一天累计到今天，缺失时
 #              回落到 Cost Explorer 能查到的最早一天（见 dates.cumulative_range）
+#   TG_ENABLED 这个账号要不要发 Telegram 告警。缺失 / 空着 = **不发**——告警是往
+#              外发消息的，必须主动开，和 ENABLED 的「空着算启用」刻意相反。
+#              只在账号管理的表格里点（见 set_tg_enabled），弹窗不碰它
+#   TG_CHAT_IDS 告警发到哪些群。一格里放多个，逗号隔开（-100 开头的一串数字，
+#              或 @频道名）。页面上是一行一个，存的时候拼成一格
 OPTIONAL_COLUMNS = {
     "TAG": "tag_spec",
     "ENABLED": "enabled",
     "START_DATE": "start_date",
+    "TG_ENABLED": "tg_enabled",
+    "TG_CHAT_IDS": "tg_chat_ids",
 }
 
 COLUMNS = {**REQUIRED_COLUMNS, **OPTIONAL_COLUMNS}
@@ -98,6 +105,14 @@ class Account:
     enabled: bool = True
     # 启用日期。概览页从这一天累计消费到今天；None = 台账里没填
     start_date: date | None = None
+    # Telegram 告警：开关 + 发到哪些群。开关默认关，必须主动开
+    tg_enabled: bool = False
+    tg_chat_ids: tuple[str, ...] = ()
+
+    @property
+    def tg_active(self) -> bool:
+        """真的会发消息：开关开着、至少填了一个群、账号本身也在启用。"""
+        return self.enabled and self.tg_enabled and bool(self.tg_chat_ids)
 
     @property
     def ak_masked(self) -> str:
@@ -191,6 +206,52 @@ def _to_enabled(value: object) -> bool:
     return text not in _FALSE_WORDS
 
 
+# TG_ENABLED 里被当作「开」的写法。和 ENABLED 相反，这里空值算关。
+_TRUE_WORDS = {"1", "true", "yes", "on", "y", "enabled", "启用", "开", "开启", "是"}
+
+
+def _to_flag(value: object) -> bool:
+    """解析 TG_ENABLED。空值 / 缺列 = 关，只有明确写了肯定词才算开。"""
+    if isinstance(value, bool):
+        return value
+    text = _clean(value).lower()
+    if text.endswith(".0") and text[:-2].isdigit():  # Excel 把 1 存成 1.0
+        text = text[:-2]
+    return text in _TRUE_WORDS
+
+
+def _to_chat_id(value: object) -> str:
+    """单个群组 ID。Excel 里可能被存成数字（-1001234567890），去掉浮点尾巴。"""
+    text = _clean(value)
+    if text.endswith(".0") and text[:-2].lstrip("-").isdigit():
+        text = text[:-2]
+    return text
+
+
+# TG_CHAT_IDS 一格里多个 ID 的分隔符：逗号（中英文）、分号、空白都认。
+# 手改 Excel 的人什么都可能用，读的时候宽松；写回时统一成半角逗号。
+_CHAT_SEPARATORS = re.compile(r"[,，;；\s]+")
+
+
+def _split_chat_ids(value: object) -> tuple[str, ...]:
+    """把一格（或表单里的一个框）拆成去重后的 ID 列表，保持原来的顺序。"""
+    if value is None:
+        return ()
+    if isinstance(value, (int, float)):  # 只填了一个、又被 Excel 当成了数字
+        return (_to_chat_id(value),)
+    seen: dict[str, None] = {}
+    for piece in _CHAT_SEPARATORS.split(_clean(value)):
+        chat = _to_chat_id(piece)
+        if chat:
+            seen.setdefault(chat, None)
+    return tuple(seen)
+
+
+def _canon_chat_ids(value: object) -> str:
+    """台账里存的形式：逗号拼成一格。比较「改没改」也用这个形式。"""
+    return ",".join(_split_chat_ids(value))
+
+
 def _to_number(value: object, default: float = 0.0) -> float:
     """容错解析数字：支持千分位逗号、货币符号、百分号和空值。"""
     if isinstance(value, (int, float)):
@@ -267,6 +328,8 @@ def _read_workbook(path: Path) -> list[Account]:
                     tag_spec=_clean(cell(row, "tag_spec")),
                     enabled=_to_enabled(cell(row, "enabled")),
                     start_date=_to_date(cell(row, "start_date")),
+                    tg_enabled=_to_flag(cell(row, "tg_enabled")),
+                    tg_chat_ids=_split_chat_ids(cell(row, "tg_chat_ids")),
                 )
             )
         return accounts
@@ -322,8 +385,11 @@ AUDIT_NAME = "ledger-audit.log"
 INTERNAL_TO_EXCEL = {internal: excel for excel, internal in COLUMNS.items()}
 
 # 可编辑字段。凭证不在其中，这就是「编辑不能改 AK/SK」的唯一定义处。
+# TG_ENABLED 也不在：开关只在表格里点（set_tg_enabled），弹窗里没有它。放进来的话，
+# 弹窗每保存一次，表单里「没有这个字段」就会被当成关，悄悄把告警关掉。
 EDITABLE = (
     "partner", "account", "budget", "tag_ratio", "untag_ratio", "tag_spec", "start_date",
+    "tg_chat_ids",
 )
 # 新建时还要额外收凭证
 CREATE_ONLY = ("ak", "sk")
@@ -339,9 +405,13 @@ _NORMALIZE = {
     "untag_ratio": lambda v: _to_number(v, 1.0),
     "tag_spec": _clean,
     "start_date": _to_date,
+    "tg_chat_ids": _canon_chat_ids,
 }
 
 _ACCOUNT_ID = re.compile(r"^\d{12}$")
+# 和 telegram.CHAT_ID_PATTERN 同一个规则。不直接 import：台账模块不该依赖发消息的模块
+_CHAT_ID = re.compile(r"^(-?\d{5,20}|@[A-Za-z][A-Za-z0-9_]{4,31})$")
+MAX_TG_CHATS = 10
 _AK_SHAPE = re.compile(r"^[A-Z0-9]{16,128}$")
 
 _write_lock = threading.Lock()
@@ -368,6 +438,19 @@ def _strict_number(text: str) -> float | None:
     if value != value or value in (float("inf"), float("-inf")):  # NaN / inf
         return None
     return value / 100 if text.strip().endswith("%") else value
+
+
+def form_chat_ids(form) -> list[str]:
+    """表单里的全部群组 ID：一行一个框，同名字段有多个（MultiDict.getlist）。
+
+    每个框里也允许粘贴多个——有人会把一串 ID 一次粘进第一个框。拆开、去空、去重。
+    """
+    raw = form.getlist("tg_chat_ids") if hasattr(form, "getlist") else [form.get("tg_chat_ids")]
+    seen: dict[str, None] = {}
+    for value in raw:
+        for chat in _split_chat_ids(value):
+            seen.setdefault(chat, None)
+    return list(seen)
 
 
 def validate(form: dict, others: list[Account], creating: bool) -> tuple[dict, list[str]]:
@@ -429,6 +512,18 @@ def validate(form: dict, others: list[Account], creating: bool) -> tuple[dict, l
         errors.append("启用日期不能晚于今天。")
     else:
         data["start_date"] = start_date
+
+    # Telegram：弹窗里只有群组 ID，开关在表格里（见 EDITABLE 的注释）
+    chats = form_chat_ids(form)
+    data["tg_chat_ids"] = ",".join(chats)
+    bad = [chat for chat in chats if not _CHAT_ID.match(chat)]
+    if bad:
+        errors.append(
+            f"群组 ID「{'」「'.join(bad)}」格式不对：群组是一串负数（超级群组以 -100 开头），"
+            "频道可以写 @频道名。"
+        )
+    elif len(chats) > MAX_TG_CHATS:
+        errors.append(f"一个账号最多 {MAX_TG_CHATS} 个群，现在填了 {len(chats)} 个。")
 
     if creating:
         # 新建必须给凭证：没有 AK/SK 的账号在所有查询页都是查不出数的空壳
@@ -663,6 +758,9 @@ def create_account(data: dict, actor: str = "") -> str:
         for name in (*EDITABLE, *CREATE_ONLY):
             sheet.cell(row=row, column=_ensure_column(sheet, index, name)).value = data[name]
         sheet.cell(row=row, column=_ensure_column(sheet, index, "enabled"), value=True)
+        # 新账号的 TG 告警一律先关着，建好后在表格里开。显式写 FALSE，不指望这一格是空的：
+        # 追加的那一行可能是手工清空过内容、却留着旧开关值的行
+        sheet.cell(row=row, column=_ensure_column(sheet, index, "tg_enabled")).value = False
         started = data.get("start_date")
         when = f"，启用日期 {started.isoformat()}" if started else "（未设启用日期）"
         return f"新增账号 {data['account']}（{data['partner']}），额度 {data['budget']:g}{when}"
@@ -680,9 +778,38 @@ def update_account(key: str, data: dict, actor: str = "") -> str:
     def action(sheet, index) -> str:
         row = _locate(sheet, index, key)
         changes = _write_editable(sheet, index, row, data)
+        # 开关不归弹窗管，但群组 ID 全删光了开关还开着，就成了「开着却没处发」——
+        # 顺手关掉。和表格里「没填群开不了」是同一条规矩
+        if not data["tg_chat_ids"] and "tg_enabled" in index:
+            switch = sheet.cell(row=row, column=index["tg_enabled"])
+            if _to_flag(switch.value):
+                switch.value = False
+                changes.append("TG_ENABLED 开 → 关（群组 ID 全删了）")
         if not changes:
             return ""
         return f"修改账号 {data['account']}：" + "；".join(changes)
+
+    return _mutate(action, actor)
+
+
+def set_tg_enabled(key: str, enabled: bool, actor: str = "") -> str:
+    """账号管理表格里的 TG 开关：只翻 TG_ENABLED 这一格。
+
+    开的时候要求这一行已经有群组 ID——在锁里当场读文件判断，不信页面上看到的：
+    页面可能是几分钟前打开的，群组 ID 早被别人清掉了。
+    """
+
+    def action(sheet, index) -> str:
+        row = _locate(sheet, index, key)
+        if enabled:
+            chats_column = _ensure_column(sheet, index, "tg_chat_ids")
+            if not _split_chat_ids(sheet.cell(row=row, column=chats_column).value):
+                raise ExcelSourceError("这个账号还没有填群组 ID，先点「修改」填上再开。")
+        column = _ensure_column(sheet, index, "tg_enabled")
+        if _to_flag(sheet.cell(row=row, column=column).value) == enabled:
+            return ""
+        sheet.cell(row=row, column=column).value = bool(enabled)
+        return f"{'开启' if enabled else '关闭'}账号 {key.rpartition('#')[0]} 的 TG 告警"
 
     return _mutate(action, actor)
 
