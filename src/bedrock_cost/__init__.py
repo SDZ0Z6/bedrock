@@ -1,7 +1,7 @@
 """Bedrock 成本监控平台。
 
 把 cred.xlsx 里的账号台账和 AWS Cost Explorer 的实际消费拼在一起，展示每个
-上游账号的预算使用情况，并支持按日/按月、按服务/标签/账号下钻。
+上游账号的额度使用情况，并支持按日/按月、按服务/标签/账号下钻。
 
 对外只暴露一个应用工厂：
 
@@ -10,7 +10,7 @@
 
 模块分工：
     config          .env 读取与默认值
-    excel_source    读台账（账号、预算、比率、凭证、TAG 列）
+    excel_source    读台账（账号、额度、启用日期、比率、凭证、TAG 列）
     cost_explorer   概览页用的 CE 查询：按标签拆 TAG / UNTAG
     usage_explorer  下钻页用的 CE 查询：时间序列 + 三种维度
     report          概览页八列口径与合计

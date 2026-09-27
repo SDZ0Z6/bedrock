@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -247,12 +248,24 @@ def fetch_split(account: Account, start: date, end: date, refresh: bool = False)
 
 
 def fetch_all(
-    accounts: list[Account], start: date, end: date, refresh: bool = False
+    accounts: list[Account],
+    ranges: Mapping[str, tuple[date, date]],
+    refresh: bool = False,
 ) -> dict[str, CostSplit]:
-    """并发查询多个账号，返回 {account.key: CostSplit}。"""
+    """并发查询多个账号，返回 {account.key: CostSplit}。
+
+    区间**按账号给**，不是所有账号共用一个：概览页的口径是「从各自的启用日期
+    累计到今天」，两个账号启用时间不同，区间就不同。缓存键本来就含起止日期，
+    所以这么改不影响缓存命中。
+    """
     if not accounts:
         return {}
     workers = max(1, min(config.MAX_WORKERS, len(accounts)))
+
+    def one(account: Account) -> CostSplit:
+        start, end = ranges[account.key]
+        return fetch_split(account, start, end, refresh)
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = pool.map(lambda a: fetch_split(a, start, end, refresh), accounts)
+        results = pool.map(one, accounts)
         return {account.key: split for account, split in zip(accounts, results)}

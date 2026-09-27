@@ -461,3 +461,74 @@ class TestMetricDefinitions:
 
     def test_four_us_regions(self):
         assert set(cwm.REGIONS) == {"us-east-1", "us-east-2", "us-west-1", "us-west-2"}
+
+
+# ------------------------------------------------------------------ 告警用：每小时调用次数
+class TestHourlyInvocations:
+    """Telegram「用量切换」告警的数据源：几个整点小时里四个区合计的调用次数。"""
+
+    HOURS = [datetime(2026, 9, 27, h, tzinfo=timezone.utc) for h in (3, 4, 5)]
+
+    @pytest.fixture
+    def fake(self, monkeypatch):
+        """{区域: {ModelId: {小时: 次数}}}，fail 里的区域会抛错。"""
+        knobs = {"data": {}, "fail": set()}
+
+        def fake_list(account, region):
+            if region in knobs["fail"]:
+                raise RuntimeError("ThrottlingException")
+            return sorted(knobs["data"].get(region, {}))
+
+        class Client:
+            def __init__(self, region):
+                self.region = region
+
+            def get_metric_data(self, **kwargs):
+                results = []
+                for query in kwargs["MetricDataQueries"]:
+                    stat = query["MetricStat"]
+                    assert stat["Metric"]["MetricName"] == "Invocations"
+                    assert stat["Period"] == 3600
+                    model_id = stat["Metric"]["Dimensions"][0]["Value"]
+                    points = knobs["data"][self.region][model_id]
+                    results.append({
+                        "Id": query["Id"],
+                        "Timestamps": list(points),
+                        "Values": list(points.values()),
+                    })
+                return {"MetricDataResults": results}
+
+        monkeypatch.setattr(cwm, "list_model_ids", fake_list)
+        monkeypatch.setattr(cwm, "_client", lambda a, s, region: Client(region))
+        return knobs
+
+    def test_sums_models_and_regions_per_hour(self, accounts, fake):
+        h3, h4, h5 = self.HOURS
+        fake["data"] = {
+            "us-east-1": {
+                "global.anthropic.claude-opus-5": {h3: 10.0, h5: 1.0},
+                "2kbsta0lwebx": {h3: 5.0},
+            },
+            "us-west-2": {"global.anthropic.claude-opus-5": {h4: 7.0}},
+        }
+        counts, failed = cwm.hourly_invocations(accounts[0], self.HOURS)
+        assert failed == []
+        assert counts == [15.0, 7.0, 1.0]
+
+    def test_no_models_means_zero_not_unknown(self, accounts, fake):
+        counts, failed = cwm.hourly_invocations(accounts[0], self.HOURS)
+        assert counts == [0.0, 0.0, 0.0] and failed == []
+
+    def test_one_failed_region_makes_the_whole_answer_unknown(self, accounts, fake):
+        """缺一个区的零不能当成真的零，否则那个区的调用会被误报成「用量中断」。"""
+        fake["data"] = {"us-east-1": {"global.anthropic.claude-opus-5": {self.HOURS[-1]: 3.0}}}
+        fake["fail"] = {"us-west-2"}
+        counts, failed = cwm.hourly_invocations(accounts[0], self.HOURS)
+        assert counts is None
+        assert len(failed) == 1 and "us-west-2" in failed[0]
+
+    def test_ignores_points_outside_the_window(self, accounts, fake):
+        early = datetime(2026, 9, 27, 1, tzinfo=timezone.utc)
+        fake["data"] = {"us-east-1": {"m": {early: 99.0, self.HOURS[0]: 2.0}}}
+        counts, _ = cwm.hourly_invocations(accounts[0], self.HOURS)
+        assert counts == [2.0, 0.0, 0.0]

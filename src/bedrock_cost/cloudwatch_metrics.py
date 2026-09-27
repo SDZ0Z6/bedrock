@@ -699,3 +699,82 @@ def build_metrics(
         report.panels.append(panel)
 
     return report
+
+
+# --------------------------------------------------------------- 告警用：每小时调用次数
+def hourly_invocations(
+    account: Account,
+    hour_starts: list[datetime],
+    regions: list[str] | None = None,
+) -> tuple[list[float] | None, list[str]]:
+    """几个整点小时里、四个区合计的调用次数，给 Telegram「用量切换」告警用。
+
+    返回 (与 hour_starts 对齐的次数, 出错的区)。**只要有一个区出错就返回 None**：
+    缺一个区的零不能当成真的零，否则那个区的调用会被误报成「用量中断」。
+
+    刻意逐 ModelId 相加，而不是查不带维度的账号级 Invocations：后者只在写这个模块时
+    拿来对过一次账（差 0），生产代码从没依赖过它，而那几个账号的凭证现在都失效了，
+    没法再验证它一定存在——GetMetricData 查一个不存在的指标也是返回空 + Complete，
+    分不出「没用量」和「指标不存在」。逐 ModelId 这条路模型用量页天天在跑。
+
+    ListMetrics 只列近两周有数据的指标，但这里只看最近几个小时：上一小时有调用的
+    模型必然在两周内有数据、必然被列出来，所以对这个窗口没有缺口。
+    """
+    picked = regions or list(DEFAULT_REGIONS)
+    if not hour_starts:
+        return [], []
+    starts = [h.astimezone(timezone.utc) for h in hour_starts]
+    index = {stamp: i for i, stamp in enumerate(starts)}
+    totals = [0.0] * len(starts)
+    failed: list[str] = []
+
+    for region in picked:
+        try:
+            model_ids = list_model_ids(account, region)
+            if not model_ids:
+                continue
+            client = _client(account, "cloudwatch", region)
+            queries = [
+                {
+                    "Id": f"h{i}",
+                    "MetricStat": {
+                        "Metric": {
+                            "Namespace": NAMESPACE,
+                            "MetricName": "Invocations",
+                            "Dimensions": [{"Name": "ModelId", "Value": model_id}],
+                        },
+                        "Period": 3600,
+                        "Stat": "Sum",
+                    },
+                    "ReturnData": True,
+                }
+                for i, model_id in enumerate(sorted(model_ids))
+            ]
+            for offset in range(0, len(queries), MAX_QUERIES_PER_CALL):
+                chunk = queries[offset : offset + MAX_QUERIES_PER_CALL]
+                token = None
+                while True:
+                    kwargs = {
+                        "MetricDataQueries": chunk,
+                        "StartTime": starts[0],
+                        "EndTime": starts[-1] + timedelta(hours=1),
+                    }
+                    if token:
+                        kwargs["NextToken"] = token
+                    response = client.get_metric_data(**kwargs)
+                    for result in response.get("MetricDataResults", []):
+                        for stamp, value in zip(
+                            result.get("Timestamps", []), result.get("Values", [])
+                        ):
+                            position = index.get(stamp.astimezone(timezone.utc))
+                            if position is not None:
+                                totals[position] += value
+                    token = response.get("NextToken")
+                    if not token:
+                        break
+        except Exception as exc:
+            failed.append(f"{region}：{friendly_error(exc, account)}")
+
+    if failed:
+        return None, failed
+    return totals, []

@@ -19,7 +19,7 @@ import pytest
 from bedrock_cost import cost_estimate, pricing
 from bedrock_cost.cloudwatch_metrics import ProfileInfo
 
-from .conftest import LEDGER_ROWS
+from .conftest import LEDGER_ROWS, ledger_value
 
 OPUS5 = "Claude Opus 5 (Amazon Bedrock Edition)"
 SONNET46 = "Claude Sonnet 4.6 (Amazon Bedrock Edition)"
@@ -409,9 +409,9 @@ def test_页面不泄露凭证(logged_in, ledger, fake_prices, fake_cloudwatch):
         "us-east-1": {"global.anthropic.claude-opus-5": tokens(inp=1_000_000)}
     }
     html = logged_in.get("/cost-estimate").get_data(as_text=True)
-    for _, _, _, _, _, ak, sk, _ in LEDGER_ROWS:
-        assert ak not in html
-        assert sk not in html
+    for row in LEDGER_ROWS:
+        assert ledger_value(row, "AK") not in html
+        assert ledger_value(row, "SK") not in html
 
 
 def test_没有单价的模型会在页面上提示(logged_in, ledger, fake_prices, fake_cloudwatch):
@@ -517,3 +517,88 @@ def test_UTC分桶(accounts, fake_prices, fake_cloudwatch):
     assert all(s.tzinfo == timezone.utc and s.hour == 0 for s in stamps)
     assert dates == ["2026-08-10", "2026-08-11", "2026-08-12"]
     assert labels == ["08-10", "08-11", "08-12"]
+
+
+# ------------------------------------------------------------------ 告警用：按标签拆开
+def _tagged(profile_info: ProfileInfo, tag: str) -> ProfileInfo:
+    from dataclasses import replace
+
+    return replace(profile_info, tag_value=tag)
+
+
+def test_拆分估算按标签分开(accounts, fake_prices, fake_cloudwatch):
+    """额度告警要套比率，所以得知道每一块钱是 TAG 还是 UNTAG。
+
+    走带台账标签的推理配置 = TAG；直连原厂模型 = UNTAG（它确实没打标签）。
+    """
+    alpha = accounts[0]   # TAG 列是 map-migrated=migALPHA
+    fake_cloudwatch["regions"] = {
+        "us-east-1": {
+            "global.anthropic.claude-opus-5": tokens(inp=1_000_000),   # 直连：$5
+            "2kbsta0lwebx": tokens(inp=2_000_000),                     # 配置：$10
+        }
+    }
+    fake_cloudwatch["profiles"] = {
+        "us-east-1": {
+            "2kbsta0lwebx": _tagged(
+                profile("map-opus5", "anthropic.claude-opus-5", cross_region=True), "migALPHA"
+            )
+        }
+    }
+    split = cost_estimate.estimate_split(alpha, date(2026, 8, 14), date(2026, 8, 14))
+    assert split.errors == []
+    assert split.tag_raw == pytest.approx(10.0)
+    assert split.untag_raw == pytest.approx(5.0)
+    # ALPHA 的 UNTAG 比率是 1.05
+    assert split.marked(alpha) == pytest.approx(10.0 + 5.0 * 1.05)
+
+
+def test_拆分估算标签值对不上算无标签(accounts, fake_prices, fake_cloudwatch):
+    """配置上打的是别人的 MAP ID，和台账对不上——和概览页一样算 UNTAG。"""
+    fake_cloudwatch["regions"] = {"us-east-1": {"2kbsta0lwebx": tokens(inp=1_000_000)}}
+    fake_cloudwatch["profiles"] = {
+        "us-east-1": {
+            "2kbsta0lwebx": _tagged(
+                profile("x", "anthropic.claude-opus-5", cross_region=True), "migSOMEONEELSE"
+            )
+        }
+    }
+    split = cost_estimate.estimate_split(accounts[0], date(2026, 8, 14), date(2026, 8, 14))
+    assert split.tag_raw == 0
+    assert split.untag_raw == pytest.approx(5.0)
+
+
+def test_拆分估算和明细表同一套定价(accounts, fake_prices, fake_cloudwatch):
+    """合计必须和预估成本页的总额一致——两处用的是同一个价目表和计价档判定。"""
+    fake_cloudwatch["regions"] = {
+        "us-east-1": {
+            "global.anthropic.claude-opus-5": tokens(inp=1_000_000, out=200_000, read=3_000_000),
+            "us.anthropic.claude-sonnet-4-6": tokens(inp=500_000, write=100_000),
+        }
+    }
+    day = date(2026, 8, 14)
+    split = cost_estimate.estimate_split(accounts[0], day, day)
+    report = cost_estimate.build_estimate(accounts[:1], day, day)
+    assert split.tag_raw + split.untag_raw == pytest.approx(report.total_cost)
+
+
+def test_拆分估算不认识的模型单独列出(accounts, fake_prices, fake_cloudwatch):
+    """没单价的模型不能悄悄按 0 算——列出来，告警里会写明「按 0 算了」。"""
+    fake_cloudwatch["regions"] = {"us-east-1": {"global.anthropic.claude-future-9": tokens(inp=1e6)}}
+    split = cost_estimate.estimate_split(accounts[0], date(2026, 8, 14), date(2026, 8, 14))
+    assert split.unpriced == ["anthropic.claude-future-9"]
+    assert split.tag_raw + split.untag_raw == 0
+
+
+def test_拆分估算区间为空时不查(accounts, fake_prices, fake_cloudwatch):
+    split = cost_estimate.estimate_split(accounts[0], date(2026, 8, 15), date(2026, 8, 14))
+    assert (split.tag_raw, split.untag_raw, split.errors) == (0.0, 0.0, [])
+
+
+def test_拆分估算读不到价目表是错误(accounts, fake_cloudwatch, monkeypatch):
+    def broken(force=False):
+        raise pricing.PricingError("价目表下不来")
+
+    monkeypatch.setattr(cost_estimate, "load_prices", broken)
+    split = cost_estimate.estimate_split(accounts[0], date(2026, 8, 14), date(2026, 8, 14))
+    assert split.errors == ["价目表下不来"]

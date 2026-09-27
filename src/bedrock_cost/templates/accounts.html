@@ -21,7 +21,38 @@
 
 {# 新增和修改共用同一组字段。uid 用来生成不重复的 id，好让 label 对得上。
    凭证只在新增时出现，这是「编辑改不了 AK/SK」在模板层的体现。 #}
-{% macro fields(uid, values, creating) -%}
+{# 线条图标，16px，描边跟着文字颜色走。只放这一页用到的几个 #}
+{% macro icon(name) -%}
+  <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+  {%- if name == 'pencil' -%}
+    <path d="M11.3 2.3a1.5 1.5 0 0 1 2.1 2.1L5 12.8l-2.8.9.9-2.8Z"/><path d="M9.8 3.8l2.1 2.1"/>
+  {%- elif name == 'power' -%}
+    <path d="M8 1.8v6"/><path d="M11.9 4.3a5.5 5.5 0 1 1-7.8 0"/>
+  {%- elif name == 'restore' -%}
+    <path d="M2.2 8a5.8 5.8 0 1 0 1.7-4.1L2.2 5.6"/><path d="M2.2 2.2v3.4h3.4"/>
+  {%- elif name == 'plus' -%}
+    <path d="M8 3v10"/><path d="M3 8h10"/>
+  {%- elif name == 'x' -%}
+    <path d="M4 4l8 8"/><path d="M12 4l-8 8"/>
+  {%- endif -%}
+  </svg>
+{%- endmacro %}
+
+{# 表格里 TG 开关的悬停提示。开关旁边不放字，状态细节都收在这里 #}
+{% macro tg_title(account) -%}
+  {%- if not (account.tg_enabled or account.tg_chat_ids) -%}
+    还没有填群组 ID，先点「修改」填上
+  {%- else -%}
+    {{ '点一下关闭' if account.tg_enabled else '点一下开启' }}
+    {%- if account.tg_chat_ids %}（{{ account.tg_chat_ids | length }} 个群：{{ account.tg_chat_ids | join('、') }}）
+    {%- else %}（没填群组 ID，不会发）{% endif %}
+    {%- if account.tg_enabled and not account.enabled %}。账号已停用，不会发
+    {%- elif account.tg_enabled and not tg_configured %}。服务器没配 TELEGRAM_BOT_TOKEN，不会发
+    {%- endif %}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro fields(uid, values, creating, tg_result=none) -%}
   <div class="form-grid">
     <div class="field">
       <label for="{{ uid }}-partner">上游</label>
@@ -35,9 +66,16 @@
              placeholder="123456789012" value="{{ values.get('account', '') }}">
     </div>
     <div class="field">
-      <label for="{{ uid }}-budget">预算</label>
+      <label for="{{ uid }}-budget">额度</label>
       <input id="{{ uid }}-budget" name="budget" required inputmode="decimal"
              placeholder="100000" value="{{ values.get('budget', '') }}">
+    </div>
+    <div class="field">
+      {# 概览页的消费和余额从这一天累计到今天，所以改它会改变整个账号的口径 #}
+      <label for="{{ uid }}-start-date">启用日期</label>
+      <input id="{{ uid }}-start-date" name="start_date" type="date" max="{{ today.isoformat() }}"
+             title="概览页从这一天开始累计消费；留空则按 Cost Explorer 最早可查日起算"
+             value="{{ values.get('start_date', '') }}">
     </div>
     <div class="field">
       <label for="{{ uid }}-tag-ratio">TAG 比率</label>
@@ -53,6 +91,45 @@
       <label for="{{ uid }}-tag">TAG（可选，留空则用默认标签键 {{ tag_key }}）</label>
       <input id="{{ uid }}-tag" name="tag_spec" placeholder="{{ tag_key }}=migXXXXXXXX"
              value="{{ values.get('tag_spec', '') }}">
+    </div>
+
+    {# Telegram 告警的群组 ID。开关不在这里，只在表格的「TG 告警」列——
+       一个地方管开关，弹窗只管发到哪。 #}
+    <div class="field field-full tg-block">
+      {% set chats = values.get('tg_chat_ids') or [] %}
+      {% set results = tg_result.chats if tg_result and tg_result.chats else {} %}
+      <span class="field-label">TG 群组 ID <span class="tone-muted">（每个群一行，最多 {{ max_tg_chats }} 个）</span></span>
+      <div class="chat-rows" data-chat-rows data-max="{{ max_tg_chats }}">
+        {# 至少留一行空的，总得有个框能填 #}
+        {% for chat in (chats or ['']) %}
+          {% set outcome = results.get(chat) if chat else none %}
+          <div class="chat-row">
+            <input name="tg_chat_ids" inputmode="numeric" spellcheck="false" autocomplete="off"
+                   aria-label="群组 ID" placeholder="-1001234567890" value="{{ chat }}">
+            <button class="icon-btn" type="button" data-remove-chat
+                    title="删掉这个群" aria-label="删掉这个群">{{ icon('x') }}</button>
+            {% if outcome %}
+              <span class="chat-result {{ 'tone-ok' if outcome.ok else 'tone-danger' }}">
+                {{- '✓ ' if outcome.ok else '✗ ' }}{{ outcome.message }}</span>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </div>
+      <div class="chat-actions">
+        <button class="btn btn-sm btn-ghost" type="button" data-add-chat>{{ icon('plus') }}添加群组</button>
+        {# formaction：提交的是同一个表单，所以测的就是此刻填着的这些 ID，不用先保存。
+           formnovalidate：别让 AK/SK 之类的必填项挡住测试。 #}
+        <button class="btn btn-sm" type="submit" formnovalidate
+                formaction="{{ url_for('accounts.tg_test') }}">发测试消息</button>
+      </div>
+      {% if tg_result %}
+        <div class="alert {{ 'alert-ok' if tg_result.ok else 'alert-error' }} tg-result">
+          {{ tg_result.message }}
+        </div>
+      {% endif %}
+      {% if not tg_configured %}
+        <p class="form-hint">服务器还没配置 <code>TELEGRAM_BOT_TOKEN</code>：群组 ID 可以先存，但在配置好之前一条都不会发，测试消息也发不出去。</p>
+      {% endif %}
     </div>
 
     {% if creating %}
@@ -93,6 +170,13 @@
   </div>
 </noscript>
 
+{# 开关旁边不放字，「开着却发不出去」就在这里说一次，不是每行一个 #}
+{% if not tg_configured and accounts | selectattr('tg_active') | list %}
+  <div class="alert alert-warn">
+    服务器还没配置 <code>TELEGRAM_BOT_TOKEN</code>：表格里开着的 TG 告警在配置好之前一条都不会发。
+  </div>
+{% endif %}
+
 <section class="card">
   <div class="card-head">
     <h2>账号台账</h2>
@@ -113,10 +197,12 @@
           <th>状态</th>
           <th>上游</th>
           <th>账号 ID</th>
-          <th class="num">预算</th>
+          <th>启用日期</th>
+          <th class="num">额度</th>
           <th class="num">TAG 比率</th>
           <th class="num">UNTAG 比率</th>
           <th>TAG</th>
+          <th>TG 告警</th>
           <th>AK</th>
           <th class="col-actions">操作</th>
         </tr>
@@ -133,6 +219,12 @@
             </td>
             <td>{{ account.partner }}</td>
             <td class="cell-id">{{ account.account }}</td>
+            <td>
+              {%- if account.start_date %}<code>{{ account.start_date.isoformat() }}</code>
+              {%- else %}<span class="tone-warn"
+                    title="概览页会按 Cost Explorer 最早可查日起算，累计消费可能不是这个账号的全部消费">未设置</span>
+              {%- endif -%}
+            </td>
             <td class="num">{{ account.budget | money }}</td>
             <td class="num">{{ account.tag_ratio | ratio }}</td>
             <td class="num">{{ account.untag_ratio | ratio }}</td>
@@ -143,6 +235,20 @@
                 <span class="tone-muted" title="台账 TAG 列留空，回落到 .env 里的 TAG_KEY">默认 {{ tag_key }}</span>
               {% endif %}
             </td>
+            <td class="col-tg">
+              {# 点一下立刻写台账，和「恢复」一样走 POST + CSRF。没填群组 ID 的开不了，
+                 置灰；但已经开着的永远能关（手改 Excel 可能造出「开着却没群」）。 #}
+              {% set can_toggle = account.tg_enabled or account.tg_chat_ids %}
+              <form class="inline-form" method="post" action="{{ url_for('accounts.tg_toggle') }}">
+                <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+                <input type="hidden" name="key" value="{{ account.key }}">
+                <input type="hidden" name="tg_enabled" value="{{ '0' if account.tg_enabled else '1' }}">
+                <button class="switch" type="submit" role="switch"
+                        aria-checked="{{ 'true' if account.tg_enabled else 'false' }}"
+                        aria-label="{{ account.account }} 的 TG 告警"
+                        title="{{ tg_title(account) }}"{% if not can_toggle %} disabled{% endif %}></button>
+              </form>
+            </td>
             <td>
               {# SK 任何时候都不出现在页面上；AK 也只露头尾 #}
               {% if account.ak %}
@@ -152,18 +258,20 @@
               {% endif %}
             </td>
             <td class="row-actions">
-              <button class="btn btn-sm" type="button" data-open="dlg-edit-{{ loop.index }}"
-                      title="修改 {{ account.partner }} / {{ account.account }}">修改</button>
+              <button class="icon-btn" type="button" data-open="dlg-edit-{{ loop.index }}"
+                      title="修改 {{ account.partner }} / {{ account.account }}"
+                      aria-label="修改 {{ account.partner }} / {{ account.account }}">{{ icon('pencil') }}</button>
               {% if account.enabled %}
-                <button class="btn btn-sm btn-danger" type="button" data-open="dlg-off-{{ loop.index }}"
-                        title="停用 {{ account.account }}">停用</button>
+                <button class="icon-btn icon-danger" type="button" data-open="dlg-off-{{ loop.index }}"
+                        title="停用 {{ account.account }}" aria-label="停用 {{ account.account }}">{{ icon('power') }}</button>
               {% else %}
                 {# 恢复是安全且可逆的，不值得再拦一道；<form> 放在 <td> 里是合法的 #}
                 <form class="inline-form" method="post" action="{{ url_for('accounts.toggle') }}">
                   <input type="hidden" name="csrf" value="{{ csrf_token() }}">
                   <input type="hidden" name="key" value="{{ account.key }}">
                   <input type="hidden" name="enabled" value="1">
-                  <button class="btn btn-sm" type="submit" title="恢复 {{ account.account }}">恢复</button>
+                  <button class="icon-btn" type="submit" title="恢复 {{ account.account }}"
+                          aria-label="恢复 {{ account.account }}">{{ icon('restore') }}</button>
                 </form>
               {% endif %}
             </td>
@@ -188,7 +296,7 @@
     </header>
     <div class="modal-body">
       {% if open_create and errors %}{{ error_box(errors) }}{% endif %}
-      {{ fields('new', create_form, true) }}
+      {{ fields('new', create_form, true, tg_test if open_create else none) }}
     </div>
     <footer class="modal-foot">
       <span class="card-note">写入前会自动备份台账</span>
@@ -208,6 +316,8 @@
        'tag_ratio': account.tag_ratio | ratio,
        'untag_ratio': account.untag_ratio | ratio,
        'tag_spec': account.tag_spec,
+       'start_date': account.start_date.isoformat() if account.start_date else '',
+       'tg_chat_ids': account.tg_chat_ids,
      } %}
   {# 校验没过时回填用户刚填的值，别让人重打一遍 #}
   {% set values = edit_form if edit_key == account.key else current %}
@@ -224,7 +334,7 @@
       </header>
       <div class="modal-body">
         {% if edit_key == account.key and errors %}{{ error_box(errors) }}{% endif %}
-        {{ fields('e' ~ loop.index, values, false) }}
+        {{ fields('e' ~ loop.index, values, false, tg_test if edit_key == account.key else none) }}
         <p class="form-hint">
           AK <code>{{ account.ak_masked or '（缺凭证）' }}</code> 不可修改。
           要更换凭证请停用这个账号、再用新凭证新建一条。
@@ -255,7 +365,7 @@
             要停用 <strong>{{ account.partner }} / {{ account.account }}</strong> 吗？
           </p>
           <ul class="confirm-list">
-            <li>它会从概览、成本和使用情况、模型用量、模型配额四个页面消失，不再参与预算合计。</li>
+            <li>它会从概览、成本和使用情况、模型用量、模型配额四个页面消失，不再参与额度合计。</li>
             <li>不再对它发起 Cost Explorer 查询（省钱）。</li>
             <li>台账里的行、凭证和 TAG 配置都保留，随时可以在这一页恢复。</li>
           </ul>
@@ -300,8 +410,48 @@
     if (closer) {
       var owner = closer.closest('dialog');
       if (owner) owner.close();
+      return;
+    }
+
+    // 群组 ID：加一行。复制现有的第一行、清空，上一次测试的结果别跟着复制过去
+    var adder = event.target.closest('[data-add-chat]');
+    if (adder) {
+      var rows = adder.closest('.tg-block').querySelector('[data-chat-rows]');
+      var max = parseInt(rows.getAttribute('data-max'), 10) || 10;
+      if (rows.querySelectorAll('.chat-row').length >= max) return;
+      var fresh = rows.querySelector('.chat-row').cloneNode(true);
+      fresh.querySelector('input').value = '';
+      var stale = fresh.querySelector('.chat-result');
+      if (stale) stale.remove();
+      rows.appendChild(fresh);
+      fresh.querySelector('input').focus();
+      syncAdder(rows);
+      return;
+    }
+
+    // 群组 ID：删一行。最后一行不删、只清空——总得留一个框能填
+    var remover = event.target.closest('[data-remove-chat]');
+    if (remover) {
+      var row = remover.closest('.chat-row');
+      var list = row.parentElement;
+      if (list.querySelectorAll('.chat-row').length > 1) {
+        row.remove();
+      } else {
+        row.querySelector('input').value = '';
+        var result = row.querySelector('.chat-result');
+        if (result) result.remove();
+      }
+      syncAdder(list);
     }
   });
+
+  // 到上限就把「添加群组」按钮置灰，别让人加了之后才被服务端拒
+  function syncAdder(rows) {
+    var max = parseInt(rows.getAttribute('data-max'), 10) || 10;
+    var adder = rows.closest('.tg-block').querySelector('[data-add-chat]');
+    if (adder) adder.disabled = rows.querySelectorAll('.chat-row').length >= max;
+  }
+  document.querySelectorAll('[data-chat-rows]').forEach(syncAdder);
 
   document.querySelectorAll('dialog.modal').forEach(function (dialog) {
     // 点遮罩关闭。dialog 自身没有内边距、内容铺满，所以只有点在遮罩上时
@@ -315,8 +465,13 @@
   var reopen = document.querySelector('dialog[data-reopen]');
   if (reopen) {
     reopen.showModal();
-    var bad = reopen.querySelector('input:not([type=hidden])');
-    if (bad) bad.focus();
+    var tested = reopen.querySelector('.tg-result');
+    if (tested) {
+      tested.scrollIntoView({ block: 'center' });
+    } else {
+      var bad = reopen.querySelector('input:not([type=hidden])');
+      if (bad) bad.focus();
+    }
   }
 })();
 </script>

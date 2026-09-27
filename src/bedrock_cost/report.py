@@ -3,12 +3,17 @@
 每一行：
     上游      = Excel PARTNER
     账号      = Excel ACCOUNT
-    预算      = Excel BUDGET
+    额度      = Excel BUDGET
     TAG 消费   = Cost Explorer 中匹配 Excel TAG 的消费 × TAG_RATIO
     UNTAG 消费 = Cost Explorer 中其余消费 × UNTAG_RATIO
     总消费     = TAG 消费 + UNTAG 消费
-    使用率     = 总消费 / 预算 × 100
-    余额       = 预算 - 总消费
+    使用率     = 总消费 / 额度 × 100
+    余额       = 额度 - 总消费
+
+**区间是每个账号各算各的**：从 Excel START_DATE 那天累计到今天。概览页因此
+没有日期筛选——额度是一次性发的，拿「本月消费」去比它没有意义，要看的是
+「发出去的额度用掉了多少」。区间怎么定见 dates.cumulative_range，台账没填
+启用日期、或启用日期早于 CE 保留期时会打折扣，对应的行上会标出来。
 
 TAG 的匹配规则见 cost_explorer 模块文档。
 """
@@ -19,6 +24,13 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from . import config, cost_explorer
+from .dates import (
+    CUMULATIVE_CLAMPED,
+    CUMULATIVE_FUTURE,
+    CUMULATIVE_MISSING,
+    CUMULATIVE_OK,
+    cumulative_range,
+)
 from .excel_source import Account, load_accounts
 
 
@@ -42,6 +54,11 @@ class ReportRow:
     tag_label: str = ""
     from_cache: bool = False
     row_number: int = 0
+    # 这一行的统计区间。每个账号各不相同，所以挂在行上而不是报表上
+    start_date: date | None = None        # 台账里填的启用日期，None = 没填
+    range_start: date | None = None       # 实际查了哪一天起（可能被兜底或钳过）
+    range_end: date | None = None
+    range_status: str = ""                # dates.CUMULATIVE_* 之一
 
     @property
     def level(self) -> str:
@@ -64,15 +81,43 @@ class ReportRow:
     def overspent(self) -> bool:
         return self.budget > 0 and self.balance < 0
 
+    @property
+    def range_incomplete(self) -> bool:
+        """这一行的累计消费不是「全部消费」，页面要标出来。
+
+        两种情况都会让余额显示得比真实值高，光看数字分辨不出来：
+        没填启用日期（只能从 CE 最早可查日兜底），或启用日期早于 CE 保留期。
+        """
+        return self.range_status in (CUMULATIVE_MISSING, CUMULATIVE_CLAMPED)
+
+    @property
+    def range_hint(self) -> str:
+        """区间打了折扣时给出的一句说明，正常时是空串。"""
+        if self.range_status == CUMULATIVE_MISSING:
+            return "台账未填启用日期，按 Cost Explorer 最早可查日起算"
+        if self.range_status == CUMULATIVE_CLAMPED:
+            return (
+                f"启用日期 {self.start_date.isoformat()} 早于 Cost Explorer 的保留期，"
+                "更早的消费查不到，余额偏高"
+            )
+        if self.range_status == CUMULATIVE_FUTURE:
+            return "启用日期晚于今天，暂无可统计区间"
+        return ""
+
 
 @dataclass
 class Report:
-    start: date
+    # 区间按账号各算各的，所以报表上只有共同的终点（今天），起点在每一行上
     end: date
     rows: list[ReportRow] = field(default_factory=list)
     currency: str = "USD"
     errors: list[str] = field(default_factory=list)
     any_cached: bool = False
+
+    @property
+    def incomplete_rows(self) -> list[ReportRow]:
+        """累计区间打了折扣的行——它们的余额偏高。"""
+        return [r for r in self.rows if r.range_incomplete]
 
     # -------------------------------------------------- 合计（只统计查询成功的行）
     @property
@@ -122,13 +167,18 @@ class Report:
 
 
 def _usage_pct(total_cost: float, budget: float) -> float | None:
-    """预算为 0 或未填时使用率无意义，返回 None 让页面显示 “—”。"""
+    """额度为 0 或未填时使用率无意义，返回 None 让页面显示 “—”。"""
     if budget <= 0:
         return None
     return total_cost / budget * 100
 
 
-def build_row(account: Account, split: cost_explorer.CostSplit) -> ReportRow:
+def build_row(
+    account: Account,
+    split: cost_explorer.CostSplit,
+    period: tuple[date, date, str] | None = None,
+) -> ReportRow:
+    start, end, status = period or (None, None, CUMULATIVE_OK)
     row = ReportRow(
         partner=account.partner,
         account=account.account,
@@ -141,6 +191,10 @@ def build_row(account: Account, split: cost_explorer.CostSplit) -> ReportRow:
         tag_label=account.tag_label,
         from_cache=split.from_cache,
         row_number=account.row,
+        start_date=account.start_date,
+        range_start=start,
+        range_end=end,
+        range_status=status,
     )
     if split.error:
         return row
@@ -155,15 +209,21 @@ def build_row(account: Account, split: cost_explorer.CostSplit) -> ReportRow:
     return row
 
 
-def build_report(start: date, end: date, refresh: bool = False) -> Report:
-    """读台账 -> 并发查 CE -> 算出主页需要的每一列。"""
-    accounts = load_accounts(force=refresh)
-    splits = cost_explorer.fetch_all(accounts, start, end, refresh=refresh)
+def build_report(today: date, refresh: bool = False) -> Report:
+    """读台账 -> 按各账号的启用日期并发查 CE -> 算出主页需要的每一列。
 
-    report = Report(start=start, end=end)
+    没有区间参数：概览页的口径就是「从启用那天累计到今天」，区间由台账决定，
+    不由用户选。
+    """
+    accounts = load_accounts(force=refresh)
+    periods = {a.key: cumulative_range(a.start_date, today) for a in accounts}
+    ranges = {key: (start, end) for key, (start, end, _) in periods.items()}
+    splits = cost_explorer.fetch_all(accounts, ranges, refresh=refresh)
+
+    report = Report(end=today)
     for account in accounts:
         split = splits.get(account.key) or cost_explorer.CostSplit(error="未取到数据")
-        row = build_row(account, split)
+        row = build_row(account, split, periods[account.key])
         report.rows.append(row)
         if row.error:
             report.errors.append(f"{account.partner} / {account.account}：{row.error}")

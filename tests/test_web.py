@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 import pytest
 
-from bedrock_cost import auth, config
+from bedrock_cost import auth, config, excel_source
 from bedrock_cost.dates import preset_range
 
 from .conftest import TEST_PASSWORD, TEST_USER
@@ -175,16 +175,89 @@ class TestShell:
 
 
 class TestOverviewPage:
-    def test_renders_all_eight_columns(self, logged_in, ledger, fake_costs):
+    def test_renders_all_nine_columns(self, logged_in, ledger, fake_costs):
         html = logged_in.get("/").get_data(as_text=True)
-        for header in ("上游", "账号", "预算", "TAG 消费", "UNTAG 消费", "总消费", "使用率", "余额"):
+        headers = ("上游", "账号", "启用日期", "额度",
+                   "TAG 消费", "UNTAG 消费", "总消费", "使用率", "余额")
+        for header in headers:
             assert header in html
+        thead = html[html.index("<thead>") : html.index("</thead>")]
+        assert thead.count("</th>") == len(headers)   # <thead> 也含 "<th"，数闭合标签
+        assert ">预算</th>" not in html   # 改叫额度了
 
-    def test_keeps_its_query_buttons(self, logged_in, ledger, fake_costs):
-        """概览页保留查询/强制刷新，只有下钻页改成了自动提交。"""
+    def test_totals_row_spans_the_three_text_columns(self, logged_in, ledger, fake_costs):
+        """加了一列就得跟着改 colspan，不然合计行整行错位。"""
         html = logged_in.get("/").get_data(as_text=True)
-        assert ">查询</button>" in html
+        tfoot = html[html.index("<tfoot>") : html.index("</tfoot>")]
+        assert 'colspan="3"' in tfoot
+        assert tfoot.count("<td") == 7   # 合计 + 六个数字列 = 3 + 6 = 9 列
+
+    def test_has_no_date_filter(self, logged_in, ledger, fake_costs):
+        """额度是一次性发的，拿某个可选区间的消费去比它没有意义。
+
+        所以这一页没有日期筛选：消费和余额都是「从各账号的启用日期累计到今天」。
+        """
+        html = logged_in.get("/").get_data(as_text=True)
+        assert 'name="start"' not in html
+        assert 'name="end"' not in html
+        assert ">查询</button>" not in html
+        for preset in ("本月", "上月", "近 7 天", "近 30 天", "今年"):
+            assert preset not in html
+
+    def test_keeps_the_refresh_button(self, logged_in, ledger, fake_costs):
+        """只剩这一个按钮，挪到了标题旁，不为它单留一整张筛选卡片。"""
+        html = logged_in.get("/").get_data(as_text=True)
         assert "强制刷新" in html
+        head, _, _body = html.partition('<div class="page-actions">')
+        assert "强制刷新" not in head   # 在 page-actions 里，不在它前面
+
+    def test_old_bookmarks_with_dates_still_work(self, logged_in, ledger, fake_costs):
+        """带着旧书签上的 start/end 进来不该报错，忽略掉就行。"""
+        response = logged_in.get("/?start=2026-08-01&end=2026-08-17&preset=mtd")
+        assert response.status_code == 200
+        assert "累计" in response.get_data(as_text=True)
+
+    def test_shows_each_accounts_start_date(self, logged_in, ledger, fake_costs):
+        """每行区间不同，不标出来就不知道这笔消费是从哪天算起的。"""
+        html = logged_in.get("/").get_data(as_text=True)
+        assert ">启用日期</th>" in html
+        assert "<code>2026-08-01</code>" in html
+        assert "各账号自启用日期累计至" in html
+
+    def test_no_extra_note_when_the_range_matches_the_start_date(
+        self, logged_in, ledger, fake_costs
+    ):
+        """台账填了、也没被钳过时，实际起算点就是它，不用再写一遍。"""
+        html = logged_in.get("/").get_data(as_text=True)
+        assert "实际自" not in html
+
+    def test_flags_accounts_without_a_start_date(self, logged_in, ledger, fake_costs):
+        """没填启用日期只能从 CE 最早可查日兜底，余额会偏高，必须标出来。"""
+        from .conftest import ledger_without, write_ledger
+
+        header, rows = ledger_without("START_DATE")
+        write_ledger(ledger, header=header, rows=rows)
+        excel_source.clear_cache()
+
+        html = logged_in.get("/").get_data(as_text=True)
+        assert "个账号区间不完整" in html
+        assert "台账未填启用日期" in html
+        assert "未设置" in html                      # 启用日期这一列
+        assert "⚠ 实际自 2025-08-01 起算" in html   # 兜底到 CE 最早可查日
+
+    def test_flags_accounts_older_than_ce_retention(self, logged_in, ledger, fake_costs):
+        """启用日期早于保留期时更早的消费查不到，余额偏高，同样要标。"""
+        from .conftest import LEDGER_HEADER, LEDGER_ROWS, write_ledger
+
+        position = LEDGER_HEADER.index("START_DATE")
+        rows = [list(row) for row in LEDGER_ROWS]
+        rows[0][position] = date(2020, 1, 1)
+        write_ledger(ledger, rows=rows)
+        excel_source.clear_cache()
+
+        html = logged_in.get("/").get_data(as_text=True)
+        assert "个账号区间不完整" in html
+        assert "早于 Cost Explorer 的保留期" in html
 
     def test_missing_ledger_shows_a_message_not_a_500(self, logged_in, tmp_path, monkeypatch):
         monkeypatch.setattr(config, "EXCEL_PATH", tmp_path / "gone.xlsx")

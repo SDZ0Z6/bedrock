@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
+
 import pytest
 
 from bedrock_cost import config, excel_source
-from bedrock_cost.excel_source import ExcelSourceError, load_accounts, parse_tag_spec
+from bedrock_cost.excel_source import (
+    ExcelSourceError,
+    _to_date,
+    load_accounts,
+    parse_tag_spec,
+)
 
-from .conftest import LEDGER_HEADER, LEDGER_ROWS, write_ledger
+from .conftest import LEDGER_HEADER, LEDGER_ROWS, ledger_without, write_ledger
 
 
 @pytest.mark.parametrize(
@@ -117,11 +124,8 @@ class TestSchemaTolerance:
     def test_tag_column_is_optional(self, tmp_path, monkeypatch):
         """老台账没有 TAG 列也要能跑，回落到 .env 的 TAG_KEY。"""
         path = tmp_path / "notag.xlsx"
-        write_ledger(
-            path,
-            header=LEDGER_HEADER[:-1],
-            rows=[LEDGER_ROWS[0][:-1]],
-        )
+        header, rows = ledger_without("TAG")
+        write_ledger(path, header=header, rows=rows[:1])
         monkeypatch.setattr(config, "EXCEL_PATH", path)
         excel_source.clear_cache()
         account = load_accounts(force=True)[0]
@@ -147,3 +151,68 @@ def test_edits_are_picked_up_without_restart(ledger, monkeypatch):
     assert len(load_accounts()) == 2
     write_ledger(ledger, rows=[*LEDGER_ROWS, ["GAMMA", 333, 1000, 1, 1, "ak", "sk", "k=v"]])
     assert len(load_accounts()) == 3
+
+
+class TestStartDate:
+    """启用日期：概览页从这一天累计消费，所以宁可当没填也不要猜。"""
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("2026-09-01", date(2026, 9, 1)),
+            ("2026/09/01", date(2026, 9, 1)),
+            ("2026.09.01", date(2026, 9, 1)),
+            ("20260901", date(2026, 9, 1)),
+            (" 2026-09-01 ", date(2026, 9, 1)),
+            (datetime(2026, 9, 1, 13, 45), date(2026, 9, 1)),  # Excel 日期格式
+            (date(2026, 9, 1), date(2026, 9, 1)),
+            ("", None),
+            (None, None),
+            ("下周一", None),      # 认不出就当没填，不猜
+            (12345, None),
+        ],
+    )
+    def test_parsing(self, raw, expected):
+        assert _to_date(raw) == expected
+
+    def test_column_is_optional(self, tmp_path, monkeypatch):
+        """老台账没有这一列也要能读，start_date 留空。"""
+        path = tmp_path / "nostart.xlsx"
+        header, rows = ledger_without("START_DATE")
+        write_ledger(path, header=header, rows=rows)
+        monkeypatch.setattr(config, "EXCEL_PATH", path)
+        excel_source.clear_cache()
+        assert all(a.start_date is None for a in load_accounts(force=True))
+
+    def test_is_read_from_the_ledger(self, ledger):
+        excel_source.clear_cache()
+        assert load_accounts(force=True)[0].start_date == date(2026, 8, 1)
+
+
+class TestTgChatIds:
+    """一个账号可以发到多个群：台账里一格存多个，逗号隔开。读的时候宽松，写回统一。"""
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            (None, ()),
+            ("", ()),
+            ("-1001111111111", ("-1001111111111",)),
+            (-1001111111111, ("-1001111111111",)),          # Excel 当成了数字
+            (-1001111111111.0, ("-1001111111111",)),
+            ("-1001111111111,-1002222222222", ("-1001111111111", "-1002222222222")),
+            ("-1001111111111，-1002222222222", ("-1001111111111", "-1002222222222")),  # 全角逗号
+            ("-1001111111111; @alerts_ch", ("-1001111111111", "@alerts_ch")),
+            ("-1001111111111\n-1002222222222", ("-1001111111111", "-1002222222222")),
+            ("-1002222222222, -1001111111111, -1002222222222", ("-1002222222222", "-1001111111111")),
+        ],
+    )
+    def test_splitting(self, raw, expected):
+        from bedrock_cost.excel_source import _split_chat_ids
+
+        assert _split_chat_ids(raw) == expected
+
+    def test_stored_as_one_comma_joined_cell(self):
+        from bedrock_cost.excel_source import _canon_chat_ids
+
+        assert _canon_chat_ids(" -1001111111111 ，-1002222222222 ") == "-1001111111111,-1002222222222"

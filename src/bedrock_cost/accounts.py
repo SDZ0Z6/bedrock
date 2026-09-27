@@ -12,9 +12,11 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from flask import Blueprint, flash, redirect, render_template, request, session, url_for
 
-from . import config, excel_source
+from . import alerts, config, excel_source, telegram
 from .auth import csrf_protect, login_required
 from .excel_source import Account, ExcelSourceError, load_accounts
 from .views import page_meta
@@ -40,6 +42,17 @@ def _load_all() -> tuple[list[Account], str | None]:
         return [], f"{type(exc).__name__}: {exc}"
 
 
+def _form_values(form) -> dict:
+    """把提交上来的表单变成模板能直接回填的 dict。
+
+    群组 ID 是一行一个框、同名字段有多个；MultiDict.get 只给第一个，直接把
+    request.form 交给模板会在校验失败回填时丢掉后面几行。
+    """
+    values = {key: form.get(key) for key in form.keys()}
+    values["tg_chat_ids"] = excel_source.form_chat_ids(form)
+    return values
+
+
 def _render(**extra):
     """列表页统一入口：正常打开和「提交失败回填」都走这里。"""
     accounts, fatal = _load_all()
@@ -47,6 +60,12 @@ def _render(**extra):
         "active_page": "accounts",
         "accounts": accounts,
         "tag_key": config.TAG_KEY,  # TAG 列的占位提示
+        "today": date.today(),      # 启用日期输入框的 max，挡住未来日期
+        # 没配 Token 时开关照样能存，但页面要说清楚「存了也不会发」
+        "tg_configured": telegram.configured(),
+        # 「发测试消息」的结果：{"ok": bool, "message": str}，显示在重新打开的弹窗里
+        "tg_test": None,
+        "max_tg_chats": excel_source.MAX_TG_CHATS,
         "enabled_count": sum(1 for a in accounts if a.enabled),
         "fatal": fatal,
         "notes": [],
@@ -81,12 +100,12 @@ def create():
     # 查重要带上已停用的账号：停用不等于账号 ID 可以被别人占用
     data, errors = excel_source.validate(request.form, existing, creating=True)
     if errors:
-        return _render(errors=errors, create_form=request.form, open_create=True), 400
+        return _render(errors=errors, create_form=_form_values(request.form), open_create=True), 400
 
     try:
         note = excel_source.create_account(data, actor=_actor())
     except ExcelSourceError as exc:
-        return _render(errors=[str(exc)], create_form=request.form, open_create=True), 409
+        return _render(errors=[str(exc)], create_form=_form_values(request.form), open_create=True), 409
 
     flash(f"{note}。", "ok")
     return redirect(url_for("accounts.index"))
@@ -109,17 +128,91 @@ def update():
     others = [a for a in existing if a.key != key]
     data, errors = excel_source.validate(request.form, others, creating=False)
     if errors:
-        return _render(errors=errors, edit_key=key, edit_form=request.form), 400
+        return _render(errors=errors, edit_key=key, edit_form=_form_values(request.form)), 400
 
     try:
         note = excel_source.update_account(key, data, actor=_actor())
     except ExcelSourceError as exc:
-        return _render(errors=[str(exc)], edit_key=key, edit_form=request.form), 409
+        return _render(errors=[str(exc)], edit_key=key, edit_form=_form_values(request.form)), 409
 
     if note:
         flash(f"{note}。", "ok")
     else:
         flash("没有任何字段发生变化，台账未改动。", "warn")
+    return redirect(url_for("accounts.index"))
+
+
+@bp.route("/tg-test", methods=["POST"])
+@login_required
+@csrf_protect
+def tg_test():
+    """弹窗里的「发测试消息」。
+
+    按钮用 formaction 提交**同一个表单**，所以拿到的是弹窗里此刻填着的值——
+    可以先测、测通了再保存。测完原样回填、重新打开同一个弹窗，不丢输入。
+    这里**不写台账**，只发消息。
+
+    一个账号可以有多个群：挨个发，每个群单独给结果，页面上贴在对应那一行旁边——
+    哪个 ID 错了一眼看到，不用一个个排除。
+    """
+    key = (request.form.get("key") or "").strip()
+    chats = excel_source.form_chat_ids(request.form)
+    # 和正式消息一样只写账号 ID，不带上游
+    label = (request.form.get("account") or "").strip()
+
+    per_chat: dict[str, dict] = {}
+    for chat in chats:
+        if not telegram.valid_chat_id(chat):
+            per_chat[chat] = {"ok": False, "message": "格式不对"}
+            continue
+        try:
+            alerts.send_test(chat, label)
+        except telegram.TelegramError as exc:
+            per_chat[chat] = {"ok": False, "message": str(exc)}
+        else:
+            per_chat[chat] = {"ok": True, "message": "已发送"}
+
+    if not chats:
+        summary = {"ok": False, "message": "先填群组 ID 再测。"}
+    else:
+        good = sum(1 for r in per_chat.values() if r["ok"])
+        summary = {
+            "ok": good == len(per_chat),
+            "message": (
+                f"{len(per_chat)} 个群全部发送成功，去群里看一眼有没有收到。"
+                if good == len(per_chat)
+                else f"{len(per_chat)} 个群里 {good} 个成功、{len(per_chat) - good} 个失败，原因见对应那一行。"
+            ),
+        }
+    result = {**summary, "chats": per_chat}
+
+    values = _form_values(request.form)
+    if key:
+        existing, _ = _load_all()
+        if not any(a.key == key for a in existing):
+            flash("这个账号已经不在台账里了，页面可能已过期。已重新加载。", "error")
+            return redirect(url_for("accounts.index"))
+        return _render(tg_test=result, edit_key=key, edit_form=values)
+    return _render(tg_test=result, create_form=values, open_create=True)
+
+
+@bp.route("/tg-toggle", methods=["POST"])
+@login_required
+@csrf_protect
+def tg_toggle():
+    """表格里的 TG 开关：点一下只翻 TG_ENABLED 这一格。
+
+    开的时候台账里必须已经有群组 ID——页面上没填的开关是灰的，但页面可能是
+    几分钟前打开的，所以在写入的锁里再判一次（见 set_tg_enabled）。
+    """
+    key = (request.form.get("key") or "").strip()
+    enabled = request.form.get("tg_enabled") == "1"
+    try:
+        note = excel_source.set_tg_enabled(key, enabled, actor=_actor())
+    except ExcelSourceError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("accounts.index"))
+    flash(f"{note}。" if note else "本来就是这样，没有改动。", "ok" if note else "warn")
     return redirect(url_for("accounts.index"))
 
 

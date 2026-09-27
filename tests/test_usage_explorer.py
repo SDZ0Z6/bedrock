@@ -71,8 +71,12 @@ class TestAssignSlots:
 class TestBuildUsage:
     @pytest.mark.parametrize("dimension", ["service", "tag", "account"])
     def test_reconciles_with_the_overview_page(self, ledger, fake_costs, dimension):
-        """最关键的不变量：任一维度加总都等于概览页的总消费。"""
-        overview = build_report(START, END)
+        """最关键的不变量：任一维度加总都等于概览页的总消费。
+
+        概览页不再收区间，它按每个账号的启用日期累计到「今天」。台账里两个账号的
+        启用日期都是 START，所以拿 END 当今天，两边查的就是同一个区间。
+        """
+        overview = build_report(END)
         usage = build_usage(
             __import__("bedrock_cost").excel_source.load_accounts(), START, END, dimension, "daily"
         )

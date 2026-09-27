@@ -20,6 +20,9 @@
   --panel-2: #f3f0ea;    /* 卡片里再分一层 */
   --line: #d5cec2;
   --line-soft: #e4ded4;
+  /* 开关关着时的轨道。不能用 --line：它对卡片底色只有 1.4:1，开关的轮廓会糊掉；
+     这个是 3.1:1，够 WCAG 对界面控件轮廓要求的 3:1 */
+  --switch-off: #958d82;
 
   /* ---- 墨 ---- */
   --text: #1a1918;
@@ -866,7 +869,7 @@ tfoot td {
 .accounts-table .cell-id { font-variant-numeric: tabular-nums; }
 .accounts-table .col-actions,
 .accounts-table .row-actions { white-space: nowrap; }
-.accounts-table .row-actions { display: flex; gap: 8px; }
+.accounts-table .row-actions { display: flex; gap: 2px; }
 /* 「恢复」是 <td> 里的一个真表单（这是合法的），别让它把按钮撑成块级 */
 .inline-form { display: inline-flex; margin: 0; }
 
@@ -971,6 +974,98 @@ dialog.modal > form {
   color: var(--text-mute);
 }
 .modal-body > .form-hint { margin-top: 14px; }
+
+/* 弹窗里的 TG 群组 ID：一行一个 + 测试按钮，和上面的台账字段隔一道线。
+   开关不在弹窗里，只在表格里 */
+.form-grid .tg-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+/* 几个框共用一个标题，用不了 <label for>，样式照抄 .field label */
+.field .field-label { font-size: 12px; color: var(--text-dim); }
+
+.chat-rows { display: flex; flex-direction: column; gap: 6px; }
+.chat-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+/* 盖过 .form-grid .field input 的 width: 100%：换行布局里一个 100% 宽的输入框
+   会把旁边的 × 挤到下一行去 */
+.form-grid .tg-block .chat-row input { flex: 1 1 0; width: auto; min-width: 0; }
+.chat-result { flex: 1 0 100%; font-size: 12px; line-height: 1.5; padding-left: 2px; }
+.chat-actions { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.chat-actions .btn svg { width: 14px; height: 14px; margin-right: 4px; }
+.tg-block .tg-result { margin: 2px 0 0; }
+
+/* ------------------------------------------------------- 开关 */
+/* 表格「TG 告警」列：<button role="switch" aria-checked>，点了就提交。
+   旁边不放字，状态细节在 title 里 */
+.switch {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--switch-off);
+  cursor: pointer;
+  transition: background-color .15s ease;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(26, 25, 24, .28);
+  transition: transform .15s ease;
+}
+.switch[aria-checked="true"] { background: var(--ok); }
+.switch[aria-checked="true"]::after { transform: translateX(14px); }
+.switch:disabled { opacity: .4; cursor: not-allowed; }
+.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ------------------------------------------------------- 图标按钮 */
+/* 表格操作列用：只有图标，靠 title 给鼠标提示、aria-label 给读屏 */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.icon-btn svg,
+.btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.icon-btn:hover { background: var(--hover-strong); color: var(--text); }
+.icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.icon-danger:hover { background: var(--danger-tint); color: var(--danger); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+
+@media (prefers-reduced-motion: reduce) {
+  .switch,
+  .switch::after { transition: none; }
+}
 
 /* 停用确认 */
 .confirm-lead { margin: 0 0 10px; font-size: 14px; }

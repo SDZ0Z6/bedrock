@@ -35,6 +35,7 @@ from .cloudwatch_metrics import (
     _cached,
     _client,
     _store,
+    is_tagged,
     list_model_ids,
     looks_like_profile_id,
     resolve_profiles,
@@ -437,3 +438,74 @@ def _to_series(daily_cost: dict[str, list[float]], width: int) -> list[Series]:
                 merged[i] += value
         series.append(Series(name=OTHER_LABEL, raw=merged, marked=list(merged), slot=-1))
     return series
+
+
+# --------------------------------------------------------------- 告警用：按标签拆开的估算
+@dataclass
+class SplitEstimate:
+    """一个账号在某个区间里的 CW 估算成本，**按有无标签拆开**。
+
+    拆开是为了套台账的比率：Telegram 额度告警要和概览页同口径，而概览页的消费是
+    「TAG 部分 × TAG_RATIO + UNTAG 部分 × UNTAG_RATIO」。build_estimate 把配置归并
+    进了底层模型，标签信息在归并时就丢了，所以这里另走一遍、逐 ModelId 定价。
+    """
+
+    tag_raw: float = 0.0
+    untag_raw: float = 0.0
+    unpriced: list[str] = field(default_factory=list)   # 没单价的模型——这部分按 0 算了
+    errors: list[str] = field(default_factory=list)
+
+    def marked(self, account: Account) -> float:
+        return self.tag_raw * account.tag_ratio + self.untag_raw * account.untag_ratio
+
+
+def estimate_split(
+    account: Account,
+    start: date,
+    end: date,
+    regions: list[str] | None = None,
+) -> SplitEstimate:
+    """估算 [start, end]（UTC 日期，含两端）的 AWS 牌价成本，按有无标签拆开。
+
+    定价和 build_estimate 完全同一套：同一个价目表、同一个 underlying_model /
+    tier_of，标签判定和模型用量页同一个 is_tagged。
+    """
+    result = SplitEstimate()
+    if start > end:
+        return result
+    picked = regions or list(DEFAULT_REGIONS)
+    stamps, _, _ = build_days(start, end)
+
+    try:
+        table = load_prices()
+    except PricingError as exc:
+        result.errors.append(str(exc))
+        return result
+
+    unpriced: set[str] = set()
+    for region in picked:
+        rows, _cached, error = _fetch_region(account, region, start, end, stamps)
+        if error:
+            result.errors.append(f"{region}：{error}")
+            continue
+        if not rows:
+            continue
+        profiles, _ = resolve_profiles(account, region)
+        for (model_id, metric), values in rows.items():
+            kind = METRIC_TO_KIND.get(metric)
+            if kind is None:
+                continue
+            model = underlying_model(model_id, profiles)
+            service_name = to_service_name(model)
+            price = table.get(service_name, tier_of(model_id, profiles)) if service_name else None
+            if price is None or not price.complete:
+                unpriced.add(model)
+                continue
+            cost = sum(values) * price.rate(kind)
+            if is_tagged(model_id, profiles, account):
+                result.tag_raw += cost
+            else:
+                result.untag_raw += cost
+
+    result.unpriced = sorted(unpriced)
+    return result

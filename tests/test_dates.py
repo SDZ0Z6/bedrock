@@ -13,6 +13,12 @@ from bedrock_cost.dates import (
     month_shift,
     parse_date,
     preset_range,
+    CUMULATIVE_CLAMPED,
+    CUMULATIVE_FUTURE,
+    CUMULATIVE_MISSING,
+    CUMULATIVE_OK,
+    cumulative_range,
+    earliest_queryable,
     resolve_range,
 )
 
@@ -105,8 +111,27 @@ class TestResolveRange:
 
     def test_narrows_to_cost_explorer_retention(self):
         start, _, notes = resolve_range({"start": "2000-01-01"}, TODAY)
-        assert start == month_shift(TODAY, -CE_HISTORY_MONTHS)
+        assert start == earliest_queryable(TODAY)
         assert any("Cost Explorer" in n for n in notes)
+
+
+class TestEarliestQueryable:
+    def test_counts_the_current_month(self):
+        """当月算在 14 个月之内，所以往前数的是 13 个月。
+
+        实测：2026-09-13 这天起点填 2025-08-01 能查，填 2025-07-xx 一律被
+        CE 拒掉（ValidationException）。早先按 -14 个月算，实际要了 15 个月。
+        """
+        assert earliest_queryable(date(2026, 9, 13)) == date(2025, 8, 1)
+
+    def test_always_lands_on_a_month_start(self):
+        for day in (1, 15, 28):
+            assert earliest_queryable(date(2026, 9, day)).day == 1
+
+    def test_spans_exactly_the_documented_month_count(self):
+        start = earliest_queryable(TODAY)
+        months = (TODAY.year - start.year) * 12 + TODAY.month - start.month
+        assert months + 1 == CE_HISTORY_MONTHS   # +1 = 当月
 
     def test_works_without_a_request_context(self):
         """刻意不依赖 Flask 的 request，纯字典就能测。"""
@@ -114,3 +139,36 @@ class TestResolveRange:
             date(2026, 8, 10),
             date(2026, 8, 12),
         )
+
+
+class TestCumulativeRange:
+    """概览页的区间：从账号的启用日期累计到今天，每个账号各算各的。"""
+
+    def test_uses_the_start_date(self):
+        assert cumulative_range(date(2026, 8, 1), TODAY) == (
+            date(2026, 8, 1), TODAY, CUMULATIVE_OK,
+        )
+
+    def test_missing_start_date_falls_back_to_the_earliest_queryable(self):
+        """没填就只能从 CE 最早可查日兜底，并且必须标出来——
+
+        这时的「累计消费」不保证是这个账号的全部消费，余额会偏高。
+        """
+        start, end, status = cumulative_range(None, TODAY)
+        assert (start, end) == (earliest_queryable(TODAY), TODAY)
+        assert status == CUMULATIVE_MISSING
+
+    def test_older_than_retention_is_clamped_and_flagged(self):
+        start, end, status = cumulative_range(date(2010, 1, 1), TODAY)
+        assert (start, end) == (earliest_queryable(TODAY), TODAY)
+        assert status == CUMULATIVE_CLAMPED
+
+    def test_a_future_start_date_degenerates_to_today(self):
+        """台账被手改成未来日期时不能算出一个倒着的区间。"""
+        assert cumulative_range(date(2099, 1, 1), TODAY) == (
+            TODAY, TODAY, CUMULATIVE_FUTURE,
+        )
+
+    def test_exactly_at_the_boundary_is_not_clamped(self):
+        edge = earliest_queryable(TODAY)
+        assert cumulative_range(edge, TODAY) == (edge, TODAY, CUMULATIVE_OK)

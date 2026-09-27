@@ -77,7 +77,7 @@ class TestBuildRow:
 
 class TestBuildReport:
     def test_totals_match_the_rows(self, ledger, fake_costs, accounts):
-        report = build_report(START, END)
+        report = build_report(END)
         assert len(report.rows) == 2
         assert report.total_cost == sum(r.total_cost for r in report.rows)
         assert report.total_budget == 600000.0
@@ -85,18 +85,18 @@ class TestBuildReport:
             assert row.total_cost == expected_marked(account, START, END)
 
     def test_usage_and_balance_are_consistent(self, ledger, fake_costs):
-        report = build_report(START, END)
+        report = build_report(END)
         assert report.total_balance == report.total_budget - report.total_cost
         assert report.total_usage_pct == report.total_cost / report.total_budget * 100
 
     def test_tag_plus_untag_equals_total(self, ledger, fake_costs):
-        report = build_report(START, END)
+        report = build_report(END)
         assert round(report.total_tag + report.total_untag, 6) == round(report.total_cost, 6)
 
     def test_failed_rows_are_excluded_from_totals(self, ledger, fake_costs, monkeypatch):
         from bedrock_cost import cost_explorer
 
-        def half_broken(account_list, start, end, refresh=False):
+        def half_broken(account_list, ranges, refresh=False):
             splits = {}
             for index, account in enumerate(account_list):
                 splits[account.key] = (
@@ -105,8 +105,8 @@ class TestBuildReport:
             return splits
 
         monkeypatch.setattr(cost_explorer, "fetch_all", half_broken)
-        report = build_report(START, END)
+        report = build_report(END)
         assert report.failed_count == 1
         assert report.total_cost == 10.0  # 只算成功的那一行
-        assert report.total_budget == 100000.0  # 预算也只算成功的行
+        assert report.total_budget == 100000.0  # 额度也只算成功的行
         assert len(report.errors) == 1
