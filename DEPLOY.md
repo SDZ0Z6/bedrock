@@ -397,8 +397,12 @@ curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | python3 -m json.tool 
 
 一个账号可以发到几个群（弹窗里一行一个，最多 10 个），**每个群都要先把 bot 拉进去**。
 
-拿不准也没关系——填进账号管理页的弹窗后点「发测试消息」，它会往每个群各发一条，
-结果贴在各自那一行下面：成没成、失败是 ID 错了还是 bot 不在群里。
+告警是**图片卡片**。群里如果限制了普通成员发图片（群设置 → 权限 → 发送媒体），bot 也
+发不了：给它开这个权限，或者把它设成管理员。
+
+拿不准也没关系——填进账号管理页的弹窗后点「发测试消息」，它会往每个群各发一张测试
+卡片，结果贴在各自那一行下面：成没成、失败是 ID 错了、bot 不在群里，还是没有发图片的
+权限。
 
 **③ 把 Token 写进 `.env`，重启 web**
 
@@ -417,10 +421,21 @@ web 进程也要这个 Token：账号管理页的「发测试消息」是 web �
 在账号管理页给至少一个账号填好群组 ID（修改弹窗里），再在表格的「TG 告警」列打开开关，然后：
 
 ```bash
-cd /opt/bedrock && sudo -u bedrock .venv/bin/python -m bedrock_cost alerts daily --dry-run
+cd /opt/bedrock && sudo -u bedrock .venv/bin/python -m bedrock_cost alerts daily --dry-run --save /tmp/bedrock-cards
 ```
 
-`--dry-run` 只把要发的消息打印出来，不真的发，也不改告警状态。确认内容对了再往下走。
+`--dry-run` 只把要发的内容打印出来，不真的发，也不改告警状态；`--save` 再把画好的
+卡片存成 PNG。拿到本地看一眼：
+
+```bash
+scp -i C:\path\to\your-key.pem "root@<ECS_IP>:/tmp/bedrock-cards/*.png" .
+```
+
+确认内容和样子都对了再往下走。
+
+画卡片要用 Pillow 和项目自带的字体：Pillow 在依赖里，`pip install -e ".[deploy]"` 时一起
+装上；字体随代码走，服务器上什么字体都不用装。**从没有卡片的旧版本升级上来的**，记得补跑
+一次 `pip install`（见《更新代码》）。
 
 **⑤ 两个 service**
 

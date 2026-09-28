@@ -12,6 +12,8 @@ dependencies = [
     "Flask>=3.0",
     "openpyxl>=3.1",
     "boto3>=1.34",
+    # Telegram 告警卡片是画出来的图片（cards.py）
+    "Pillow>=10.1",
 ]
 
 [project.optional-dependencies]
@@ -26,8 +28,9 @@ bedrock-cost = "bedrock_cost.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-# static 下不只有 css：图标、logo、loading.mp4 都得跟着包走
-bedrock_cost = ["templates/*.html", "static/*"]
+# static 下不只有 css：图标、logo、loading.mp4 都得跟着包走；
+# fonts 是画告警卡片用的字体（和各自的 OFL 许可证）
+bedrock_cost = ["templates/*.html", "static/*", "fonts/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

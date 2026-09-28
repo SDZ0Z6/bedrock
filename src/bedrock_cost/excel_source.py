@@ -42,7 +42,8 @@ REQUIRED_COLUMNS = {
 #              回落到 Cost Explorer 能查到的最早一天（见 dates.cumulative_range）
 #   TG_ENABLED 这个账号要不要发 Telegram 告警。缺失 / 空着 = **不发**——告警是往
 #              外发消息的，必须主动开，和 ENABLED 的「空着算启用」刻意相反。
-#              只在账号管理的表格里点（见 set_tg_enabled），弹窗不碰它
+#              新增账号时填了群就打开（见 create_account）；之后只在账号管理的表格里
+#              点（见 set_tg_enabled），修改弹窗不碰它
 #   TG_CHAT_IDS 告警发到哪些群。一格里放多个，逗号隔开（-100 开头的一串数字，
 #              或 @频道名）。页面上是一行一个，存的时候拼成一格
 OPTIONAL_COLUMNS = {
@@ -758,12 +759,16 @@ def create_account(data: dict, actor: str = "") -> str:
         for name in (*EDITABLE, *CREATE_ONLY):
             sheet.cell(row=row, column=_ensure_column(sheet, index, name)).value = data[name]
         sheet.cell(row=row, column=_ensure_column(sheet, index, "enabled"), value=True)
-        # 新账号的 TG 告警一律先关着，建好后在表格里开。显式写 FALSE，不指望这一格是空的：
-        # 追加的那一行可能是手工清空过内容、却留着旧开关值的行
-        sheet.cell(row=row, column=_ensure_column(sheet, index, "tg_enabled")).value = False
+        # 新增时填了群组 ID 就直接打开 TG 告警：填群本身就是「要往这些群发」的明确表态，
+        # 群里马上会收到「新账号启用」，之后日报和告警也照常发。没填群就是关。
+        # 两种都显式写，不指望这一格是空的：追加的那一行可能是手工清空过内容、
+        # 却留着旧开关值的行
+        chats = _split_chat_ids(data.get("tg_chat_ids"))
+        sheet.cell(row=row, column=_ensure_column(sheet, index, "tg_enabled")).value = bool(chats)
         started = data.get("start_date")
         when = f"，启用日期 {started.isoformat()}" if started else "（未设启用日期）"
-        return f"新增账号 {data['account']}（{data['partner']}），额度 {data['budget']:g}{when}"
+        tg = f"，TG 告警已打开（{len(chats)} 个群）" if chats else ""
+        return f"新增账号 {data['account']}（{data['partner']}），额度 {data['budget']:g}{when}{tg}"
 
     return _mutate(action, actor)
 
