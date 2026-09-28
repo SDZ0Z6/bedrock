@@ -22,6 +22,13 @@
   额度阈值  累计消费 = CE 实账（截至前天）+ CW 估算（昨天 + 今天），都套
             TAG/UNTAG 比率。50/80/90/100% 每档只发一次。
 
+**账号变动**：账号管理页上新增、停用、恢复一个账号时，给它的群发一张通知卡片
+（notify_account）。跟 TG 开关走：开关开着、填了群才发。这类消息由 web 进程当场发，
+不走 systemd timer。
+
+**长什么样**：每条都是一张深色卡片图（cards.py 画）+ 图片下面一段文字（caption，
+账号 ID 和关键数字）。卡片画不出来就退回只发那段文字，见 _send。
+
 为什么额度阈值是 CE + CW 拼起来的：CE 有一到两天延迟，光用 CE 今天花的钱要后天
 才看得到；光用 CW 又有个坑——ListMetrics 只列近两周有数据的模型，三周前用过、
 最近没用的模型会从累计里悄悄消失。所以历史用 CE（完整），最近两天用 CW（及时，
@@ -33,18 +40,42 @@
 from __future__ import annotations
 
 import html
+import itertools
 import json
 import os
 import tempfile
-import unicodedata
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
-from . import config, cost_explorer, telegram
+from . import cards, config, cost_explorer, telegram
+from .cards import (
+    Card,
+    Cell,
+    Details,
+    Divider,
+    Info,
+    Meter,
+    Notes,
+    Paragraph,
+    Row,
+    Since,
+    Status,
+    Table,
+    Tile,
+    Tiles,
+    Uid,
+)
 from .cloudwatch_metrics import hourly_invocations
 from .cost_estimate import estimate_split
-from .dates import CUMULATIVE_OK, cumulative_range
+from .dates import (
+    CUMULATIVE_CLAMPED,
+    CUMULATIVE_FUTURE,
+    CUMULATIVE_MISSING,
+    CUMULATIVE_OK,
+    cumulative_range,
+)
 from .excel_source import Account, load_accounts
 from .report import ReportRow, build_row
 from .telegram import TelegramError
@@ -126,24 +157,44 @@ class RunSummary:
         return not self.problems
 
 
-Sender = Callable[[str, str], None]
+# 发一张卡片。返回空串；卡片画不出来、退回发了文字时返回一句说明（记成问题）。
+# 发送失败抛 TelegramError。
+Sender = Callable[[str, Card], str]
 
 
-def _deliver(chat_id: str, text: str, summary: RunSummary, send: Sender, log) -> bool:
+def _send(chat_id: str, card: Card) -> str:
+    """真的发出去：卡片画成图片用 sendPhoto 发，caption 跟在图片下面。
+
+    画不出来（字体文件丢了、Pillow 出错）就退回只发 caption 那段文字——告警不能
+    因为画图丢掉。这时返回一句说明，调用方记成问题、让命令非零退出。
+    """
     try:
-        send(chat_id, text)
+        png = card.png()
+    except Exception as exc:  # 画图的任何失败都一样处理：退回发文字
+        telegram.send_message(chat_id, card.caption)
+        return f"卡片画不出来，改发了文字（{type(exc).__name__}: {exc}）"
+    telegram.send_photo(chat_id, png, card.caption)
+    return ""
+
+
+def _deliver(chat_id: str, card: Card, summary: RunSummary, send: Sender, log) -> bool:
+    try:
+        note = send(chat_id, card)
     except TelegramError as exc:
         summary.problems.append(f"发往 {chat_id} 失败：{exc}")
         log(f"[发送失败] {chat_id}：{exc}")
         return False
+    if note:
+        summary.problems.append(f"发往 {chat_id}：{note}")
+        log(f"[注意] {chat_id}：{note}")
     summary.sent += 1
     return True
 
 
 def _deliver_all(
-    chat_ids: tuple[str, ...], text: str, summary: RunSummary, send: Sender, log
+    chat_ids: tuple[str, ...], card: Card, summary: RunSummary, send: Sender, log
 ) -> bool:
-    """同一条消息发给一个账号的全部群。**有一个群发成功就算发过了。**
+    """同一张卡片发给一个账号的全部群（只画一次）。**有一个群发成功就算发过了。**
 
     不要求全部成功：一个群 ID 坏了（bot 被踢了）就不让状态前进的话，下一小时
     其他好好的群会再收到一遍，每小时一遍，直到有人修好那个 ID。坏掉的那个会记成
@@ -153,13 +204,30 @@ def _deliver_all(
     """
     delivered = False
     for chat_id in chat_ids:
-        delivered = _deliver(chat_id, text, summary, send, log) or delivered
+        delivered = _deliver(chat_id, card, summary, send, log) or delivered
     return delivered
 
 
-def _dry_run_sender(log) -> Sender:
-    def send(chat_id: str, text: str) -> None:
-        log(f"----- [dry-run] 发往 {chat_id} -----\n{text}\n")
+def _dry_run_sender(log, save_dir: Path | None = None) -> Sender:
+    """只打印不发。卡片照样画一遍：画不出来在上线前就能看到。
+
+    给了 save_dir 就把画好的卡片存成 PNG，在服务器上也能拿下来看一眼长什么样。
+    """
+    numbers = itertools.count(1)
+
+    def send(chat_id: str, card: Card) -> str:
+        log(f"----- [dry-run] 发往 {chat_id} -----\n{card.text()}\n")
+        try:
+            png = card.png()
+        except Exception as exc:  # 和 _send 一样：画不出来就说出来
+            return f"卡片画不出来，真发的时候会改发文字（{type(exc).__name__}: {exc}）"
+        if save_dir is not None:
+            save_dir.mkdir(parents=True, exist_ok=True)
+            path = save_dir / f"{next(numbers):02d}-{card.kind}-{chat_id.lstrip('-@')}.png"
+            path.write_bytes(png)
+            log(f"卡片存到了 {path}\n")
+        return ""
+
     return send
 
 
@@ -168,27 +236,19 @@ def _targets() -> list[Account]:
     return [a for a in load_accounts(force=True) if a.tg_active]
 
 
-# --------------------------------------------------------------- 格式
+# --------------------------------------------------------------- 卡片
 def _esc(text: object) -> str:
     return html.escape(str(text), quote=False)
 
 
 def _money(value: float) -> str:
-    return f"{config.CURRENCY_SYMBOL}{value:,.2f}"
+    """负数写成 -$12.30，不是 $-12.30。"""
+    amount = f"{config.CURRENCY_SYMBOL}{abs(value):,.2f}"
+    return f"-{amount}" if round(value, 2) < 0 else amount
 
 
 def _pct(value: float) -> str:
     return f"{value:g}%"
-
-
-def _width(text: str) -> int:
-    """等宽字体里的显示宽度：中文占两格。<pre> 里要按这个对齐，按字符数对会歪。"""
-    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
-
-
-def _pad(text: str, width: int, right: bool = False) -> str:
-    gap = " " * max(0, width - _width(text))
-    return gap + text if right else text + gap
 
 
 def _local_hour(stamp: datetime) -> str:
@@ -196,76 +256,146 @@ def _local_hour(stamp: datetime) -> str:
     return stamp.astimezone().strftime("%m-%d %H:%M")
 
 
-def _account_line(account: Account) -> str:
+def _uid(account_id: str) -> str:
     # 只写账号 ID，不带上游（台账的 PARTNER 列）：所有 TG 消息都不出现上游
-    return f"账号 <code>{_esc(account.account)}</code>"
+    return f"<code>{_esc(account_id)}</code>"
 
 
-def format_daily(today: date, rows: list[ReportRow]) -> str:
-    """一个群的日报。表格放 <pre> 里对齐，脚注写口径和需要注意的行。"""
-    header = ("UID", "消费", "余额")
-    cells = []
-    for row in rows:
-        if row.error:
-            cells.append((row.account, "查询失败", "—"))
-        else:
-            cells.append((row.account, _money(row.total_cost), _money(row.balance)))
-    widths = [max(_width(line[i]) for line in [header, *cells]) for i in range(3)]
+def _caption(lines: list[str], overflow: str = "") -> str:
+    """拼 caption。Telegram 限 1024 字，放不下就截掉后面的行，最后补一句 overflow。"""
+    kept: list[str] = []
+    for line in lines:
+        if len(telegram.visible("\n".join([*kept, line, overflow]))) > telegram.MAX_CAPTION_CHARS:
+            kept.append(overflow)
+            break
+        kept.append(line)
+    return "\n".join(kept)
 
-    def line(values: tuple[str, str, str]) -> str:
-        return "  ".join(
-            (
-                _pad(values[0], widths[0]),
-                _pad(values[1], widths[1], right=True),
-                _pad(values[2], widths[2], right=True),
-            )
-        ).rstrip()
 
-    table = "\n".join([line(header), *(line(c) for c in cells)])
-    notes = []
-    for row in rows:
-        if row.error:
-            notes.append(f"❌ {_esc(row.account)} 查询失败：{_esc(row.error)}")
-        elif row.range_status != CUMULATIVE_OK and row.range_hint:
-            notes.append(f"⚠️ {_esc(row.account)}：{_esc(row.range_hint)}")
-        if not row.error and row.overspent:
-            notes.append(f"🚨 {_esc(row.account)} 已超出额度")
+# 日报 caption 里，启用日期有问题的那一行后面跟的简短说明（卡片的「需要注意」写全句）
+_RANGE_SHORT = {
+    CUMULATIVE_MISSING: "未填启用日期",
+    CUMULATIVE_CLAMPED: "启用日期早于 CE 保留期",
+    CUMULATIVE_FUTURE: "启用日期晚于今天",
+}
 
-    parts = [
-        f"📊 <b>Bedrock 日报</b> · {today.isoformat()}",
-        f"<pre>{_esc(table)}</pre>",
-        "消费自各账号的启用日期累计至今天（Cost Explorer 实账），余额 = 额度 − 消费。",
+
+def daily_cards(today: date, rows: list[ReportRow]) -> list[Card]:
+    """一个群的日报。账号多于 cards.MAX_TABLE_ROWS 个就分成几张发。"""
+    size = cards.MAX_TABLE_ROWS
+    chunks = [rows[start:start + size] for start in range(0, len(rows), size)] or [[]]
+    return [
+        _daily_card(today, chunk, len(rows), index, len(chunks))
+        for index, chunk in enumerate(chunks, start=1)
     ]
+
+
+def _daily_card(today: date, rows: list[ReportRow], everyone: int, index: int, total: int) -> Card:
+    table: list[list[Cell]] = []
+    notes: list[tuple[str, str]] = []
+    lines: list[str] = []
+    for row in rows:
+        uid = row.account
+        budget = Cell(_money(row.budget)) if row.budget > 0 else Cell("未设额度", "muted")
+        if row.error:
+            table.append([Cell(uid, mark="danger"), budget, Cell("查询失败", "danger"), Cell("—", "muted")])
+            notes.append(("danger", f"{uid} 查询失败：{row.error}"))
+            lines.append(f"{_uid(uid)} 查询失败")
+            continue
+
+        mark, flags = "", []
+        if row.range_status != CUMULATIVE_OK and row.range_hint:
+            mark = "warn"
+            flags.append(_RANGE_SHORT.get(row.range_status, "启用日期有问题"))
+            notes.append(("warn", f"{uid}：{row.range_hint}"))
+        if row.overspent:
+            mark = "danger"
+            flags.append("已超出额度")
+            notes.append(("danger", f"{uid} 已超出额度 {_money(-row.balance)}"))
+        balance = (
+            Cell(_money(row.balance), "danger" if row.balance < 0 else "ok")
+            if row.budget > 0
+            else Cell("—", "muted")
+        )
+        table.append([Cell(uid, mark=mark), budget, Cell(_money(row.total_cost)), balance])
+        remaining = f" · 剩余额度 {_money(row.balance)}" if row.budget > 0 else ""
+        flagged = f"（{'，'.join(flags)}）" if flags else ""
+        lines.append(f"{_uid(uid)} 累计消费 {_money(row.total_cost)}{remaining}{flagged}")
+
+    blocks: list = [Table(["UID", "授信额度", "累计消费", "剩余额度"], table)]
     if notes:
-        parts.append("\n".join(notes))
-    return "\n".join(parts)
-
-
-def format_started(account: Account, hour: datetime, count: float) -> str:
-    return "\n".join([
-        "🟢 <b>开始有用量</b>",
-        _account_line(account),
-        f"{_local_hour(hour)} 这一小时调用 {count:,.0f} 次",
-    ])
-
-
-def format_stopped(account: Account, hours: list[datetime], last_active: str) -> str:
-    span = (
-        f"{_local_hour(hours[0])} 起的 {len(hours)} 个小时"
-        if len(hours) > 1
-        else f"{_local_hour(hours[0])} 这一小时"
+        blocks.append(Notes("需要注意", notes))
+    split = total > 1
+    return Card(
+        kind="daily",
+        tone="ok",
+        icon="chart",
+        title="Bedrock 日报",
+        badge="DAILY REPORT",
+        subtitle=today.isoformat() + (f" · 第 {index}/{total} 张" if split else ""),
+        subtitle_icon="calendar",
+        blocks=blocks,
+        footer=f"账号数量：{everyone}" + (f"（这张 {len(rows)} 个）" if split else ""),
+        footer_right="自动生成 · 每日播报",
+        caption=_caption(
+            [f"📊 <b>Bedrock 日报</b> · {today.isoformat()}" + (f"（{index}/{total}）" if split else ""), *lines],
+            overflow="……其余账号见图片",
+        ),
     )
-    lines = [
-        "🔴 <b>用量中断</b>",
-        _account_line(account),
-        f"{span}没有任何调用",
+
+
+def started_card(account: Account, hour: datetime, count: float) -> Card:
+    when, calls = _local_hour(hour), f"{count:,.0f}"
+    return Card(
+        kind="started",
+        tone="ok",
+        icon="dot-green",
+        title="用量开始",
+        badge="ACTIVE",
+        subtitle="BEDROCK · USAGE ALERT",
+        blocks=[
+            Uid(account.account),
+            Tiles([
+                Tile("检测时段", when),
+                Tile("本小时调用次数", calls, tone="ok", big=True, edge=True),
+            ]),
+        ],
+        footer="检测到该账号本小时开始产生调用。",
+        caption=f"🟢 <b>用量开始</b> · {_uid(account.account)}\n{when} 这一小时调用 {calls} 次",
+    )
+
+
+def stopped_card(account: Account, hours: list[datetime], last_active: str) -> Card:
+    first = _local_hour(hours[0])
+    if len(hours) > 1:
+        label, when, gist = "检测时段", f"{first} 起", f"连续 {len(hours)} 个小时没有任何调用"
+        summary = f"{first} 起连续 {len(hours)} 个小时没有任何调用"
+    else:
+        label, when, gist = "当前检测时段", first, "本小时没有任何调用"
+        summary = f"{first} 这一小时没有任何调用"
+    blocks: list = [
+        Uid(account.account),
+        Tiles([Tile(label, when, big=True, edge=True, note=gist, note_tone="danger")]),
     ]
+    lines = [f"🔴 <b>用量中断</b> · {_uid(account.account)}", summary]
     if last_active:
-        lines.append(f"上一次有调用：{_local_hour(datetime.fromisoformat(last_active))} 那一小时")
-    return "\n".join(lines)
+        previous = f"{_local_hour(datetime.fromisoformat(last_active))} 那一小时"
+        blocks.append(Since("上一次有调用", previous))
+        lines.append(f"上一次有调用：{previous}")
+    return Card(
+        kind="stopped",
+        tone="danger",
+        icon="dot-red",
+        title="用量中断",
+        badge="INTERRUPTED",
+        subtitle="BEDROCK · USAGE ALERT",
+        blocks=blocks,
+        footer="请检查账号调用情况及相关服务状态。",
+        caption=_caption(lines),
+    )
 
 
-def format_quota(
+def quota_card(
     account: Account,
     threshold: float,
     pct: float,
@@ -273,46 +403,227 @@ def format_quota(
     status: str,
     since: date,
     unpriced: list[str],
-) -> str:
-    icon, title = ("🚨", "额度已用完") if threshold >= 100 else ("⚠️", f"额度已用 {_pct(threshold)}")
+) -> Card:
+    used_up = threshold >= 100
+    tone = "danger" if threshold >= 90 else "warn"
+    title = "额度已用完" if used_up else "额度预警"
     balance = account.budget - spent
-    lines = [
-        f"{icon} <b>{title}</b>",
-        _account_line(account),
-        f"累计消费 {_money(spent)} / 额度 {_money(account.budget)}（{pct:.1f}%）",
-        f"余额 {_money(balance)}",
-        f"口径：自 {since.isoformat()} 累计；截至前天为 Cost Explorer 实账，"
-        "最近两天为 CloudWatch token × 牌价估算",
+    blocks: list = [
+        Uid(account.account),
+        Meter("额度使用率", f"{pct:.1f}%", pct / 100, f"已消费 {_money(spent)}", f"总额度 {_money(account.budget)}"),
+        Divider(),
+        Tiles([
+            Tile("累计消费", _money(spent)),
+            Tile("剩余额度", _money(balance), tone="danger" if balance < 0 else "ok"),
+        ]),
+        Info(
+            "统计口径",
+            [
+                f"累计周期：自 {since.isoformat()} 起",
+                "• 截至前天：Cost Explorer 实账",
+                "• 最近两天：CloudWatch Token × 牌价估算",
+            ],
+            icon="pin",
+        ),
     ]
+    warnings: list[tuple[str, str]] = []
     if status != CUMULATIVE_OK:
-        lines.append("⚠️ 台账未填启用日期，或启用日期早于 Cost Explorer 的保留期——实际消费可能更高")
+        warnings.append(("warn", "台账未填启用日期，或启用日期早于 Cost Explorer 的保留期——实际消费可能更高"))
     if unpriced:
-        lines.append(f"⚠️ 这些模型没有单价、按 0 算了：{_esc('、'.join(unpriced))}")
-    return "\n".join(lines)
+        warnings.append(("warn", f"这些模型没有单价、按 0 算了：{'、'.join(unpriced)}"))
+    if warnings:
+        blocks.append(Notes("需要注意", warnings))
+    gist = "已经用完" if used_up else f"超过 {_pct(threshold)} 提醒线"
+    return Card(
+        kind="quota",
+        tone=tone,
+        icon="warning-red" if tone == "danger" else "warning",
+        title=title,
+        badge=f"{pct:.1f}% USED",
+        subtitle="BEDROCK · CREDIT USAGE ALERT",
+        blocks=blocks,
+        caption=_caption([
+            f"{'🚨' if used_up else '⚠️'} <b>{title}</b> · {_uid(account.account)}",
+            f"额度已用 {pct:.1f}%，{gist}",
+            f"累计消费 {_money(spent)} / 总额度 {_money(account.budget)}，剩余 {_money(balance)}",
+        ]),
+    )
 
 
-def format_test(account_label: str) -> str:
-    lines = ["✅ <b>测试消息</b>", "Bedrock 成本监控的 bot 可以往这个群发消息了。"]
-    if account_label:
-        lines.append(f"账号：{_esc(account_label)}")
-    lines += [
-        "",
-        "开启 TG 告警后，这个群会收到：",
-        "· 每天 09:00 的消费日报",
-        "· 用量开始 / 中断时的提醒",
-        f"· 额度用到 {' / '.join(_pct(t) for t in config.TELEGRAM_THRESHOLDS)} 时的告警",
-    ]
-    return "\n".join(lines)
+def _moment(now: datetime | None = None) -> str:
+    """服务器本地时间「2026-09-28 17:00」，卡片上的测试时间、启用 / 停用时间用。"""
+    return (now or datetime.now(timezone.utc)).astimezone().strftime("%Y-%m-%d %H:%M")
 
 
-def send_test(chat_id: str, account_label: str = "") -> None:
-    """账号管理页「发测试消息」按钮。失败抛 TelegramError，页面上显示原因。"""
-    telegram.send_message(chat_id, format_test(account_label))
+def _budget(account: Account) -> str:
+    return _money(account.budget) if account.budget > 0 else "未设额度"
+
+
+def ping_card(account_id: str = "", now: datetime | None = None) -> Card:
+    """测试消息。卡片照截图不放账号；account_id 只写在图片下面的文字里（命令行发的没有）。"""
+    head = "🧪 <b>测试消息</b>" + (f" · {_uid(account_id)}" if account_id else "")
+    return Card(
+        kind="test",
+        tone="info",
+        icon="test-tube",
+        title="测试消息",
+        badge="TEST",
+        subtitle="BEDROCK · BOT NOTIFICATION TEST",
+        blocks=[
+            Status("check-circle", "Telegram Bot 运行正常", "测试消息已成功触发", tone="ok"),
+            Divider(),
+            Paragraph(
+                "这是一条 Bedrock 监控系统的测试消息，用于验证 Telegram Bot 的消息推送功能。",
+                size=15, label="测试内容",
+            ),
+            Details(
+                [
+                    Row("监控服务", "AWS Bedrock"),
+                    Row("消息推送", "正常", tone="ok", bold=False),
+                    Row("测试时间", _moment(now)),
+                ],
+                ruled=True,
+            ),
+        ],
+        footer_rule=False,
+        caption=f"{head}\nTelegram Bot 运行正常，测试消息已成功触发。",
+    )
+
+
+def send_test(chat_id: str, account_id: str = "") -> str:
+    """账号管理页「发测试消息」和命令行 alerts test。失败抛 TelegramError。
+
+    返回空串，或者「卡片画不出来、改发了文字」的说明——页面和命令行都会把它显示出来。
+    """
+    return _send(chat_id, ping_card(account_id))
+
+
+# --------------------------------------------------------------- 账号变动
+def created_card(account: Account, now: datetime | None = None) -> Card:
+    when = _moment(now)
+    return Card(
+        kind="created",
+        tone="ok",
+        icon="dot-green",
+        title="新账号启用",
+        badge="ACTIVATED",
+        subtitle="BEDROCK · ACCOUNT NOTIFICATION",
+        blocks=[
+            Status("check-circle", "账号已成功启用", "新账号已加入 Bedrock 监控", tone="ok"),
+            Details(
+                [
+                    Row("账号状态", "运行中", tone="ok", pill=True),
+                    Row("授信额度", _budget(account)),
+                    Row("启用时间", when),
+                ],
+                uid=account.account,
+            ),
+        ],
+        footer="系统已开始监控该账号的用量及额度情况。",
+        footer_icon="satellite",
+        footer_rule=False,
+        caption=f"🟢 <b>新账号启用</b> · {_uid(account.account)}\n授信额度 {_budget(account)} · 启用时间 {when}",
+    )
+
+
+def restored_card(account: Account, now: datetime | None = None) -> Card:
+    """恢复一个停用过的账号。没有截图，照「新账号启用」那张的样子来。"""
+    when = _moment(now)
+    return Card(
+        kind="restored",
+        tone="ok",
+        icon="dot-green",
+        title="账号恢复启用",
+        badge="REACTIVATED",
+        subtitle="BEDROCK · ACCOUNT NOTIFICATION",
+        blocks=[
+            Status("check-circle", "账号已恢复启用", "该账号已重新加入 Bedrock 监控", tone="ok"),
+            Details(
+                [
+                    Row("账号状态", "运行中", tone="ok", pill=True),
+                    Row("授信额度", _budget(account)),
+                    Row("恢复时间", when),
+                ],
+                uid=account.account,
+            ),
+        ],
+        footer="系统已恢复监控该账号的用量及额度情况。",
+        footer_icon="satellite",
+        footer_rule=False,
+        caption=f"🟢 <b>账号恢复启用</b> · {_uid(account.account)}\n授信额度 {_budget(account)} · 恢复时间 {when}",
+    )
+
+
+def disabled_card(account: Account, spend: ReportRow, now: datetime | None = None) -> Card:
+    """spend 是停用那一刻的累计消费（和概览页、日报同一个口径）。"""
+    when = _moment(now)
+    rows = [Row("账号状态", "已停用", tone="gray", pill=True), Row("停用时间", when)]
+    if spend.error:
+        rows.append(Row("停用前累计消费", "查询失败", tone="danger", bold=False))
+        gist = "停用前累计消费查询失败"
+    else:
+        rows.append(Row("停用前累计消费", _money(spend.total_cost)))
+        if account.budget > 0:
+            rows.append(Row("停用前剩余额度", _money(spend.balance), tone="danger" if spend.balance < 0 else ""))
+            gist = f"停用前累计消费 {_money(spend.total_cost)} · 剩余额度 {_money(spend.balance)}"
+        else:
+            gist = f"停用前累计消费 {_money(spend.total_cost)}"
+    return Card(
+        kind="disabled",
+        tone="gray",
+        icon="dot-gray",
+        title="账号停用",
+        badge="DEACTIVATED",
+        subtitle="BEDROCK · ACCOUNT NOTIFICATION",
+        blocks=[
+            Status("pause-circle", "账号已停用", "该账号已从活动监控中停用"),
+            Details(rows, uid=account.account),
+        ],
+        footer="系统已停止该账号的活动监控及相关告警。",
+        footer_icon="satellite",
+        footer_rule=False,
+        caption=f"⚫ <b>账号停用</b> · {_uid(account.account)}\n{gist}",
+    )
+
+
+def _spend(account: Account, today: date) -> ReportRow:
+    """这一刻的累计消费：和概览页、日报同一组函数（有缓存就用缓存）。"""
+    period = cumulative_range(account.start_date, today)
+    split = cost_explorer.fetch_all([account], {account.key: period[:2]}).get(account.key)
+    return build_row(account, split or cost_explorer.CostSplit(error="未取到数据"), period)
+
+
+def notify_account(
+    event: str, account: Account, *, now: datetime | None = None, log=print
+) -> RunSummary | None:
+    """账号管理页上新增（created）/ 停用（disabled）/ 恢复（restored）了一个账号：给它的群发卡片。
+
+    跟 TG 开关走：这个账号的 TG 告警没开或者没填群，就不发，返回 None。看的是开关和群，
+    不看 tg_active——停用的时候账号已经不算 tg_active 了，停用通知正是它的最后一条消息。
+    发送失败不影响台账（台账在这之前已经写好了），只记在返回的 RunSummary 里。
+    """
+    if not (account.tg_enabled and account.tg_chat_ids):
+        return None
+    summary = RunSummary()
+    if not telegram.configured():
+        summary.problems.append("服务器没有配置 TELEGRAM_BOT_TOKEN，TG 通知没有发")
+        return summary
+    now = now or datetime.now(timezone.utc)
+    if event == "created":
+        card = created_card(account, now)
+    elif event == "restored":
+        card = restored_card(account, now)
+    elif event == "disabled":
+        card = disabled_card(account, _spend(account, now.astimezone().date()), now)
+    else:
+        raise ValueError(f"不认识的账号变动：{event}")
+    _deliver_all(account.tg_chat_ids, card, summary, _send, log)
+    return summary
 
 
 # --------------------------------------------------------------- 日报
 def run_daily(
-    today: date | None = None, *, dry_run: bool = False, log=print
+    today: date | None = None, *, dry_run: bool = False, save_dir: Path | None = None, log=print
 ) -> RunSummary:
     summary = RunSummary()
     today = today or date.today()
@@ -339,9 +650,10 @@ def run_daily(
         if row.error:
             summary.problems.append(f"{account.account} 查不到 CE：{row.error}")
 
-    send = _dry_run_sender(log) if dry_run else telegram.send_message
+    send = _dry_run_sender(log, save_dir) if dry_run else _send
     for chat_id, rows in by_chat.items():
-        _deliver(chat_id, format_daily(today, rows), summary, send, log)
+        for card in daily_cards(today, rows):
+            _deliver(chat_id, card, summary, send, log)
     return summary
 
 
@@ -380,13 +692,13 @@ def _check_usage(
             state.last_active_hour = latest
         return
 
-    text = (
-        format_started(account, hours[-1], counts[-1])
+    card = (
+        started_card(account, hours[-1], counts[-1])
         if now_active
-        else format_stopped(account, hours, state.last_active_hour)
+        else stopped_card(account, hours, state.last_active_hour)
     )
     # 发出去了才落状态：全部群都失败就保持原状，下一小时条件还成立会再发一次
-    if _deliver_all(account.tg_chat_ids, text, summary, send, log):
+    if _deliver_all(account.tg_chat_ids, card, summary, send, log):
         state.active = now_active
         if now_active:
             state.last_active_hour = latest
@@ -444,13 +756,13 @@ def _check_quota(
 
     # 一次跨过好几档（比如刚开启告警时已经 85%）只发最高那一档，别连着刷三条
     top = max(crossed)
-    text = format_quota(account, top, pct, spent, status, since, recent.unpriced)
-    if _deliver_all(account.tg_chat_ids, text, summary, send, log):
+    card = quota_card(account, top, pct, spent, status, since, recent.unpriced)
+    if _deliver_all(account.tg_chat_ids, card, summary, send, log):
         state.fired = sorted(set(state.fired) | set(crossed))
 
 
 def run_hourly(
-    now: datetime | None = None, *, dry_run: bool = False, log=print
+    now: datetime | None = None, *, dry_run: bool = False, save_dir: Path | None = None, log=print
 ) -> RunSummary:
     summary = RunSummary()
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -467,7 +779,7 @@ def run_hourly(
         log("没有配置 TELEGRAM_BOT_TOKEN，告警发不出去。")
         return summary
 
-    send = _dry_run_sender(log) if dry_run else telegram.send_message
+    send = _dry_run_sender(log, save_dir) if dry_run else _send
     for account in targets:
         state = states.setdefault(account.account, AccountState())
         _check_usage(account, state, hours, summary, send, log)

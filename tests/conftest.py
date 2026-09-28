@@ -8,6 +8,7 @@ xlsx，登录口令也换成固定值（不依赖开发机上的 .env）。
 
 from __future__ import annotations
 
+import urllib.request
 from datetime import date
 
 import openpyxl
@@ -79,6 +80,25 @@ def write_ledger(path, header=None, rows=None) -> None:
     for row in rows if rows is not None else LEDGER_ROWS:
         sheet.append(list(row))
     workbook.save(path)
+
+
+@pytest.fixture(autouse=True)
+def _no_network(request, monkeypatch):
+    """兜底：哪个用例忘了替换发送口，也不能真的往 Telegram（或别处）发请求。
+
+    Telegram 客户端和公开价目表都走 urllib。要看请求长什么样的用例自己再替换一次
+    urlopen（见 test_alerts 的 http），后替换的生效；标了 integration 的本来就要联网。
+
+    开发机的 .env 里可能配着真的 Bot Token：测试里一律当没配，要发的用例自己设一个假的。
+    """
+    monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "")
+    if request.node.get_closest_marker("integration"):
+        return
+
+    def refuse(target, *args, **kwargs):
+        raise AssertionError(f"测试想联网：{getattr(target, 'full_url', target)}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
 
 
 @pytest.fixture

@@ -8,13 +8,16 @@
 
 删除是软删（ENABLED 列置 FALSE）。停用的账号从四个查询页彻底消失，但行还在，
 随时可以恢复，历史记录和凭证也都留着。
+
+新增、停用、恢复账号之后，按 TG 开关给这个账号的群发一张通知卡片（_notify →
+alerts.notify_account）。台账先写好，通知发不出去只另起一条警告，不回滚改动。
 """
 
 from __future__ import annotations
 
 from datetime import date
 
-from flask import Blueprint, flash, redirect, render_template, request, session, url_for
+from flask import Blueprint, current_app, flash, redirect, render_template, request, session, url_for
 
 from . import alerts, config, excel_source, telegram
 from .auth import csrf_protect, login_required
@@ -107,7 +110,9 @@ def create():
     except ExcelSourceError as exc:
         return _render(errors=[str(exc)], create_form=_form_values(request.form), open_create=True), 409
 
-    flash(f"{note}。", "ok")
+    told, problems = _notify("created", lambda a: a.account == data["account"])
+    flash(f"{note}。{told}", "ok")
+    _warn(problems)
     return redirect(url_for("accounts.index"))
 
 
@@ -166,11 +171,12 @@ def tg_test():
             per_chat[chat] = {"ok": False, "message": "格式不对"}
             continue
         try:
-            alerts.send_test(chat, label)
+            note = alerts.send_test(chat, label)
         except telegram.TelegramError as exc:
             per_chat[chat] = {"ok": False, "message": str(exc)}
         else:
-            per_chat[chat] = {"ok": True, "message": "已发送"}
+            # 卡片画不出来时退回发了文字：发是发出去了，但得让人知道
+            per_chat[chat] = {"ok": True, "message": f"已发送（{note}）" if note else "已发送"}
 
     if not chats:
         summary = {"ok": False, "message": "先填群组 ID 再测。"}
@@ -228,6 +234,33 @@ def toggle():
     except ExcelSourceError as exc:
         flash(str(exc), "error")
         return redirect(url_for("accounts.index"))
+    if not note:
+        flash("状态本来就是这样，没有改动。", "warn")
+        return redirect(url_for("accounts.index"))
 
-    flash(f"{note}。" if note else "状态本来就是这样，没有改动。", "ok" if note else "warn")
+    told, problems = _notify("restored" if enabled else "disabled", lambda a: a.key == key)
+    flash(f"{note}。{told}", "ok")
+    _warn(problems)
     return redirect(url_for("accounts.index"))
+
+
+def _notify(event: str, match) -> tuple[str, list[str]]:
+    """账号刚新增 / 停用 / 恢复：按 TG 开关给它的群发一张通知卡片。
+
+    返回（追加在提示条后面的一句话, 发送时的问题）。台账在这之前已经写好了，
+    通知发不出去不影响改动本身，只另起一条警告说清楚。
+    """
+    accounts, _ = _load_all()
+    account = next((a for a in accounts if match(a)), None)
+    if account is None:
+        return "", []
+    summary = alerts.notify_account(event, account, log=current_app.logger.warning)
+    if summary is None:          # 这个账号没开 TG 告警，或者没填群
+        return "", []
+    told = f"已通知这个账号的 {summary.sent} 个 TG 群。" if summary.sent else ""
+    return told, summary.problems
+
+
+def _warn(problems: list[str]) -> None:
+    if problems:
+        flash("TG 通知没有全部发出去：" + "；".join(problems), "warn")

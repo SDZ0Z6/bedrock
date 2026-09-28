@@ -22,6 +22,8 @@ from bedrock_cost.excel_source import LedgerConflict, load_accounts
 from .conftest import (
     LEDGER_HEADER,
     LEDGER_ROWS,
+    RANGE_START,
+    expected_marked,
     ledger_value,
     ledger_without,
     write_ledger,
@@ -689,14 +691,19 @@ class TestTelegramSettings:
         column = header.index("TG_CHAT_IDS")
         assert rows[0][column] == self.CHAT
 
-    def test_new_account_starts_switched_off(self, admin, ledger):
-        """新增弹窗里也没有开关：建好之后在表格里开。表单里硬塞 tg_enabled 也不算数。"""
-        post(admin, "/accounts/create", **NEW_FORM, tg_enabled="1", tg_chat_ids=self.CHAT)
+    def test_new_account_with_chats_starts_switched_on(self, admin, ledger):
+        """新增时填了群就直接打开：群里马上收到「新账号启用」，之后日报和告警也照常发。"""
+        post(admin, "/accounts/create", **NEW_FORM, tg_chat_ids=self.CHAT)
         created = by_account("333333333333")
         assert created.tg_chat_ids == (self.CHAT,)
-        assert created.tg_enabled is False
-        post(admin, "/accounts/tg-toggle", key=created.key, tg_enabled="1")
-        assert by_account("333333333333").tg_active is True
+        assert created.tg_active is True
+        log = (ledger.parent / "ledger-audit.log").read_text(encoding="utf-8")
+        assert "TG 告警已打开（1 个群）" in log
+
+    def test_new_account_without_chats_starts_switched_off(self, admin, ledger):
+        """没填群就是关。表单里硬塞 tg_enabled 也不算数。"""
+        post(admin, "/accounts/create", **NEW_FORM, tg_enabled="1")
+        assert by_account("333333333333").tg_enabled is False
 
     def test_new_row_does_not_inherit_a_leftover_switch(self, admin, ledger):
         """追加的那一行可能是手工清空过内容、却留着旧开关值的行：新建时显式写成关。"""
@@ -737,10 +744,12 @@ class TestTelegramTestButton:
 
     @pytest.fixture
     def outbox(self, monkeypatch):
+        """Telegram 那一头：[(群组 ID, 图片下面的文字)]。卡片是真的画出来的。"""
         from bedrock_cost import config, telegram
 
         box = []
         monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:FAKE")
+        monkeypatch.setattr(telegram, "send_photo", lambda chat, png, caption: box.append((chat, caption)))
         monkeypatch.setattr(telegram, "send_message", lambda chat, text: box.append((chat, text)))
         return box
 
@@ -776,24 +785,41 @@ class TestTelegramTestButton:
 
         monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:FAKE")
 
-        def boom(chat, text):
+        def boom(chat, png, caption):
             raise TelegramError("群组 ID 不对，或者 bot 还没有被拉进这个群")
 
-        monkeypatch.setattr(telegram, "send_message", boom)
+        monkeypatch.setattr(telegram, "send_photo", boom)
         target = by_account("111111111111")
         html = post(admin, "/accounts/tg-test", key=target.key, tg_chat_ids=self.CHAT).get_data(as_text=True)
         assert "bot 还没有被拉进这个群" in html
 
-    def test_names_the_account_but_not_the_partner(self, admin, ledger, outbox):
-        """和正式消息一样：群里只看得到账号 ID，看不到上游。"""
+    def test_names_the_account_but_not_the_partner(self, admin, ledger, outbox, monkeypatch):
+        """和正式消息一样：群里只看得到账号 ID，看不到上游——图片下面的字和卡片上的字都是。"""
+        from bedrock_cost import alerts
+
+        seen = []
+        monkeypatch.setattr(alerts, "_send", lambda chat, card: seen.append(card) or "")
         target = by_account("111111111111")
         post(
             admin, "/accounts/tg-test",
             key=target.key, partner=target.partner, account=target.account, tg_chat_ids=self.CHAT,
         )
-        text = outbox[0][1]
+        text = seen[0].text()                            # caption + 卡片上画的每一个字
         assert target.account in text
         assert target.partner not in text
+
+    def test_says_so_when_the_card_had_to_fall_back_to_text(self, admin, ledger, outbox, monkeypatch):
+        """卡片画不出来（比如字体文件丢了）会改发文字：发是发出去了，但页面上要说清楚。"""
+        from bedrock_cost import cards
+
+        def boom(card):
+            raise OSError("cannot open resource")
+
+        monkeypatch.setattr(cards, "render", boom)
+        target = by_account("111111111111")
+        html = post(admin, "/accounts/tg-test", key=target.key, tg_chat_ids=self.CHAT).get_data(as_text=True)
+        assert outbox and "测试消息" in outbox[0][1]      # 文字照样发了
+        assert "✓ 已发送（卡片画不出来，改发了文字" in html
 
     def test_asks_for_a_chat_id_first(self, admin, ledger, outbox):
         target = by_account("111111111111")
@@ -901,12 +927,12 @@ class TestMultipleChats:
         monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:FAKE")
         sent = []
 
-        def send(chat, text):
+        def send(chat, png, caption):
             if chat == self.B:
                 raise TelegramError("bot 不在这个群里，先把它拉进来")
             sent.append(chat)
 
-        monkeypatch.setattr(telegram, "send_message", send)
+        monkeypatch.setattr(telegram, "send_photo", send)
         target = by_account("111111111111")
         html = post(
             admin, "/accounts/tg-test", key=target.key,
@@ -952,7 +978,10 @@ class TestTableToggle:
         assert by_account("111111111111").tg_enabled is False
         assert "先点「修改」填上再开" in admin.get("/accounts/").get_data(as_text=True)  # 提示条
 
-    def test_renders_as_a_switch(self, admin, ledger):
+    def test_renders_as_a_switch(self, admin, ledger, monkeypatch):
+        from bedrock_cost import config
+
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:FAKE")   # 配好了 Token 的服务器
         post(admin, "/accounts/tg-toggle", key=self.with_chat(admin), tg_enabled="1")
         cell = self.cells(admin)[0]
         assert 'role="switch"' in cell and 'aria-checked="true"' in cell
@@ -971,9 +1000,11 @@ class TestTableToggle:
         for cell in cells:
             assert re.sub(r"<[^>]+>", "", cell).strip() == ""
 
-    def test_title_says_when_nothing_will_be_sent(self, admin, ledger, monkeypatch):
-        from bedrock_cost import config
+    def test_title_says_when_nothing_will_be_sent(self, admin, ledger, monkeypatch, fake_costs):
+        from bedrock_cost import alerts, config
 
+        # 停用会给群发一张「账号停用」通知（TestAccountNotices 管它），这里不关心，换掉
+        monkeypatch.setattr(alerts, "_send", lambda chat, card: "")
         key = self.with_chat(admin)
         post(admin, "/accounts/tg-toggle", key=key, tg_enabled="1")
         monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "")
@@ -1019,3 +1050,114 @@ class TestIconButtons:
         html = admin.get("/accounts/").get_data(as_text=True)
         assert html.count('data-open="dlg-edit-') == len(LEDGER_ROWS)
         assert html.count('data-open="dlg-off-') == len(LEDGER_ROWS)
+
+
+class TestAccountNotices:
+    """新增 / 停用 / 恢复账号时，按 TG 开关给账号的群发一张通知卡片。"""
+
+    CHAT = "-1001234567890"
+
+    @pytest.fixture
+    def cards_sent(self, monkeypatch):
+        """[(群组 ID, 卡片)]。Token 给一个假的，发送口换掉。"""
+        from bedrock_cost import alerts, config
+
+        box = []
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:FAKE")
+        monkeypatch.setattr(alerts, "_send", lambda chat, card: box.append((chat, card)) or "")
+        return box
+
+    def switch_on(self, admin):
+        _edit(admin, by_account("111111111111"), tg_chat_ids=self.CHAT)
+        post(admin, "/accounts/tg-toggle", key=by_account("111111111111").key, tg_enabled="1")
+
+    def page(self, admin) -> str:
+        return admin.get("/accounts/").get_data(as_text=True)
+
+    def test_a_new_account_with_a_chat_is_announced(self, admin, ledger, cards_sent):
+        post(admin, "/accounts/create", **NEW_FORM, tg_chat_ids=self.CHAT)
+        assert [(chat, card.kind) for chat, card in cards_sent] == [(self.CHAT, "created")]
+        text = cards_sent[0][1].text()
+        assert "新账号启用" in text and "333333333333" in text and "$150,000.00" in text
+        assert "已通知这个账号的 1 个 TG 群" in self.page(admin)
+
+    def test_a_new_account_without_a_chat_sends_nothing(self, admin, ledger, cards_sent):
+        post(admin, "/accounts/create", **NEW_FORM)
+        assert cards_sent == []
+
+    def test_disabling_sends_a_last_notice_with_the_spend(self, admin, ledger, cards_sent, fake_costs):
+        """停用时账号已经不算 tg_active 了，但这条「账号停用」正是它的最后一条消息。"""
+        from bedrock_cost.dates import cumulative_range
+
+        self.switch_on(admin)
+        post(admin, "/accounts/toggle", key=by_account("111111111111").key, enabled="0")
+        (chat, card), = cards_sent
+        assert (chat, card.kind, card.title) == (self.CHAT, "disabled", "账号停用")
+        rows = {row.label: row.value for row in card.blocks[1].rows}
+        assert rows["账号状态"] == "已停用"
+        start, end, _ = cumulative_range(RANGE_START, date.today())   # 和概览页同一个口径
+        spent = expected_marked(by_account("111111111111"), start, end)
+        assert rows["停用前累计消费"] == f"${spent:,.2f}"
+        assert by_account("111111111111").enabled is False
+
+    def test_restoring_is_announced_too(self, admin, ledger, cards_sent, fake_costs):
+        self.switch_on(admin)
+        key = by_account("111111111111").key
+        post(admin, "/accounts/toggle", key=key, enabled="0")
+        post(admin, "/accounts/toggle", key=key, enabled="1")
+        assert [card.kind for _, card in cards_sent] == ["disabled", "restored"]
+
+    def test_follows_the_tg_switch(self, admin, ledger, cards_sent, fake_costs):
+        """TG 告警没开的账号，停用、恢复都不发。"""
+        _edit(admin, by_account("111111111111"), tg_chat_ids=self.CHAT)      # 填了群、开关没开
+        key = by_account("111111111111").key
+        post(admin, "/accounts/toggle", key=key, enabled="0")
+        post(admin, "/accounts/toggle", key=key, enabled="1")
+        assert cards_sent == []
+
+    def test_nothing_is_sent_when_nothing_changed(self, admin, ledger, cards_sent):
+        """点了恢复、但账号本来就是启用的：台账没变，也不发。"""
+        self.switch_on(admin)
+        post(admin, "/accounts/toggle", key=by_account("111111111111").key, enabled="1")
+        assert cards_sent == []
+
+    def test_a_failed_notice_does_not_undo_the_change(self, admin, ledger, fake_costs, monkeypatch):
+        from bedrock_cost import alerts, config
+        from bedrock_cost.telegram import TelegramError
+
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:FAKE")
+        self.switch_on(admin)
+
+        def down(chat, card):
+            raise TelegramError("连不上 Telegram")
+
+        monkeypatch.setattr(alerts, "_send", down)
+        post(admin, "/accounts/toggle", key=by_account("111111111111").key, enabled="0")
+        assert by_account("111111111111").enabled is False            # 照样停用了
+        page = self.page(admin)
+        assert "停用账号 111111111111" in page
+        assert "TG 通知没有全部发出去" in page and "连不上 Telegram" in page
+
+    def test_missing_token_is_reported(self, admin, ledger):
+        """测试里默认没有 Token：通知发不了，要说出来，而不是悄悄不发。"""
+        post(admin, "/accounts/create", **NEW_FORM, tg_chat_ids=self.CHAT)
+        assert "TG 通知没有全部发出去：服务器没有配置 TELEGRAM_BOT_TOKEN" in self.page(admin)
+        assert by_account("333333333333") is not None                 # 账号照样建好了
+
+    def test_the_page_says_what_will_be_sent(self, admin, ledger):
+        """新增弹窗说清楚「填了群就开告警、会发卡片」；停用确认窗在账号开着 TG 时多一条。"""
+        page = self.page(admin)
+        assert "账号建好就会打开 TG 告警" in _dialog(page, 'id="dlg-create"')
+        assert "「账号停用」卡片" not in _dialog(page, 'id="dlg-off-1"')
+        self.switch_on(admin)
+        assert "它的 1 个 TG 群会收到一张「账号停用」卡片" in _dialog(self.page(admin), 'id="dlg-off-1"')
+
+    def test_notices_do_not_name_the_partner(self, admin, ledger, cards_sent, fake_costs):
+        self.switch_on(admin)
+        key = by_account("111111111111").key
+        post(admin, "/accounts/toggle", key=key, enabled="0")
+        post(admin, "/accounts/toggle", key=key, enabled="1")
+        post(admin, "/accounts/create", **NEW_FORM, tg_chat_ids=self.CHAT)
+        assert len(cards_sent) == 3
+        for _, card in cards_sent:
+            assert "ALPHA" not in card.text() and "GAMMA" not in card.text()

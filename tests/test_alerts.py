@@ -4,7 +4,10 @@
     cost_explorer.fetch_all / fetch_split   CE（日报 / 额度阈值的实账部分）
     hourly_invocations                      CW 每小时调用次数（用量切换）
     estimate_split                          CW 最近两天的估算（额度阈值）
-    telegram.send_message                   发出去的消息收进一个列表
+    alerts._send                            发出去的卡片收进一个列表（记下卡片上的全部文字）
+
+卡片本身怎么画的在 test_cards.py；这里的 _send 真身（画图 + sendPhoto、画不出来
+退回发文字）在 TestSendCard。
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from bedrock_cost import alerts, config, cost_explorer, excel_source, telegram
+from bedrock_cost import alerts, cards, config, cost_explorer, excel_source, telegram
 from bedrock_cost.alerts import AccountState, load_state, run_daily, run_hourly, save_state
 from bedrock_cost.cost_estimate import SplitEstimate
 from bedrock_cost.cost_explorer import CostSplit
@@ -55,13 +58,36 @@ def tg_ledger(path, settings: dict[str, tuple[bool, str]], **overrides) -> None:
     excel_source.clear_cache()
 
 
+class Outbox(list):
+    """发出去的卡片：[(群组 ID, 卡片上的全部文字)]；.cards 里是 (群组 ID, 卡片本身)。"""
+
+    def __init__(self):
+        super().__init__()
+        self.cards: list[tuple[str, cards.Card]] = []
+
+    def send(self, chat: str, card: cards.Card) -> str:
+        self.append((chat, card.text()))
+        self.cards.append((chat, card))
+        return ""
+
+
 @pytest.fixture
 def sent(monkeypatch):
-    """发出去的消息：[(群组 ID, 正文)]。"""
-    box: list[tuple[str, str]] = []
-    monkeypatch.setattr(telegram, "send_message", lambda chat, text: box.append((chat, text)))
+    box = Outbox()
+    monkeypatch.setattr(alerts, "_send", box.send)
     monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123456:FAKE-TOKEN")
     return box
+
+
+def failing(message: str, only: str | None = None, then=None):
+    """一个假的 _send：发往 only 这个群（不给就是所有群）时抛 TelegramError，其余交给 then。"""
+
+    def send(chat, card):
+        if only is None or chat == only:
+            raise TelegramError(message)
+        return then(chat, card)
+
+    return send
 
 
 @pytest.fixture
@@ -221,6 +247,48 @@ class TestTelegramClient:
     def test_chat_id_shapes(self, chat, ok):
         assert telegram.valid_chat_id(chat) is ok
 
+    # ---- sendPhoto：告警卡片
+    def test_posts_the_card_as_multipart(self, http):
+        telegram.send_photo(CHAT_A, b"\x89PNG-bytes", "<b>日报</b> · <code>1</code>")
+        request = http["seen"][0]
+        assert request.full_url.endswith("/bot123456:SECRET-TOKEN/sendPhoto")
+        content_type = request.get_header("Content-type")
+        assert content_type.startswith("multipart/form-data; boundary=")
+        boundary = content_type.split("boundary=")[1].encode()
+        body = request.data
+        assert body.endswith(b"--" + boundary + b"--\r\n")
+        assert f'name="chat_id"\r\n\r\n{CHAT_A}\r\n'.encode() in body
+        assert 'name="caption"\r\n\r\n<b>日报</b> · <code>1</code>\r\n'.encode() in body
+        assert b'name="parse_mode"\r\n\r\nHTML\r\n' in body
+        assert b'name="photo"; filename="card.png"\r\nContent-Type: image/png\r\n\r\n\x89PNG-bytes\r\n' in body
+
+    def test_photo_errors_are_explained_too(self, http):
+        def reply(request):
+            raise _http_error(400, "Bad Request: not enough rights to send photos to the chat")
+
+        http["reply"] = reply
+        with pytest.raises(TelegramError, match="没有发图片的权限"):
+            telegram.send_photo(CHAT_A, b"png", "x")
+
+    def test_photo_never_leaks_the_token(self, http):
+        def reply(request):
+            raise urllib.error.URLError(f"cannot reach {request.full_url}")
+
+        http["reply"] = reply
+        with pytest.raises(TelegramError) as caught:
+            telegram.send_photo(CHAT_A, b"png", "x")
+        assert "SECRET-TOKEN" not in str(caught.value)
+
+    def test_caption_limit_counts_what_telegram_shows(self, http):
+        """1024 字的上限按显示出来的字数算：<code> 这些标签不算。"""
+        tagged = "<code>1</code>" * 1000                 # 显示出来只有 1000 个字
+        telegram.send_photo(CHAT_A, b"png", tagged)
+        with pytest.raises(TelegramError, match="1024"):
+            telegram.send_photo(CHAT_A, b"png", "x" * 1025)
+
+    def test_visible_strips_tags_and_entities(self):
+        assert telegram.visible("<b>余额</b> &lt;$1&gt; <code>12</code>") == "余额 <$1> 12"
+
 
 # ================================================================== 状态文件
 class TestState:
@@ -284,13 +352,44 @@ class TestDaily:
         assert f"${spent:,.2f}" in text
         assert f"${500000 - spent:,.2f}" in text
 
-    def test_table_has_the_three_columns(self, ledger, fake_costs, sent):
+    def test_table_has_the_four_columns(self, ledger, fake_costs, sent):
         tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
         run_daily(self.TODAY, log=quiet)
-        text = sent[0][1]
-        table = text[text.index("<pre>") : text.index("</pre>")]
-        header = table.splitlines()[0]
-        assert header.split() == ["<pre>UID", "消费", "余额"]
+        card = sent.cards[0][1]
+        table = card.blocks[0]
+        assert table.columns == ["UID", "授信额度", "累计消费", "剩余额度"]
+        assert [cell.text for cell in table.rows[0]][:2] == [ALPHA, "$500,000.00"]
+        assert card.kind == "daily" and card.badge == "DAILY REPORT"
+
+    def test_problem_rows_are_red_and_explained(self, ledger, sent, monkeypatch):
+        """查询失败、超额的数字标红，原因逐条写在表格下面。"""
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A), BETA: (True, CHAT_A)})
+        monkeypatch.setattr(
+            cost_explorer, "fetch_all",
+            lambda accounts, ranges, refresh=False: {
+                accounts[0].key: CostSplit(error="AK 无效或已删除（InvalidClientTokenId）"),
+                accounts[1].key: CostSplit(untag_raw=200000.0),    # × 1.10 = 220,000，额度 100,000
+            },
+        )
+        run_daily(self.TODAY, log=quiet)
+        card = sent.cards[0][1]
+        failed, over = card.blocks[0].rows
+        assert (failed[2].text, failed[2].tone) == ("查询失败", "danger")
+        assert (over[3].text, over[3].tone) == ("-$120,000.00", "danger")   # 负号在 $ 前面
+        assert failed[0].mark == over[0].mark == "danger"
+        notes = dict((text.split()[0], text) for _, text in card.blocks[1].items)
+        assert "InvalidClientTokenId" in notes[ALPHA]
+        assert "已超出额度 $120,000.00" in notes[BETA]
+        assert "（已超出额度）" in card.caption
+
+    def test_many_accounts_are_split_into_several_cards(self, ledger, fake_costs, sent, monkeypatch):
+        """一张图放太多行，Telegram 一压缩就看不清了：每张最多 MAX_TABLE_ROWS 个账号。"""
+        monkeypatch.setattr(cards, "MAX_TABLE_ROWS", 1)
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A), BETA: (True, CHAT_A)})
+        run_daily(self.TODAY, log=quiet)
+        daily = [card for _, card in sent.cards]
+        assert [card.subtitle for card in daily] == ["2026-08-17 · 第 1/2 张", "2026-08-17 · 第 2/2 张"]
+        assert all(card.footer.startswith("账号数量：2") for card in daily)
 
     def test_skips_opted_out_and_disabled_accounts(self, ledger, fake_costs, sent):
         tg_ledger(ledger, {ALPHA: (False, CHAT_A), BETA: (True, CHAT_B)}, ENABLED={BETA: False})
@@ -329,11 +428,7 @@ class TestDaily:
     def test_a_send_failure_is_reported(self, ledger, fake_costs, monkeypatch):
         tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
         monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "t")
-
-        def boom(chat, text):
-            raise TelegramError("群组 ID 不对")
-
-        monkeypatch.setattr(telegram, "send_message", boom)
+        monkeypatch.setattr(alerts, "_send", failing("群组 ID 不对"))
         summary = run_daily(self.TODAY, log=quiet)
         assert summary.sent == 0
         assert "群组 ID 不对" in summary.problems[0]
@@ -364,14 +459,18 @@ class TestUsageSwitch:
         self.run([0])
         self.run([350], now=NOW + timedelta(hours=1))
         assert len(self.sent) == 1
-        assert "开始有用量" in self.texts()[0]
+        assert "用量开始" in self.texts()[0]
         assert "350" in self.texts()[0]
+        card = self.sent.cards[0][1]
+        assert (card.kind, card.tone, card.badge) == ("started", "ok", "ACTIVE")
 
     def test_active_to_idle_says_it_stopped(self):
         self.run([10])
         self.run([0], now=NOW + timedelta(hours=1))
         assert "用量中断" in self.texts()[0]
         assert "上一次有调用" in self.texts()[0]
+        card = self.sent.cards[0][1]
+        assert (card.kind, card.tone, card.badge) == ("stopped", "danger", "INTERRUPTED")
 
     def test_steady_use_does_not_repeat(self):
         """持续在用不刷屏：只有切换那一刻才发。"""
@@ -395,7 +494,7 @@ class TestUsageSwitch:
         assert self.sent == []
         self.run([0, 0, 0], now=NOW + timedelta(hours=3))
         assert "用量中断" in self.texts()[0]
-        assert "3 个小时" in self.texts()[0]
+        assert "连续 3 个小时没有任何调用" in self.texts()[0]
 
     def test_a_cloudwatch_failure_never_reads_as_idle(self):
         """读不到的零不是真的零——否则 CW 一限流就误报「用量中断」。"""
@@ -409,17 +508,13 @@ class TestUsageSwitch:
     def test_a_failed_send_is_retried_next_hour(self, monkeypatch):
         """发失败就不落状态：下一小时条件还成立会再发一次，而不是就此丢掉。"""
         self.run([0])
-
-        def boom(chat, text):
-            raise TelegramError("网络抖了")
-
-        monkeypatch.setattr(telegram, "send_message", boom)
+        monkeypatch.setattr(alerts, "_send", failing("网络抖了"))
         self.run([50], now=NOW + timedelta(hours=1))
         assert load_state()[ALPHA].active is False   # 还没切过去
 
-        monkeypatch.setattr(telegram, "send_message", lambda c, t: self.sent.append((c, t)))
+        monkeypatch.setattr(alerts, "_send", self.sent.send)
         self.run([60], now=NOW + timedelta(hours=2))
-        assert "开始有用量" in self.texts()[0]
+        assert "用量开始" in self.texts()[0]
 
     def test_turning_alerts_off_forgets_the_state(self, ledger):
         """再开启时从头建基线，不拿几周前的旧状态去比，免得一开就收到过时的「中断」。"""
@@ -467,7 +562,7 @@ class TestQuotaThresholds:
         self.run(NOW + timedelta(hours=2))
         texts = self.quota_texts()
         assert len(texts) == 1
-        assert "额度已用 50%" in texts[0]
+        assert "超过 50% 提醒线" in texts[0]
         assert "52.5%" in texts[0]
 
     def test_each_threshold_fires_as_it_is_crossed(self):
@@ -479,19 +574,24 @@ class TestQuotaThresholds:
         self.run(NOW + timedelta(hours=2))
         self.spend(ce_untag=500, recent_untag=500)       # 105%
         self.run(NOW + timedelta(hours=3))
-        titles = [t.splitlines()[0] for t in self.quota_texts()]
-        assert titles == [
-            "⚠️ <b>额度已用 50%</b>",
-            "⚠️ <b>额度已用 80%</b>",
-            "⚠️ <b>额度已用 90%</b>",
-            "🚨 <b>额度已用完</b>",
+        quota = [card for _, card in self.sent.cards if card.kind == "quota"]
+        assert [card.caption.splitlines()[1] for card in quota] == [
+            "额度已用 52.5%，超过 50% 提醒线",
+            "额度已用 84.0%，超过 80% 提醒线",
+            "额度已用 94.5%，超过 90% 提醒线",
+            "额度已用 105.0%，已经用完",
+        ]
+        # 90% 起卡片变红，100% 换标题
+        assert [(card.title, card.tone) for card in quota] == [
+            ("额度预警", "warn"), ("额度预警", "warn"), ("额度预警", "danger"), ("额度已用完", "danger"),
         ]
 
     def test_a_big_jump_sends_only_the_top_threshold(self):
         """刚开启告警时已经 95%：发一条「已用 90%」，别连着刷 50/80/90 三条。"""
         self.spend(ce_untag=905)                         # 950.25 = 95.0%
         self.run()
-        assert [t.splitlines()[0] for t in self.quota_texts()] == ["⚠️ <b>额度已用 90%</b>"]
+        texts = self.quota_texts()
+        assert len(texts) == 1 and "超过 90% 提醒线" in texts[0]
         assert load_state()[ALPHA].fired == [50.0, 80.0, 90.0]
 
     def test_ratios_are_applied_like_the_overview_page(self):
@@ -575,15 +675,11 @@ class TestQuotaThresholds:
 
     def test_a_failed_send_is_retried(self, monkeypatch):
         self.spend(ce_untag=500)
-
-        def boom(chat, text):
-            raise TelegramError("网络抖了")
-
-        monkeypatch.setattr(telegram, "send_message", boom)
+        monkeypatch.setattr(alerts, "_send", failing("网络抖了"))
         self.run()
         assert load_state()[ALPHA].fired == []           # 没发出去就不算发过
 
-        monkeypatch.setattr(telegram, "send_message", lambda c, t: self.sent.append((c, t)))
+        monkeypatch.setattr(alerts, "_send", self.sent.send)
         self.run(NOW + timedelta(hours=1))
         assert len(self.quota_texts()) == 1
 
@@ -592,7 +688,9 @@ class TestQuotaThresholds:
         self.run()
         text = self.quota_texts()[0]
         assert "Cost Explorer 实账" in text and "CloudWatch" in text
-        assert "余额 $475.00" in text
+        card = self.sent.cards[0][1]
+        tiles = {tile.label: tile.value for tile in card.blocks[3].tiles}
+        assert tiles == {"累计消费": "$525.00", "剩余额度": "$475.00"}
 
 
 # ================================================================== 不带上游
@@ -623,13 +721,13 @@ class TestNoPartnerInMessages:
             self.cw["invocations"][ALPHA] = [calls]
             run_hourly(NOW + timedelta(hours=hour), log=quiet)
         texts = self.texts()
-        assert any("开始有用量" in t for t in texts) and any("用量中断" in t for t in texts)
+        assert any("用量开始" in t for t in texts) and any("用量中断" in t for t in texts)
 
     def test_quota(self):
         self.cw["invocations"][ALPHA] = [1]
         self.ce["values"][ALPHA] = (0.0, 900.0)        # × UNTAG 比率 1.05 = 94.5%
         run_hourly(NOW, log=quiet)
-        assert any("额度已用 90%" in t for t in self.texts())
+        assert any("超过 90% 提醒线" in t for t in self.texts())
 
 
 # ================================================================== 多个群
@@ -652,8 +750,9 @@ class TestMultipleChats:
         run_hourly(NOW, log=quiet)                              # 基线：无用量
         cw["invocations"][ALPHA] = [42]
         run_hourly(NOW + timedelta(hours=1), log=quiet)
-        started = [chat for chat, text in sent if "开始有用量" in text]
+        started = [chat for chat, text in sent if "用量开始" in text]
         assert started == [CHAT_A, CHAT_B, self.CHAT_C]
+        assert len({id(card) for _, card in sent.cards}) == 1    # 同一张卡片，只画一次
 
     def test_one_broken_chat_does_not_cause_repeats_elsewhere(
         self, ledger, state_file, cw, ce, sent, monkeypatch
@@ -661,13 +760,7 @@ class TestMultipleChats:
         """一个群 ID 坏了（bot 被踢了）不能拖住状态——否则好好的那几个群每小时都会
         再收到一遍，直到有人修好那个 ID。有一个群发成功就算发过了。"""
         tg_ledger(ledger, {ALPHA: (True, (CHAT_A, CHAT_B))})
-
-        def flaky(chat, text):
-            if chat == CHAT_B:
-                raise TelegramError("bot 已经被移出这个群了")
-            sent.append((chat, text))
-
-        monkeypatch.setattr(telegram, "send_message", flaky)
+        monkeypatch.setattr(alerts, "_send", failing("bot 已经被移出这个群了", only=CHAT_B, then=sent.send))
         cw["invocations"][ALPHA] = [0]
         run_hourly(NOW, log=quiet)
         cw["invocations"][ALPHA] = [42]
@@ -676,18 +769,14 @@ class TestMultipleChats:
         assert not summary.ok and "被移出" in summary.problems[0]  # 坏掉的那个报出来
 
         run_hourly(NOW + timedelta(hours=2), log=quiet)
-        assert [chat for chat, text in sent if "开始有用量" in text] == [CHAT_A]   # 没有重发
+        assert [chat for chat, text in sent if "用量开始" in text] == [CHAT_A]   # 没有重发
 
     def test_every_chat_failing_is_retried(self, ledger, state_file, cw, ce, sent, monkeypatch):
         """全部失败（Telegram 整个连不上、Token 失效）才不落状态，下一小时重试。"""
         tg_ledger(ledger, {ALPHA: (True, (CHAT_A, CHAT_B))})
         cw["invocations"][ALPHA] = [0]
         run_hourly(NOW, log=quiet)
-
-        def down(chat, text):
-            raise TelegramError("连不上 Telegram")
-
-        monkeypatch.setattr(telegram, "send_message", down)
+        monkeypatch.setattr(alerts, "_send", failing("连不上 Telegram"))
         cw["invocations"][ALPHA] = [42]
         run_hourly(NOW + timedelta(hours=1), log=quiet)
         assert load_state()[ALPHA].active is False
@@ -696,16 +785,10 @@ class TestMultipleChats:
         tg_ledger(ledger, {ALPHA: (True, (CHAT_A, CHAT_B))}, BUDGET={ALPHA: 1000.0})
         cw["invocations"][ALPHA] = [1]
         ce["values"][ALPHA] = (0.0, 500.0)                      # 52.5%
-
-        def flaky(chat, text):
-            if chat == CHAT_B:
-                raise TelegramError("群组 ID 不对")
-            sent.append((chat, text))
-
-        monkeypatch.setattr(telegram, "send_message", flaky)
+        monkeypatch.setattr(alerts, "_send", failing("群组 ID 不对", only=CHAT_B, then=sent.send))
         run_hourly(NOW, log=quiet)
         run_hourly(NOW + timedelta(hours=1), log=quiet)
-        assert [chat for chat, text in sent if "额度已用 50%" in text] == [CHAT_A]
+        assert [chat for chat, text in sent if "超过 50% 提醒线" in text] == [CHAT_A]
         assert load_state()[ALPHA].fired == [50.0]
 
 
@@ -720,6 +803,23 @@ class TestCli:
         from bedrock_cost.__main__ import main
 
         assert main(["alerts", "daily", "--dry-run"]) == 0
+
+    def test_dry_run_can_save_the_cards(self, ledger, fake_costs, tmp_path, capsys):
+        """服务器上没有屏幕：存成 PNG 拿下来看。只存图，不发、不改状态。"""
+        from bedrock_cost.__main__ import main
+
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
+        out = tmp_path / "cards"
+        assert main(["alerts", "daily", "--dry-run", "--save", str(out)]) == 0
+        saved = sorted(out.iterdir())
+        assert [p.name for p in saved] == [f"01-daily-{CHAT_A.lstrip('-')}.png"]
+        assert saved[0].read_bytes().startswith(b"\x89PNG")
+        assert "卡片存到了" in capsys.readouterr().out
+
+    def test_save_needs_dry_run(self, tmp_path):
+        from bedrock_cost.__main__ import main
+
+        assert main(["alerts", "daily", "--save", str(tmp_path)]) == 2
 
     def test_problems_give_a_non_zero_exit(self, ledger, fake_costs, monkeypatch):
         """systemd 靠退出码判断成败，失败了 systemctl --failed 才看得到。"""
@@ -737,3 +837,104 @@ class TestCli:
         monkeypatch.setattr(entry, "_serve", lambda: called.append(1) or 0)
         assert entry.main([]) == 0
         assert called == [1]
+
+
+# ================================================================== 发卡片
+class TestSendCard:
+    """alerts._send：画成图片用 sendPhoto 发；画不出来就退回发 caption 文字。"""
+
+    @pytest.fixture
+    def wire(self, monkeypatch):
+        """Telegram 那一头：记下发了图片还是文字。"""
+        box = {"photos": [], "texts": []}
+        monkeypatch.setattr(telegram, "send_photo", lambda chat, png, caption: box["photos"].append((chat, png, caption)))
+        monkeypatch.setattr(telegram, "send_message", lambda chat, text: box["texts"].append((chat, text)))
+        return box
+
+    @pytest.fixture
+    def cannot_draw(self, monkeypatch):
+        def boom(card):
+            raise OSError("cannot open resource")        # 字体文件丢了时 Pillow 就这么报
+
+        monkeypatch.setattr(cards, "render", boom)
+
+    def test_sends_the_card_as_a_photo(self, wire):
+        card = alerts.ping_card(ALPHA)
+        assert alerts._send(CHAT_A, card) == ""
+        chat, png, caption = wire["photos"][0]
+        assert (chat, caption) == (CHAT_A, card.caption)
+        assert png.startswith(b"\x89PNG")
+        assert wire["texts"] == []
+
+    def test_falls_back_to_the_caption_when_the_card_cannot_be_drawn(self, wire, cannot_draw):
+        """告警不能因为画图丢掉：画不出来就只发图片下面那段文字。"""
+        card = alerts.ping_card(ALPHA)
+        note = alerts._send(CHAT_A, card)
+        assert wire["photos"] == []
+        assert wire["texts"] == [(CHAT_A, card.caption)]
+        assert "卡片画不出来，改发了文字" in note and "cannot open resource" in note
+
+    def test_the_fallback_still_counts_as_sent_but_is_reported(
+        self, ledger, state_file, cw, ce, wire, cannot_draw, monkeypatch
+    ):
+        """发出去了，状态照常前进（不然下一小时会重发）；但命令非零退出，有人会去看。"""
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "t")
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
+        cw["invocations"][ALPHA] = [0]
+        run_hourly(NOW, log=quiet)
+        cw["invocations"][ALPHA] = [42]
+        summary = run_hourly(NOW + timedelta(hours=1), log=quiet)
+        assert "用量开始" in telegram.visible(wire["texts"][0][1])
+        assert load_state()[ALPHA].active is True
+        assert not summary.ok and "卡片画不出来" in summary.problems[0]
+
+    def test_one_card_is_drawn_once_for_every_chat(self, wire, monkeypatch):
+        drawn = []
+        real = cards.render
+        monkeypatch.setattr(cards, "render", lambda card: drawn.append(card) or real(card))
+        card = alerts.ping_card(ALPHA)
+        summary = alerts.RunSummary()
+        alerts._deliver_all((CHAT_A, CHAT_B, "-1003333333333"), card, summary, alerts._send, quiet)
+        assert len(wire["photos"]) == 3 and len(drawn) == 1
+
+    def test_dry_run_draws_the_card_too(self, ledger, fake_costs, sent, cannot_draw):
+        """dry-run 也真的画一遍：字体坏了在上线前就能看到。"""
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
+        summary = run_daily(date(2026, 8, 17), dry_run=True, log=quiet)
+        assert not summary.ok and "卡片画不出来" in summary.problems[0]
+        assert sent == []
+
+
+# ================================================================== 账号变动通知
+class TestNotifyAccount:
+    @pytest.fixture
+    def account(self, ledger):
+        tg_ledger(ledger, {ALPHA: (True, (CHAT_A, CHAT_B))})
+        return next(a for a in excel_source.load_accounts(force=True) if a.account == ALPHA)
+
+    def test_goes_to_every_chat(self, account, sent):
+        summary = alerts.notify_account("created", account, log=quiet)
+        assert summary.ok and summary.sent == 2
+        assert [(chat, card.kind) for chat, card in sent.cards] == [(CHAT_A, "created"), (CHAT_B, "created")]
+
+    def test_skips_accounts_with_tg_off(self, ledger, sent):
+        tg_ledger(ledger, {ALPHA: (False, CHAT_A)})
+        account = next(a for a in excel_source.load_accounts(force=True) if a.account == ALPHA)
+        assert alerts.notify_account("created", account, log=quiet) is None
+        assert sent == []
+
+    def test_disabled_reads_the_spend_like_the_overview(self, account, sent, fake_costs):
+        alerts.notify_account("disabled", account, now=NOW, log=quiet)
+        card = sent.cards[0][1]
+        rows = {row.label: row.value for row in card.blocks[1].rows}
+        from bedrock_cost.dates import cumulative_range
+
+        from .conftest import expected_marked
+
+        # fake CE 按天给数：区间是启用日期到 NOW 那一刻的本地日期，和概览页同一个口径
+        start, end, _ = cumulative_range(account.start_date, NOW.astimezone().date())
+        assert rows["停用前累计消费"] == f"${expected_marked(account, start, end):,.2f}"
+
+    def test_unknown_event_is_a_bug(self, account, sent):
+        with pytest.raises(ValueError):
+            alerts.notify_account("renamed", account, log=quiet)

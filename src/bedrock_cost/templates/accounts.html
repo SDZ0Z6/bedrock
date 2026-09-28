@@ -127,6 +127,10 @@
           {{ tg_result.message }}
         </div>
       {% endif %}
+      {% if creating %}
+        {# 新增时填了群就直接打开 TG 告警（见 excel_source.create_account） #}
+        <p class="form-hint">填了群组 ID，账号建好就会打开 TG 告警，并往这些群发一张「新账号启用」卡片。</p>
+      {% endif %}
       {% if not tg_configured %}
         <p class="form-hint">服务器还没配置 <code>TELEGRAM_BOT_TOKEN</code>：群组 ID 可以先存，但在配置好之前一条都不会发，测试消息也发不出去。</p>
       {% endif %}
@@ -367,6 +371,9 @@
           <ul class="confirm-list">
             <li>它会从概览、成本和使用情况、模型用量、模型配额四个页面消失，不再参与额度合计。</li>
             <li>不再对它发起 Cost Explorer 查询（省钱）。</li>
+            {% if account.tg_enabled and account.tg_chat_ids %}
+              <li>它的 {{ account.tg_chat_ids | length }} 个 TG 群会收到一张「账号停用」卡片（带停用前的累计消费），之后不再收到它的任何消息。</li>
+            {% endif %}
             <li>台账里的行、凭证和 TAG 配置都保留，随时可以在这一页恢复。</li>
           </ul>
         </div>

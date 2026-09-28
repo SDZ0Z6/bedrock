@@ -172,6 +172,12 @@ TELEGRAM_THRESHOLDS = _thresholds(_text("TELEGRAM_THRESHOLDS", "50,80,90,100"))
 # MAP 流量常有突发的空档，嫌吵就调大。
 TELEGRAM_IDLE_HOURS = max(1, _number("TELEGRAM_IDLE_HOURS", 1))
 
+# 每张告警卡片底部的署名。写成空（TELEGRAM_CARD_SIGNATURE=）就不画这一行——
+# 所以这里不走 _text：_text 会把空值当成没配、换回默认值
+TELEGRAM_CARD_SIGNATURE = os.environ.get(
+    "TELEGRAM_CARD_SIGNATURE", "This message was sent automatically by pokemoncloud"
+).strip()
+
 # 告警要跨次运行记住的状态：上次有没有用量、哪些额度档位已经发过、CE 实账的缓存。
 # 和台账放一起，systemd 单元的 ReadWritePaths 已经覆盖。
 ALERT_STATE_PATH = Path(_text("ALERT_STATE_PATH", "alert-state.json"))
