@@ -762,7 +762,8 @@ chown bedrock:bedrock /opt/bedrock/cred.xlsx && chmod 640 /opt/bedrock/cred.xlsx
 ### 备份
 
 要备的只有两个文件，都不在 git 里（`alert-state.json` 不用备：丢了最多重新建一次
-用量基线、把已经到达的额度档位再报一遍）：
+用量基线、把已经到达的额度档位再报一遍；`last-known-costs.json` 也不用备：丢了最多是下次
+查询失败时没有上一次的数可顶）：
 
 ```bash
 scp -i C:\path\to\your-key.pem root@<ECS_IP>:/opt/bedrock/.env ./backup-env-$(date +%F)

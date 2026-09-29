@@ -297,15 +297,21 @@ def _daily_card(today: date, rows: list[ReportRow], everyone: int, index: int, t
     for row in rows:
         uid = row.account
         budget = Cell(_money(row.budget)) if row.budget > 0 else Cell("未设额度", "muted")
-        if row.error:
+        if not row.has_numbers:
             table.append([Cell(uid, mark="danger"), budget, Cell("查询失败", "danger"), Cell("—", "muted")])
             notes.append(("danger", f"{uid} 查询失败：{row.error}"))
             lines.append(f"{_uid(uid)} 查询失败")
             continue
 
         mark, flags = "", []
+        stale = f"{row.stale_as_of:%m-%d}" if row.stale_as_of else ""
+        if stale:
+            # 今天查询失败，但有上一次成功的数：照常显示金额、标橙，并写明截至哪天
+            mark = "danger"
+            flags.append(f"截至 {stale}，今天查询失败")
+            notes.append(("danger", f"{uid} 今天查询失败：{row.error}。表里是截至 {stale} 的累计消费"))
         if row.range_status != CUMULATIVE_OK and row.range_hint:
-            mark = "warn"
+            mark = mark or "warn"
             flags.append(_RANGE_SHORT.get(row.range_status, "启用日期有问题"))
             notes.append(("warn", f"{uid}：{row.range_hint}"))
         if row.overspent:
@@ -313,11 +319,12 @@ def _daily_card(today: date, rows: list[ReportRow], everyone: int, index: int, t
             flags.append("已超出额度")
             notes.append(("danger", f"{uid} 已超出额度 {_money(-row.balance)}"))
         balance = (
-            Cell(_money(row.balance), "danger" if row.balance < 0 else "ok")
+            Cell(_money(row.balance), "danger" if row.balance < 0 else ("warn" if stale else "ok"))
             if row.budget > 0
             else Cell("—", "muted")
         )
-        table.append([Cell(uid, mark=mark), budget, Cell(_money(row.total_cost)), balance])
+        spent = Cell(_money(row.total_cost), "warn" if stale else "", note=f"截至 {stale}" if stale else "")
+        table.append([Cell(uid, mark=mark), budget, spent, balance])
         remaining = f" · 剩余额度 {_money(row.balance)}" if row.budget > 0 else ""
         flagged = f"（{'，'.join(flags)}）" if flags else ""
         lines.append(f"{_uid(uid)} 累计消费 {_money(row.total_cost)}{remaining}{flagged}")
@@ -558,16 +565,19 @@ def disabled_card(account: Account, spend: ReportRow, now: datetime | None = Non
     """spend 是停用那一刻的累计消费（和概览页、日报同一个口径）。"""
     when = _moment(now)
     rows = [Row("账号状态", "已停用", tone="gray", pill=True), Row("停用时间", when)]
-    if spend.error:
+    if not spend.has_numbers:
         rows.append(Row("停用前累计消费", "查询失败", tone="danger", bold=False))
         gist = "停用前累计消费查询失败"
     else:
-        rows.append(Row("停用前累计消费", _money(spend.total_cost)))
+        # 这一刻查不到、但有上一次成功的数：照样写上，标明截至哪天
+        stale = f"（截至 {spend.stale_as_of:%m-%d}）" if spend.stale_as_of else ""
+        rows.append(Row("停用前累计消费", _money(spend.total_cost) + stale, tone="warn" if stale else ""))
         if account.budget > 0:
-            rows.append(Row("停用前剩余额度", _money(spend.balance), tone="danger" if spend.balance < 0 else ""))
-            gist = f"停用前累计消费 {_money(spend.total_cost)} · 剩余额度 {_money(spend.balance)}"
+            tone = "danger" if spend.balance < 0 else ("warn" if stale else "")
+            rows.append(Row("停用前剩余额度", _money(spend.balance) + stale, tone=tone))
+            gist = f"停用前累计消费 {_money(spend.total_cost)} · 剩余额度 {_money(spend.balance)}{stale}"
         else:
-            gist = f"停用前累计消费 {_money(spend.total_cost)}"
+            gist = f"停用前累计消费 {_money(spend.total_cost)}{stale}"
     return Card(
         kind="disabled",
         tone="gray",

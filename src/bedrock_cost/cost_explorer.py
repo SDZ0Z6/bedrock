@@ -29,7 +29,7 @@ import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 
-from . import config
+from . import config, last_known
 from .excel_source import Account
 
 _AK_PATTERN = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{8,}\b")
@@ -48,6 +48,10 @@ class CostSplit:
     # CE 在该区间实际出现过的标签值，用于提示台账里的标签值是否写错
     seen_values: tuple[str, ...] = ()
     note: str | None = None
+    # 这次查询失败（error 照留），金额是上一次成功查到这一天为止的结果，见 last_known。
+    # 只有概览页和日报的 build_row 会拿它来显示；其余地方看到 error 就当失败，比如额度
+    # 告警——拿旧的数去判阈值只会晚报
+    stale_as_of: date | None = None
 
     @property
     def ok(self) -> bool:
@@ -239,12 +243,34 @@ def fetch_split(account: Account, start: date, end: date, refresh: bool = False)
     try:
         split = _query(account, start, end)
     except Exception as exc:  # 单个账号失败不能影响整页
-        return CostSplit(error=friendly_error(exc, account), fetched_at=now)
+        return _fallback(account, start, end, CostSplit(error=friendly_error(exc, account), fetched_at=now))
 
+    try:
+        last_known.remember(account, start, end, split)
+    except OSError:
+        pass  # 记不下来不影响这次的结果，最多是下次失败时没有旧数可顶
     if config.CACHE_TTL > 0:
         with _cache_lock:
             _cache[key] = split
     return split
+
+
+def _fallback(account: Account, start: date, end: date, failed: CostSplit) -> CostSplit:
+    """查询失败：有同口径的上一次成功结果就带上它的金额（错误照留），没有就原样返回。"""
+    try:
+        known = last_known.recall(account, start, end)
+    except OSError:
+        known = None
+    if known is None:
+        return failed
+    return CostSplit(
+        tag_raw=known.tag_raw,
+        untag_raw=known.untag_raw,
+        currency=known.currency,
+        error=failed.error,
+        fetched_at=failed.fetched_at,
+        stale_as_of=known.as_of,
+    )
 
 
 def fetch_all(

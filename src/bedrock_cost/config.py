@@ -184,6 +184,12 @@ ALERT_STATE_PATH = Path(_text("ALERT_STATE_PATH", "alert-state.json"))
 if not ALERT_STATE_PATH.is_absolute():
     ALERT_STATE_PATH = BASE_DIR / ALERT_STATE_PATH
 
+# 每个账号最近一次查询成功的累计消费。CE 查不到时，概览页和日报拿它顶上并标出
+# 「截至哪天」（见 last_known）。和告警状态放一起，systemd 的 ReadWritePaths 已经覆盖。
+LAST_KNOWN_COSTS_PATH = Path(_text("LAST_KNOWN_COSTS_PATH", "last-known-costs.json"))
+if not LAST_KNOWN_COSTS_PATH.is_absolute():
+    LAST_KNOWN_COSTS_PATH = BASE_DIR / LAST_KNOWN_COSTS_PATH
+
 
 def startup_warnings() -> list[str]:
     """启动时需要提醒用户的配置问题。"""

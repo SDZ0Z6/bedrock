@@ -938,3 +938,54 @@ class TestNotifyAccount:
     def test_unknown_event_is_a_bug(self, account, sent):
         with pytest.raises(ValueError):
             alerts.notify_account("renamed", account, log=quiet)
+
+
+# ================================================================== 查询失败时顶上上一次的数
+class TestStaleNumbers:
+    """查询失败但有上一次成功的数：日报照常显示金额并标「截至」；额度告警不拿旧数判阈值。"""
+
+    STALE = "凭证缺少 ce:GetCostAndUsage 权限（AccessDeniedException）"
+
+    def test_daily_shows_the_last_numbers_with_their_date(self, ledger, sent, monkeypatch):
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
+        monkeypatch.setattr(
+            cost_explorer, "fetch_all",
+            lambda accounts, ranges, refresh=False: {
+                a.key: CostSplit(untag_raw=1000.0, error=self.STALE, stale_as_of=date(2026, 8, 16))
+                for a in accounts
+            },
+        )
+        run_daily(date(2026, 8, 17), log=quiet)
+        card = sent.cards[0][1]
+        uid, _, spent, balance = card.blocks[0].rows[0]
+        assert (spent.text, spent.tone, spent.note) == ("$1,050.00", "warn", "截至 08-16")   # × UNTAG 1.05
+        assert (balance.text, balance.tone) == ("$498,950.00", "warn")
+        assert uid.mark == "danger"
+        notes = [text for _, text in card.blocks[1].items]
+        assert notes == [f"{ALPHA} 今天查询失败：{self.STALE}。表里是截至 08-16 的累计消费"]
+        assert "（截至 08-16，今天查询失败）" in card.caption
+
+    def test_quota_check_ignores_the_last_numbers(self, ledger, state_file, cw, sent, monkeypatch):
+        """拿旧数判阈值只会晚报：CE 那段失败就照旧跳过这一轮，哪怕手上有上一次的数。"""
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)}, BUDGET={ALPHA: 1000.0})
+        cw["invocations"][ALPHA] = [1]
+        monkeypatch.setattr(
+            cost_explorer, "fetch_split",
+            lambda account, start, end, refresh=False: CostSplit(
+                untag_raw=900.0, error="AccessDenied", stale_as_of=date(2026, 9, 20)
+            ),
+        )
+        summary = run_hourly(NOW, log=quiet)
+        assert [card for _, card in sent.cards if card.kind == "quota"] == []
+        assert not summary.ok
+
+    def test_the_disabled_card_uses_the_last_numbers(self):
+        from bedrock_cost.excel_source import Account
+        from bedrock_cost.report import build_row
+
+        account = Account(partner="p", account=ALPHA, budget=1000, tag_ratio=1, untag_ratio=1)
+        spend = build_row(account, CostSplit(untag_raw=503.2, error="x", stale_as_of=date(2026, 9, 28)))
+        card = alerts.disabled_card(account, spend, NOW)
+        rows = {row.label: (row.value, row.tone) for row in card.blocks[1].rows}
+        assert rows["停用前累计消费"] == ("$503.20（截至 09-28）", "warn")
+        assert rows["停用前剩余额度"] == ("$496.80（截至 09-28）", "warn")

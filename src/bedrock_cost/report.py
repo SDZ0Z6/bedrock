@@ -59,6 +59,14 @@ class ReportRow:
     range_start: date | None = None       # 实际查了哪一天起（可能被兜底或钳过）
     range_end: date | None = None
     range_status: str = ""                # dates.CUMULATIVE_* 之一
+    # 这次查询失败（error 照留），行上的金额是上一次成功查到这一天为止的结果；
+    # None = 金额是这次新查的。见 last_known
+    stale_as_of: date | None = None
+
+    @property
+    def has_numbers(self) -> bool:
+        """这一行有金额可显示：查询成功，或者失败了但有上一次成功的数顶着。"""
+        return self.error is None or self.stale_as_of is not None
 
     @property
     def level(self) -> str:
@@ -119,10 +127,22 @@ class Report:
         """累计区间打了折扣的行——它们的余额偏高。"""
         return [r for r in self.rows if r.range_incomplete]
 
-    # -------------------------------------------------- 合计（只统计查询成功的行）
+    # -------------------------------------------------- 合计（只统计有金额的行）
     @property
     def _good(self) -> list[ReportRow]:
-        return [r for r in self.rows if r.error is None]
+        # 查询失败但有上一次成功的数的行也算进来：表上显示着它的数，合计不含它的话，
+        # 加起来就对不上表上的数了。页脚会说明含了几个旧数
+        return [r for r in self.rows if r.has_numbers]
+
+    @property
+    def stale_rows(self) -> list[ReportRow]:
+        """查询失败、显示的是上一次成功的数的行。"""
+        return [r for r in self.rows if r.stale_as_of is not None]
+
+    @property
+    def missing_count(self) -> int:
+        """查询失败、也没有上一次的数可顶的行——合计里没有它们。"""
+        return sum(1 for r in self.rows if not r.has_numbers)
 
     @property
     def total_budget(self) -> float:
@@ -196,9 +216,10 @@ def build_row(
         range_end=end,
         range_status=status,
     )
-    if split.error:
+    if split.error and split.stale_as_of is None:
         return row
 
+    row.stale_as_of = split.stale_as_of
     row.tag_raw = split.tag_raw
     row.untag_raw = split.untag_raw
     row.tag_cost = split.tag_raw * account.tag_ratio

@@ -53,7 +53,8 @@
       <span class="card-note">
         各账号自启用日期累计至 {{ report.end.isoformat() }} ·
         {{ report.rows | length }} 个账号
-        {% if report.failed_count %}· <span class="tone-danger">{{ report.failed_count }} 个查询失败</span>{% endif %}
+        {% if report.failed_count %}· <span class="tone-danger">{{ report.failed_count }} 个查询失败</span>
+          {%- if report.stale_rows %}<span class="tone-warn">（{{ report.stale_rows | length }} 个显示上一次查到的数）</span>{% endif %}{% endif %}
         {% if report.incomplete_rows %}·
           <span class="tone-warn">{{ report.incomplete_rows | length }} 个账号区间不完整</span>{% endif %}
         {% if report.any_cached %}· <span class="tone-muted">部分数据来自缓存</span>{% endif %}
@@ -77,7 +78,8 @@
         </thead>
         <tbody>
           {% for row in report.rows %}
-            {% if row.error %}
+            {# 查询失败但有上一次成功的数（row.stale_as_of）时照常显示金额，下面补一行说明 #}
+            {% if not row.has_numbers %}
               <tr class="row-error">
                 <td>{{ row.partner }}</td>
                 <td class="mono">{{ row.account }}</td>
@@ -113,10 +115,16 @@
                   {{ row.untag_cost | money }}
                   <span class="calc">{{ row.untag_raw | money }} × {{ row.untag_ratio | ratio }}</span>
                 </td>
-                <td class="num strong">{{ row.total_cost | money }}</td>
+                <td class="num strong">
+                  {{ row.total_cost | money }}
+                  {% if row.stale_as_of %}<span class="calc tone-warn">截至 {{ row.stale_as_of.isoformat() }}</span>{% endif %}
+                </td>
                 <td class="num usage-col">{{ usage_cell(row.usage_pct, row.level, row.bar_width) }}</td>
                 <td class="num {% if row.overspent %}tone-danger strong{% endif %}">{{ row.balance | money }}</td>
               </tr>
+              {% if row.stale_as_of %}
+                <tr class="row-note"><td colspan="9">⚠ 这次查询失败：{{ row.error }}——这一行显示的是截至 {{ row.stale_as_of.isoformat() }} 的累计消费（上一次查询成功时的数）</td></tr>
+              {% endif %}
               {# 标签值没匹配上时的提示条已撤掉。数据层照旧在算
                  （cost_explorer 的 split.note，两个分支都还在），report.py 也照旧
                  传到 row.note 上，只是这里不渲染。想恢复就把下面三行放回来：
@@ -131,7 +139,11 @@
         <tfoot>
           <tr>
             <td colspan="3">合计<span class="calc">
-              {%- if report.failed_count %}不含查询失败的账号{% else %}各账号区间不同，仅为金额加总{% endif -%}
+              {%- if report.missing_count or report.stale_rows -%}
+                {%- if report.missing_count %}不含查询失败的账号{% endif -%}
+                {%- if report.missing_count and report.stale_rows %}；{% endif -%}
+                {%- if report.stale_rows %}含 {{ report.stale_rows | length }} 个账号上一次查到的数{% endif -%}
+              {%- else %}各账号区间不同，仅为金额加总{% endif -%}
             </span></td>
             <td class="num">{{ report.total_budget | money }}</td>
             <td class="num">{{ report.total_tag | money }}</td>
