@@ -172,6 +172,16 @@ class TestWrap:
     def test_newlines_are_kept(self):
         assert _wrap("第一行\n第二行", _font(14), 500) == ["第一行", "第二行"]
 
+    def test_an_opening_bracket_never_ends_a_line(self):
+        """「权限（」换行、括号里的字跑到下一行很难看：左括号跟着内容挪下去。"""
+        text = "626052499798 今天查询失败：凭证缺少 ce:GetCostAndUsage 权限（AccessDeniedException）。"
+        font = _font(14)
+        width = font.getlength(text[: text.index("（") + 1]) / cards._K + 1   # 刚好放得下「……权限（」
+        lines = _wrap(text, font, width)
+        assert "".join(lines) == text                        # 一个字都没丢
+        assert not any(line.endswith("（") for line in lines)
+        assert lines[1].startswith("（AccessDeniedException")
+
     def test_no_lonely_last_character(self):
         """最后一行不会只剩「能。」这样一两个字：从上一行挪两个字下来。"""
         text = "这是一条 Bedrock 监控系统的测试消息，用于验证 Telegram Bot 的消息推送功能。"
@@ -277,3 +287,15 @@ class TestAccountCards:
 
     def test_disabled_renders(self):
         assert picture(alerts.disabled_card(JEFF, row(JEFF, 1), self.NOW)).width == 1200
+
+
+class TestTableNotes:
+    def test_a_note_under_a_cell_makes_that_row_taller(self):
+        """「截至 09-28」这种小字放在值下面，这一行要长高，别的行不变。"""
+        columns = ["UID", "授信额度", "累计消费", "剩余额度"]
+        plain = [cards.Cell("111111111111"), cards.Cell("$1"), cards.Cell("$2"), cards.Cell("$3")]
+        noted = [cards.Cell("222222222222"), cards.Cell("$1"), cards.Cell("$2", note="截至 09-28"), cards.Cell("$3")]
+        table = cards.Table(columns, [plain, noted])
+        height = table.layout(cards._Pen(), 0, 0, 500, cards.TONES["ok"])
+        assert height == cards.Table.HEAD + cards.Table.ROW + cards.Table.NOTED_ROW
+        assert "截至 09-28" in table.strings()

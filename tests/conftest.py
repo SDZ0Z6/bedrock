@@ -101,6 +101,12 @@ def _no_network(request, monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", refuse)
 
 
+@pytest.fixture(autouse=True)
+def _scratch_last_known(tmp_path, monkeypatch):
+    """「上一次查到的数」写到临时目录：任何走到真 fetch_split 的用例都不能动项目目录里的文件。"""
+    monkeypatch.setattr(config, "LAST_KNOWN_COSTS_PATH", tmp_path / "last-known-costs.json")
+
+
 @pytest.fixture
 def ledger(tmp_path, monkeypatch):
     """临时台账，并让 config 指向它。"""

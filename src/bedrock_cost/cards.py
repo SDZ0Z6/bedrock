@@ -188,6 +188,7 @@ class Cell:
     text: str
     tone: str = ""    # 字的颜色，见 _color
     mark: str = ""    # 只用在 UID 列：后面加一个彩色小圆点，表示这一行在下面有说明
+    note: str = ""    # 值下面再补一行灰色小字（「截至 09-28」）；这一行会跟着变高
 
 
 @dataclass
@@ -200,9 +201,13 @@ class Table:
     UID_COLUMN = 150
     HEAD = 34
     ROW = 46
+    NOTED_ROW = 60   # 有一格带小字时的行高
 
     def strings(self) -> list[str]:
-        return [*self.columns, *(cell.text for row in self.rows for cell in row)]
+        return [*self.columns, *(s for row in self.rows for cell in row for s in (cell.text, cell.note) if s)]
+
+    def _height(self, row: list[Cell]) -> float:
+        return self.NOTED_ROW if any(cell.note for cell in row) else self.ROW
 
     def layout(self, pen: _Pen, x: float, y: float, w: float, tone: Tone) -> float:
         step = (w - self.UID_COLUMN) / (len(self.columns) - 1)
@@ -211,11 +216,12 @@ class Table:
         for index, name in enumerate(self.columns[1:], start=1):
             pen.text(x + self.UID_COLUMN + step * index, y + self.HEAD / 2, name, head, WHITE, anchor="rm")
 
-        uid_font, cell_font = _font(14, 700, mono=True), _font(15)
+        uid_font, cell_font, note_font = _font(14, 700, mono=True), _font(15), _font(11.5)
         top = y + self.HEAD
         for row in self.rows:
+            height = self._height(row)
             pen.line(x, top, x + w, top, LINE)
-            middle = top + self.ROW / 2
+            middle = top + height / 2
             uid = row[0]
             chip = _width(uid.text, uid_font) + 14
             pen.box((x, middle - 13, x + chip, middle + 13), 6, fill=CHIP)
@@ -223,12 +229,14 @@ class Table:
             if uid.mark:
                 pen.ellipse((x + chip + 8, middle - 4, x + chip + 16, middle + 4), fill=_color(uid.mark))
             for index, cell in enumerate(row[1:], start=1):
-                pen.text(
-                    x + self.UID_COLUMN + step * index, middle, cell.text, cell_font,
-                    _color(cell.tone), anchor="rm",
-                )
-            top += self.ROW
-        return self.HEAD + self.ROW * len(self.rows)
+                right = x + self.UID_COLUMN + step * index
+                # 带小字的格子：值往上挪，小字放在值下面
+                value_y = middle - 8 if cell.note else middle
+                pen.text(right, value_y, cell.text, cell_font, _color(cell.tone), anchor="rm")
+                if cell.note:
+                    pen.text(right, middle + 12, cell.note, note_font, TEXT_2, anchor="rm")
+            top += height
+        return self.HEAD + sum(self._height(row) for row in self.rows)
 
 
 @dataclass
@@ -637,11 +645,18 @@ def _wrap(text: str, font: ImageFont.FreeTypeFont, width: float) -> list[str]:
                 if not line or font.getlength(line + piece) <= limit:
                     line += piece
                     continue
-                lines.append(line.rstrip())
-                line = piece.lstrip()
+                broken, carry = line.rstrip(), ""
+                # 行尾不留左括号（「权限（」换行、括号里的字到下一行），跟着内容挪下去
+                if len(broken) > 1 and broken[-1] in _OPENERS and font.getlength(broken[-1] + piece) <= limit:
+                    broken, carry = broken[:-1], broken[-1]
+                lines.append(broken)
+                line = carry + piece.lstrip()
         lines.append(line.rstrip())
         _no_orphan(lines, first)
     return lines
+
+
+_OPENERS = "（([「『《【“‘"
 
 
 def _no_orphan(lines: list[str], first: int) -> None:

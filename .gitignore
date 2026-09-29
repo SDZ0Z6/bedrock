@@ -9,6 +9,8 @@ ledger-backups/
 ledger-audit.log
 # Telegram 告警的运行状态（上次有没有用量、哪些额度档位已经发过）
 alert-state.json
+# 每个账号最近一次查询成功的累计消费（查询失败时顶上，见 last_known.py）
+last-known-costs.json
 
 # Python
 __pycache__/
