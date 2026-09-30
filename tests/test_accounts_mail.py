@@ -275,3 +275,84 @@ class TestMailTestButton:
         response = admin.post("/accounts/mail-test", data=MAILBOX, headers={"X-Requested-With": "fetch"})
         assert response.status_code == 302
         assert server.connections == 0
+
+
+class TestMailNotices:
+    """开 / 关邮件告警都给账号的群发一张卡片，跟 TG 开关走。邮箱地址打码。"""
+
+    CHAT = "-1001234567890"
+
+    @pytest.fixture
+    def cards_sent(self, monkeypatch):
+        from bedrock_cost import alerts, config
+
+        box = []
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:FAKE")
+        monkeypatch.setattr(alerts, "_send", lambda chat, card: box.append((chat, card)) or "")
+        return box
+
+    def ready(self, admin, tg=True):
+        """填好群和邮箱；tg=True 再把 TG 开关打开。"""
+        _edit(admin, by_account("111111111111"), tg_chat_ids=self.CHAT, **MAILBOX)
+        key = by_account("111111111111").key
+        if tg:
+            post(admin, "/accounts/tg-toggle", key=key, tg_enabled="1")
+        return key
+
+    def test_switching_on_is_announced(self, admin, ledger, cards_sent):
+        post(admin, "/accounts/mail-toggle", key=self.ready(admin), mail_enabled="1")
+        (chat, card), = cards_sent
+        assert (chat, card.kind, card.title) == (self.CHAT, "mail-on", "邮件告警已开启")
+        text = card.text()
+        assert "r***@example.com" in text and "root-alpha@example.com" not in text   # 地址打码
+        assert "阿里邮箱 · 国际站（新加坡）" in text and "111111111111" in text
+        assert "已通知这个账号的 1 个 TG 群" in admin.get("/accounts/").get_data(as_text=True)
+
+    def test_switching_off_is_announced(self, admin, ledger, cards_sent):
+        key = self.ready(admin)
+        post(admin, "/accounts/mail-toggle", key=key, mail_enabled="1")
+        post(admin, "/accounts/mail-toggle", key=key, mail_enabled="0")
+        assert [card.kind for _, card in cards_sent] == ["mail-on", "mail-off"]
+        assert cards_sent[1][1].title == "邮件告警已关闭"
+
+    def test_clearing_the_mailbox_announces_it_with_the_old_address(self, admin, ledger, cards_sent):
+        key = self.ready(admin)
+        post(admin, "/accounts/mail-toggle", key=key, mail_enabled="1")
+        _edit(admin, by_account("111111111111"), tg_chat_ids=self.CHAT, mail_address="", mail_password="")
+        assert [card.kind for _, card in cards_sent] == ["mail-on", "mail-off"]
+        assert "r***@example.com" in cards_sent[1][1].text()
+
+    def test_other_edits_send_nothing(self, admin, ledger, cards_sent):
+        key = self.ready(admin)
+        post(admin, "/accounts/mail-toggle", key=key, mail_enabled="1")
+        _edit(admin, by_account("111111111111"), tg_chat_ids=self.CHAT, **{**MAILBOX, "mail_password": ""},
+              budget="777")
+        assert [card.kind for _, card in cards_sent] == ["mail-on"]
+
+    def test_follows_the_tg_switch(self, admin, ledger, cards_sent):
+        post(admin, "/accounts/mail-toggle", key=self.ready(admin, tg=False), mail_enabled="1")
+        assert cards_sent == []
+
+    def test_nothing_changed_nothing_sent(self, admin, ledger, cards_sent):
+        key = self.ready(admin)
+        post(admin, "/accounts/mail-toggle", key=key, mail_enabled="0")    # 本来就是关的
+        assert cards_sent == []
+
+    def test_a_new_account_card_says_mail_alerts_are_on(self, admin, ledger, cards_sent):
+        """新增时填了邮箱就开了邮件告警：不另发一张，写在「新账号启用」那张上。"""
+        post(admin, "/accounts/create", **NEW_FORM, tg_chat_ids=self.CHAT, **MAILBOX)
+        (chat, card), = cards_sent
+        rows = {row.label: row.value for row in card.blocks[1].rows}
+        assert card.kind == "created" and rows["邮件告警"] == "已开启"
+
+    def test_disabling_says_mail_alerts_stop(self, admin, ledger, cards_sent, fake_costs):
+        key = self.ready(admin)
+        post(admin, "/accounts/mail-toggle", key=key, mail_enabled="1")
+        post(admin, "/accounts/toggle", key=key, enabled="0")
+        rows = {row.label: row.value for row in cards_sent[-1][1].blocks[1].rows}
+        assert cards_sent[-1][1].kind == "disabled" and rows["邮件告警"] == "已停止"
+
+    def test_no_mail_row_without_mail_alerts(self, admin, ledger, cards_sent):
+        post(admin, "/accounts/create", **NEW_FORM, tg_chat_ids=self.CHAT)
+        rows = {row.label for row in cards_sent[0][1].blocks[1].rows}
+        assert "邮件告警" not in rows

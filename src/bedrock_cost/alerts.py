@@ -22,9 +22,9 @@
   额度阈值  累计消费 = CE 实账（截至前天）+ CW 估算（昨天 + 今天），都套
             TAG/UNTAG 比率。50/80/90/100% 每档只发一次。
 
-**账号变动**：账号管理页上新增、停用、恢复一个账号时，给它的群发一张通知卡片
-（notify_account）。跟 TG 开关走：开关开着、填了群才发。这类消息由 web 进程当场发，
-不走 systemd timer。
+**账号变动**：账号管理页上新增、停用、恢复一个账号，或者打开 / 关闭它的邮件告警时，
+给它的群发一张通知卡片（notify_account）。跟 TG 开关走：开关开着、填了群才发。这类消息
+由 web 进程当场发，不走 systemd timer。
 
 **长什么样**：每条都是一张深色卡片图（cards.py 画）+ 图片下面一段文字（caption，
 账号 ID 和关键数字）。卡片画不出来就退回只发那段文字，见 _send。
@@ -49,7 +49,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from . import cards, config, cost_explorer, telegram
+from . import cards, config, cost_explorer, mail_rules, telegram
 from .cards import (
     Card,
     Cell,
@@ -67,8 +67,9 @@ from .cards import (
     Tiles,
     Uid,
 )
+from .chart import compact_number
 from .cloudwatch_metrics import hourly_invocations
-from .cost_estimate import estimate_split
+from .cost_estimate import HourUsage, estimate_split, hour_usage
 from .dates import (
     CUMULATIVE_CLAMPED,
     CUMULATIVE_FUTURE,
@@ -372,7 +373,11 @@ def started_card(account: Account, hour: datetime, count: float) -> Card:
     )
 
 
-def stopped_card(account: Account, hours: list[datetime], last_active: str) -> Card:
+def stopped_card(
+    account: Account, hours: list[datetime], last_active: str, usage: HourUsage | None = None
+) -> Card:
+    """用量中断。usage 是上一次有调用的那一小时的用量（hour_usage）：有它就写到分钟的
+    最后一次调用时间，外加那一小时的调用次数、token 和预估费用；取不到就只写到小时。"""
     first = _local_hour(hours[0])
     if len(hours) > 1:
         label, when, gist = "检测时段", f"{first} 起", f"连续 {len(hours)} 个小时没有任何调用"
@@ -385,10 +390,22 @@ def stopped_card(account: Account, hours: list[datetime], last_active: str) -> C
         Tiles([Tile(label, when, big=True, edge=True, note=gist, note_tone="danger")]),
     ]
     lines = [f"🔴 <b>用量中断</b> · {_uid(account.account)}", summary]
+    footer = "请检查账号调用情况及相关服务状态。"
     if last_active:
-        previous = f"{_local_hour(datetime.fromisoformat(last_active))} 那一小时"
+        known = usage is not None and usage.has_data
+        if known and usage.last_call is not None:
+            previous = _local_hour(usage.last_call)          # 精确到分钟
+        else:
+            previous = f"{_local_hour(datetime.fromisoformat(last_active))} 那一小时"
         blocks.append(Since("上一次有调用", previous))
         lines.append(f"上一次有调用：{previous}")
+        if known:
+            blocks.append(_usage_details(account, usage))
+            lines.append(_usage_line(account, usage))
+            notes = _usage_notes(usage)
+            if notes:
+                blocks.append(Notes("需要注意", notes))
+            footer += "预估费用按 CloudWatch Token × AWS 牌价估算，已套台账的 TAG / UNTAG 比率。"
     return Card(
         kind="stopped",
         tone="danger",
@@ -397,9 +414,47 @@ def stopped_card(account: Account, hours: list[datetime], last_active: str) -> C
         badge="INTERRUPTED",
         subtitle="BEDROCK · USAGE ALERT",
         blocks=blocks,
-        footer="请检查账号调用情况及相关服务状态。",
+        footer=footer,
         caption=_caption(lines),
     )
+
+
+def _usage_span(usage: HourUsage) -> str:
+    return f"{_local_hour(usage.start)}–{usage.end.astimezone():%H:%M}"
+
+
+def _usage_details(account: Account, usage: HourUsage) -> Details:
+    """上一次有调用的那一小时：调用次数、token、预估费用。"""
+    tokens = usage.tokens
+    rows = [
+        Row("调用次数", f"{usage.invocations:,.0f} 次"),
+        Row("Token 用量", f"输入 {compact_number(tokens.get('input', 0))} · 输出 {compact_number(tokens.get('output', 0))}"),
+    ]
+    cached = [
+        f"{label} {compact_number(tokens[kind])}"
+        for kind, label in (("cache_read", "读"), ("cache_write", "写"))
+        if tokens.get(kind)
+    ]
+    if cached:
+        rows.append(Row("缓存 Token", " · ".join(cached)))
+    rows.append(Row("预估费用", _money(usage.marked(account))))
+    return Details(rows, title=f"上一次有调用的那一小时（{_usage_span(usage)}）")
+
+
+def _usage_line(account: Account, usage: HourUsage) -> str:
+    return (
+        f"那一小时（{_usage_span(usage)}）调用 {usage.invocations:,.0f} 次 · "
+        f"Token {compact_number(usage.total_tokens)} · 预估 {_money(usage.marked(account))}"
+    )
+
+
+def _usage_notes(usage: HourUsage) -> list[tuple[str, str]]:
+    notes: list[tuple[str, str]] = []
+    if usage.errors:
+        notes.append(("warn", f"有 {len(usage.errors)} 个区读不到 CloudWatch，上面的用量和费用可能偏低"))
+    if usage.unpriced:
+        notes.append(("warn", f"这些模型没有单价、按 0 算了：{'、'.join(usage.unpriced)}"))
+    return notes
 
 
 def quota_card(
@@ -506,6 +561,14 @@ def send_test(chat_id: str, account_id: str = "") -> str:
 
 
 # --------------------------------------------------------------- 账号变动
+def _mail_row(account: Account, state: str, tone: str = "ok") -> list[Row]:
+    """账号卡片上顺带说一句邮件告警的状态：新增时填了邮箱就开、停用就停、恢复就恢复。
+    没开邮件告警的账号不加这一行。"""
+    if not (account.mail_enabled and account.mail_configured):
+        return []
+    return [Row("邮件告警", state, tone=tone)]
+
+
 def created_card(account: Account, now: datetime | None = None) -> Card:
     when = _moment(now)
     return Card(
@@ -522,6 +585,7 @@ def created_card(account: Account, now: datetime | None = None) -> Card:
                     Row("账号状态", "运行中", tone="ok", pill=True),
                     Row("授信额度", _budget(account)),
                     Row("启用时间", when),
+                    *_mail_row(account, "已开启"),
                 ],
                 uid=account.account,
             ),
@@ -550,6 +614,7 @@ def restored_card(account: Account, now: datetime | None = None) -> Card:
                     Row("账号状态", "运行中", tone="ok", pill=True),
                     Row("授信额度", _budget(account)),
                     Row("恢复时间", when),
+                    *_mail_row(account, "已恢复"),
                 ],
                 uid=account.account,
             ),
@@ -578,6 +643,7 @@ def disabled_card(account: Account, spend: ReportRow, now: datetime | None = Non
             gist = f"停用前累计消费 {_money(spend.total_cost)} · 剩余额度 {_money(spend.balance)}{stale}"
         else:
             gist = f"停用前累计消费 {_money(spend.total_cost)}{stale}"
+    rows += _mail_row(account, "已停止", tone="muted")
     return Card(
         kind="disabled",
         tone="gray",
@@ -596,6 +662,65 @@ def disabled_card(account: Account, spend: ReportRow, now: datetime | None = Non
     )
 
 
+def mail_on_card(account: Account, now: datetime | None = None) -> Card:
+    """在账号管理页打开了邮件告警。邮箱地址打码：群里可能有用账号的人，root 邮箱不给看全。"""
+    when = _moment(now)
+    mailbox = mail_rules.mask_email(account.mail_address) or "—"
+    return Card(
+        kind="mail-on",
+        tone="ok",
+        icon="dot-green",
+        title="邮件告警已开启",
+        badge="MAIL ALERT ON",
+        subtitle="BEDROCK · ACCOUNT NOTIFICATION",
+        blocks=[
+            Status("check-circle", "已开始监控告警邮箱", "AWS 发来的封号、盗用、滥用、工单通知会发到群里", tone="ok"),
+            Details(
+                [
+                    Row("监控状态", "监控中", tone="ok", pill=True),
+                    Row("告警邮箱", mailbox),
+                    Row("邮箱平台", account.mail_provider_label),
+                    Row("开启时间", when),
+                ],
+                uid=account.account,
+            ),
+        ],
+        footer="每 5 分钟收一次信；只发开启之后新到的邮件，旧邮件不补发。",
+        footer_icon="satellite",
+        footer_rule=False,
+        caption=f"🟢 <b>邮件告警已开启</b> · {_uid(account.account)}\n告警邮箱 {_esc(mailbox)} · 开启时间 {when}",
+    )
+
+
+def mail_off_card(account: Account, now: datetime | None = None) -> Card:
+    """关掉了邮件告警：表格里点了关，或者修改弹窗里把告警邮箱清空了。"""
+    when = _moment(now)
+    mailbox = mail_rules.mask_email(account.mail_address) or "—"
+    return Card(
+        kind="mail-off",
+        tone="gray",
+        icon="dot-gray",
+        title="邮件告警已关闭",
+        badge="MAIL ALERT OFF",
+        subtitle="BEDROCK · ACCOUNT NOTIFICATION",
+        blocks=[
+            Status("pause-circle", "已停止监控告警邮箱", "这个邮箱之后收到的 AWS 通知不再发到群里"),
+            Details(
+                [
+                    Row("监控状态", "已关闭", tone="gray", pill=True),
+                    Row("告警邮箱", mailbox),
+                    Row("关闭时间", when),
+                ],
+                uid=account.account,
+            ),
+        ],
+        footer="重新打开之后，只发打开以后新到的邮件。",
+        footer_icon="satellite",
+        footer_rule=False,
+        caption=f"⚫ <b>邮件告警已关闭</b> · {_uid(account.account)}\n告警邮箱 {_esc(mailbox)} · 关闭时间 {when}",
+    )
+
+
 def _spend(account: Account, today: date) -> ReportRow:
     """这一刻的累计消费：和概览页、日报同一组函数（有缓存就用缓存）。"""
     period = cumulative_range(account.start_date, today)
@@ -606,13 +731,18 @@ def _spend(account: Account, today: date) -> ReportRow:
 def notify_account(
     event: str, account: Account, *, now: datetime | None = None, log=print
 ) -> RunSummary | None:
-    """账号管理页上新增（created）/ 停用（disabled）/ 恢复（restored）了一个账号：给它的群发卡片。
+    """账号管理页上新增（created）/ 停用（disabled）/ 恢复（restored）了一个账号，或者打开
+    （mail_on）/ 关闭（mail_off）了它的邮件告警：给它的群发卡片。
 
-    跟 TG 开关走：这个账号的 TG 告警没开或者没填群，就不发，返回 None。看的是开关和群，
-    不看 tg_active——停用的时候账号已经不算 tg_active 了，停用通知正是它的最后一条消息。
+    跟 TG 开关走：这个账号的 TG 告警没开或者没填群，就不发，返回 None。账号变动看的是开关
+    和群，不看 tg_active——停用的时候账号已经不算 tg_active 了，停用通知正是它的最后一条
+    消息。邮件告警的开关则要账号本身也启用着：停用的账号本来就一条消息都不发。
     发送失败不影响台账（台账在这之前已经写好了），只记在返回的 RunSummary 里。
     """
-    if not (account.tg_enabled and account.tg_chat_ids):
+    if event in ("mail_on", "mail_off"):
+        if not account.tg_active:
+            return None
+    elif not (account.tg_enabled and account.tg_chat_ids):
         return None
     summary = RunSummary()
     if not telegram.configured():
@@ -625,6 +755,10 @@ def notify_account(
         card = restored_card(account, now)
     elif event == "disabled":
         card = disabled_card(account, _spend(account, now.astimezone().date()), now)
+    elif event == "mail_on":
+        card = mail_on_card(account, now)
+    elif event == "mail_off":
+        card = mail_off_card(account, now)
     else:
         raise ValueError(f"不认识的账号变动：{event}")
     _deliver_all(account.tg_chat_ids, card, summary, _send, log)
@@ -702,16 +836,29 @@ def _check_usage(
             state.last_active_hour = latest
         return
 
-    card = (
-        started_card(account, hours[-1], counts[-1])
-        if now_active
-        else stopped_card(account, hours, state.last_active_hour)
-    )
+    if now_active:
+        card = started_card(account, hours[-1], counts[-1])
+    else:
+        card = stopped_card(account, hours, state.last_active_hour, _last_usage(account, state.last_active_hour, log))
     # 发出去了才落状态：全部群都失败就保持原状，下一小时条件还成立会再发一次
     if _deliver_all(account.tg_chat_ids, card, summary, send, log):
         state.active = now_active
         if now_active:
             state.last_active_hour = latest
+
+
+def _last_usage(account: Account, last_active: str, log) -> HourUsage | None:
+    """「用量中断」卡片上要写的那一小时用量。取不到也照发中断告警，只是少几行。"""
+    if not last_active:
+        return None
+    try:
+        usage = hour_usage(account, datetime.fromisoformat(last_active))
+    except Exception as exc:  # 明细是锦上添花，任何失败都不能拦住中断告警
+        log(f"[用量明细] {account.account}：{type(exc).__name__}: {exc}")
+        return None
+    for error in usage.errors:
+        log(f"[用量明细] {account.account}：{error}")
+    return usage
 
 
 def _check_quota(

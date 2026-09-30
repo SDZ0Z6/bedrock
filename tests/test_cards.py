@@ -39,12 +39,28 @@ def row(account: Account, untag_raw: float = 0.0, error: str | None = None):
 
 def every_card() -> dict[str, Card]:
     """每一种卡片各一张，示例数字。"""
+    from bedrock_cost.cost_estimate import HourUsage
+
+    hour = datetime(2026, 9, 28, 5, tzinfo=UTC)
+    usage = HourUsage(
+        start=hour, invocations=1234, tokens={"input": 5.2e6, "output": 3.1e5, "cache_read": 1.2e7},
+        last_call=hour.replace(minute=47), tag_raw=40.0, untag_raw=5.6, errors=["us-west-2：Throttling"],
+    )
+    mailbox = Account(
+        partner="上游", account="120121147269", budget=1000, tag_ratio=1.0, untag_ratio=1.0,
+        mail_enabled=True, mail_provider="aliyun-sg", mail_address="root@example.com", mail_password="x",
+    )
     return {
         "daily": alerts.daily_cards(TODAY, [row(JEFF, 41.27)])[0],
-        "started": alerts.started_card(JEFF, datetime(2026, 9, 28, 5, tzinfo=UTC), 1234),
+        "started": alerts.started_card(JEFF, hour, 1234),
         "stopped": alerts.stopped_card(JEFF, [datetime(2026, 9, 28, 6, tzinfo=UTC)], "2026-09-28T05:00:00+00:00"),
+        "stopped-usage": alerts.stopped_card(
+            JEFF, [datetime(2026, 9, 28, 6, tzinfo=UTC)], "2026-09-28T05:00:00+00:00", usage,
+        ),
         "quota": alerts.quota_card(JEFF, 50, 50.3, 503.2, CUMULATIVE_OK, JEFF.start_date, []),
         "test": alerts.ping_card(JEFF.account),
+        "mail-on": alerts.mail_on_card(mailbox),
+        "mail-off": alerts.mail_off_card(mailbox),
     }
 
 
@@ -58,7 +74,7 @@ def distance(a, b) -> float:
 
 
 class TestRender:
-    @pytest.mark.parametrize("kind", ["daily", "started", "stopped", "quota", "test"])
+    @pytest.mark.parametrize("kind", ["daily", "started", "stopped", "stopped-usage", "quota", "test", "mail-on", "mail-off"])
     def test_every_card_is_a_png_telegram_accepts(self, kind):
         """Telegram 要求宽 + 高 ≤ 10000、长宽比 ≤ 20；宽 1200 在普通画质的 1280 以内，不会再被压。"""
         image = picture(every_card()[kind])
@@ -68,7 +84,9 @@ class TestRender:
         assert 400 < height < 3000
         assert width + height <= 10000 and height / width <= 20
 
-    @pytest.mark.parametrize("kind, tone", [("started", "ok"), ("stopped", "danger"), ("quota", "warn")])
+    @pytest.mark.parametrize("kind, tone", [
+        ("started", "ok"), ("stopped", "danger"), ("quota", "warn"), ("mail-on", "ok"), ("mail-off", "gray"),
+    ])
     def test_the_border_takes_the_card_colour(self, kind, tone):
         image = picture(every_card()[kind]).convert("RGB")
         x = round((cards.MARGIN + 0.75) * cards.OUTPUT_SCALE)          # 左边框的正中
@@ -146,6 +164,22 @@ class TestCardText:
         ):
             assert piece in text
         assert "<code>" not in text              # caption 按 Telegram 显示出来的样子
+
+
+class TestDetailsTitle:
+    def test_a_title_makes_the_panel_taller_and_is_in_the_text(self):
+        rows = [cards.Row("调用次数", "1 次")]
+        plain = cards.Card(kind="t", tone="ok", icon="check", title="t", badge="B", subtitle="s", caption="c",
+                           blocks=[cards.Details(rows)])
+        titled = cards.Card(kind="t", tone="ok", icon="check", title="t", badge="B", subtitle="s", caption="c",
+                            blocks=[cards.Details(rows, title="上一次有调用的那一小时")])
+        assert picture(titled).height - picture(plain).height == cards.Details.TITLE_H * cards.OUTPUT_SCALE
+        assert "上一次有调用的那一小时" in titled.text()
+
+    def test_mail_cards_mask_the_address(self):
+        for kind in ("mail-on", "mail-off"):
+            text = every_card()[kind].text()
+            assert "r***@example.com" in text and "root@example.com" not in text
 
 
 class TestWrap:

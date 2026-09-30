@@ -4,10 +4,14 @@ AK/SK 只在内存里传给 boto3：dataclass 的 repr 里被屏蔽，也不会�
 密码（MAIL_PASSWORD）同样处理，只交给 IMAP 登录用。
 文件按 mtime+size 缓存，改完 Excel 刷新页面就能生效，不用重启服务。
 
-写入（账号管理页用）走 create_account / update_account / set_enabled 和两个开关入口，
-它们共用同一条流水线：加锁 -> 校验 -> 备份 -> 临时文件原子替换 -> 清缓存 -> 记审计。
-删除是软删：只把 ENABLED 列改成 FALSE，行本身留着。这样行号不会移动，
-account.key（"账号#行号"）和各处按它建的缓存键就都还稳。
+写入（账号管理页用）走 create_account / update_account / set_enabled / delete_account
+和两个开关入口，它们共用同一条流水线：加锁 -> 校验 -> 备份 -> 临时文件原子替换 ->
+清缓存 -> 记审计。**只有新增和修改会先备份**：开关、停用 / 恢复、删除都不备份，
+免得点几下开关就把有用的备份挤出那 20 份。
+
+停用是软删：只把 ENABLED 列改成 FALSE，行本身留着。删除是把整行清空（凭证一起），
+但也不删行。两种都让行号不会移动，account.key（"账号#行号"）和各处按它建的缓存键
+就都还稳。
 """
 
 from __future__ import annotations
@@ -418,11 +422,12 @@ def load_accounts(force: bool = False, include_disabled: bool = False) -> list[A
 
 
 # ==================================================================== 写入
-# 账号管理页的三个入口都从这里走。设计约束有三条：
+# 账号管理页的几个入口都从这里走。设计约束有三条：
 #   1. AK/SK 只在新建时写一次，之后任何编辑都不碰这两列（要换凭证就停用重建）；
-#   2. 删除是软删，只改 ENABLED 列，行号不动——account.key 里带行号，
-#      各处的缓存键也带，真删行会让下面所有账号的 key 集体位移；
-#   3. 写盘一律「先备份、再临时文件、最后 os.replace」，中途崩了不会留下半个文件。
+#   2. 行号永远不动——account.key 里带行号，各处的缓存键也带，真删行会让下面所有
+#      账号的 key 集体位移。停用只改 ENABLED 列；删除是把整行清空，行留在原处；
+#   3. 写盘一律「临时文件、再 os.replace」，中途崩了不会留下半个文件。新增和修改
+#      在这之前先备份一份；开关、停用 / 恢复、删除不备份。
 
 LEDGER_MODE = 0o640  # 和 DEPLOY.md 里 chmod 640 的约定一致
 BACKUP_DIR_NAME = "ledger-backups"
@@ -793,11 +798,12 @@ def _locate(sheet, index: dict[str, int], key: str) -> int:
     return row
 
 
-def _mutate(action, actor: str) -> str:
+def _mutate(action, actor: str, *, backup: bool) -> str:
     """写入流水线：加锁 -> 打开 -> action -> 备份 -> 原子替换 -> 清缓存 -> 审计。
 
     action(sheet, index) 返回一句审计描述；返回空表示「没有实际变化」，这时
-    既不备份也不写盘。
+    既不备份也不写盘。backup 只有新增和修改传 True：点开关、停用 / 恢复、删除都不
+    备份——ledger-backups/ 只留最近 20 份，点几下开关就会把改字段之前的那几份挤掉。
     """
     path = config.EXCEL_PATH
     if not path.is_file():
@@ -821,7 +827,8 @@ def _mutate(action, actor: str) -> str:
                 )
             note = action(sheet, index)
             if note:
-                _backup(path)
+                if backup:
+                    _backup(path)
                 _atomic_save(workbook, path)
         finally:
             workbook.close()
@@ -919,7 +926,7 @@ def create_account(data: dict, actor: str = "") -> str:
         mail = f"，邮件告警已打开（{data['mail_address']}）" if mail_on else ""
         return f"新增账号 {data['account']}（{data['partner']}），额度 {data['budget']:g}{when}{tg}{mail}"
 
-    return _mutate(action, actor)
+    return _mutate(action, actor, backup=True)
 
 
 def update_account(key: str, data: dict, actor: str = "") -> str:
@@ -950,7 +957,7 @@ def update_account(key: str, data: dict, actor: str = "") -> str:
             return ""
         return f"修改账号 {data['account']}：" + "；".join(changes)
 
-    return _mutate(action, actor)
+    return _mutate(action, actor, backup=True)
 
 
 def set_tg_enabled(key: str, enabled: bool, actor: str = "") -> str:
@@ -972,7 +979,7 @@ def set_tg_enabled(key: str, enabled: bool, actor: str = "") -> str:
         sheet.cell(row=row, column=column).value = bool(enabled)
         return f"{'开启' if enabled else '关闭'}账号 {key.rpartition('#')[0]} 的 TG 告警"
 
-    return _mutate(action, actor)
+    return _mutate(action, actor, backup=False)
 
 
 def set_mail_enabled(key: str, enabled: bool, actor: str = "") -> str:
@@ -999,7 +1006,7 @@ def set_mail_enabled(key: str, enabled: bool, actor: str = "") -> str:
         sheet.cell(row=row, column=column).value = bool(enabled)
         return f"{'开启' if enabled else '关闭'}账号 {key.rpartition('#')[0]} 的邮件告警"
 
-    return _mutate(action, actor)
+    return _mutate(action, actor, backup=False)
 
 
 def set_enabled(key: str, enabled: bool, actor: str = "") -> str:
@@ -1013,4 +1020,24 @@ def set_enabled(key: str, enabled: bool, actor: str = "") -> str:
         sheet.cell(row=row, column=column, value=bool(enabled))
         return f"{'恢复' if enabled else '停用'}账号 {key.rpartition('#')[0]}"
 
-    return _mutate(action, actor)
+    return _mutate(action, actor, backup=False)
+
+
+def delete_account(key: str, actor: str = "") -> str:
+    """真删除：把这一行整行清空——额度、比率、TAG、AK/SK、TG 群、告警邮箱全都清掉。
+
+    和停用不同，这是连凭证一起彻底去掉，页面上确认时要重新输一遍登录密码。
+    但**不删行**：删行会让下面所有账号的行号上移，account.key 和各处的缓存键跟着错位
+    （见模块说明）。清空的行读取时当空行跳过；以后新增账号追加在最后一个非空行后面，
+    这一行就空着留在原处。按约定删除不备份（只有新增和修改才备份）。
+    """
+
+    def action(sheet, index) -> str:
+        row = _locate(sheet, index, key)
+        partner = _clean(sheet.cell(row=row, column=index["partner"]).value) or NO_PARTNER
+        for column in range(1, sheet.max_column + 1):
+            # 写 .value = None 才真的清空（cell(..., value=None) 会被 openpyxl 当成没给值）
+            sheet.cell(row=row, column=column).value = None
+        return f"删除账号 {key.rpartition('#')[0]}（{partner}）"
+
+    return _mutate(action, actor, backup=False)

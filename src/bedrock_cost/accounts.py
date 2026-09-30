@@ -6,8 +6,9 @@
 要换凭证的做法是「停用旧账号 + 新建一条」——AWS 换 AK 本来就是签发新的、
 作废旧的，硬做原地编辑反而容易出现半新半旧的状态。
 
-删除是软删（ENABLED 列置 FALSE）。停用的账号从四个查询页彻底消失，但行还在，
-随时可以恢复，历史记录和凭证也都留着。
+停用是软删（ENABLED 列置 FALSE）。停用的账号从四个查询页彻底消失，但行还在，
+随时可以恢复，历史记录和凭证也都留着。删除是把整行清空、不能恢复，所以要重新输一遍
+登录密码确认（输错和登录页共用同一个失败锁定）。
 
 新增、停用、恢复账号之后，按 TG 开关给这个账号的群发一张通知卡片（_notify →
 alerts.notify_account）。台账先写好，通知发不出去只另起一条警告，不回滚改动。
@@ -18,12 +19,21 @@ alerts.notify_account）。台账先写好，通知发不出去只另起一条�
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, session, url_for
 
 from . import alerts, config, excel_source, mail_inbox, mail_rules, telegram
-from .auth import csrf_protect, login_required
+from .auth import (
+    clear_failures,
+    client_ip,
+    csrf_protect,
+    lockout_remaining,
+    login_required,
+    password_matches,
+    record_failure,
+)
 from .excel_source import Account, ExcelSourceError, load_accounts
 from .views import page_meta
 
@@ -89,6 +99,9 @@ def _render(**extra):
         # 某一行编辑失败时的回填值
         "edit_key": "",
         "edit_form": {},
+        # 删除时密码没对上：重新打开那一行的删除确认窗，写明原因
+        "delete_key": "",
+        "delete_error": "",
     }
     context.update(extra)
     # 重新打开的弹窗停在哪一页：有错就停在第一条错误所在的那页（有错的页签都标红点），
@@ -158,10 +171,20 @@ def update():
     except ExcelSourceError as exc:
         return _render(errors=[str(exc)], edit_key=key, edit_form=_form_values(request.form)), 409
 
-    if note:
-        flash(f"{note}。", "ok")
-    else:
+    if not note:
         flash("没有任何字段发生变化，台账未改动。", "warn")
+        return redirect(url_for("accounts.index"))
+    told, problems = "", []
+    if current.mail_enabled and not data.get("mail_address"):
+        # 清空了告警邮箱，邮件告警跟着关了（见 update_account）：和在表格里点关一样通知群。
+        # 卡片上要写被关掉的是哪个邮箱，所以用改之前的地址；发不发、发给谁按改之后的 TG 设置
+        after = next((a for a in _load_all()[0] if a.key == key), None)
+        if after is not None:
+            told, problems = _announce(
+                "mail_off", replace(after, mail_address=current.mail_address, mail_provider=current.mail_provider)
+            )
+    flash(f"{note}。{told}", "ok")
+    _warn(problems)
     return redirect(url_for("accounts.index"))
 
 
@@ -252,7 +275,13 @@ def mail_toggle():
     except ExcelSourceError as exc:
         flash(str(exc), "error")
         return redirect(url_for("accounts.index"))
-    flash(f"{note}。" if note else "本来就是这样，没有改动。", "ok" if note else "warn")
+    if not note:
+        flash("本来就是这样，没有改动。", "warn")
+        return redirect(url_for("accounts.index"))
+    # 开 / 关邮件告警都给这个账号的群发一张卡片（跟 TG 开关走，见 alerts.notify_account）
+    told, problems = _notify("mail_on" if enabled else "mail_off", lambda a: a.key == key)
+    flash(f"{note}。{told}", "ok")
+    _warn(problems)
     return redirect(url_for("accounts.index"))
 
 
@@ -340,8 +369,44 @@ def toggle():
     return redirect(url_for("accounts.index"))
 
 
+@bp.route("/delete", methods=["POST"])
+@login_required
+@csrf_protect
+def delete():
+    """删除账号：整行清空、不能恢复，所以要重新输一遍登录密码。
+
+    密码输错按登录失败计数，和登录页共用同一个锁定：拿到一个没退出的会话，也不能靠这里
+    一遍遍试出密码。密码本身不进日志，也不回填。
+    """
+    key = (request.form.get("key") or "").strip()
+    existing, fatal = _load_all()
+    if fatal:
+        flash(fatal, "error")
+        return redirect(url_for("accounts.index"))
+    if not any(a.key == key for a in existing):
+        flash("这个账号已经不在台账里了，页面可能已过期。已重新加载。", "error")
+        return redirect(url_for("accounts.index"))
+
+    ip = client_ip()
+    remaining = lockout_remaining(ip)
+    if remaining:
+        return _render(delete_key=key, delete_error=f"密码输错太多次了，请在 {remaining} 秒后再试。"), 429
+    if not password_matches(request.form.get("password") or ""):
+        record_failure(ip)
+        return _render(delete_key=key, delete_error="登录密码不对，账号没有删除。"), 403
+    clear_failures(ip)
+
+    try:
+        note = excel_source.delete_account(key, actor=_actor())
+    except ExcelSourceError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("accounts.index"))
+    flash(f"{note}。", "ok")
+    return redirect(url_for("accounts.index"))
+
+
 def _notify(event: str, match) -> tuple[str, list[str]]:
-    """账号刚新增 / 停用 / 恢复：按 TG 开关给它的群发一张通知卡片。
+    """账号刚新增 / 停用 / 恢复、邮件告警刚开 / 关：按 TG 开关给它的群发一张通知卡片。
 
     返回（追加在提示条后面的一句话, 发送时的问题）。台账在这之前已经写好了，
     通知发不出去不影响改动本身，只另起一条警告说清楚。
@@ -350,6 +415,10 @@ def _notify(event: str, match) -> tuple[str, list[str]]:
     account = next((a for a in accounts if match(a)), None)
     if account is None:
         return "", []
+    return _announce(event, account)
+
+
+def _announce(event: str, account: Account) -> tuple[str, list[str]]:
     summary = alerts.notify_account(event, account, log=current_app.logger.warning)
     if summary is None:          # 这个账号没开 TG 告警，或者没填群
         return "", []

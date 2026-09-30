@@ -602,3 +602,104 @@ def test_拆分估算读不到价目表是错误(accounts, fake_cloudwatch, monk
     monkeypatch.setattr(cost_estimate, "load_prices", broken)
     split = cost_estimate.estimate_split(accounts[0], date(2026, 8, 14), date(2026, 8, 14))
     assert split.errors == ["价目表下不来"]
+
+
+# ================================================================== 告警用：一个小时里的用量
+class TestHourUsage:
+    """「用量中断」卡片用的那一小时：按分钟取，定位最后一次调用，token × 牌价估花费。"""
+
+    HOUR = datetime(2026, 9, 27, 5, tzinfo=timezone.utc)
+
+    @pytest.fixture
+    def minutes(self, monkeypatch, fake_prices):
+        """按 {区域: {ModelId: {指标: {第几分钟: 值}}}} 喂数据，并记下每次查询的参数。"""
+        state = {"regions": {}, "profiles": {}, "fail": set(), "queries": []}
+
+        class FakeClient:
+            def __init__(self, region):
+                self.region = region
+
+            def get_metric_data(self, **kwargs):
+                if self.region in state["fail"]:
+                    raise RuntimeError("ThrottlingException")
+                state["queries"].append(kwargs)
+                results = []
+                for query in kwargs["MetricDataQueries"]:
+                    stat = query["MetricStat"]
+                    model_id = stat["Metric"]["Dimensions"][0]["Value"]
+                    points = state["regions"][self.region].get(model_id, {}).get(stat["Metric"]["MetricName"], {})
+                    stamps = [kwargs["StartTime"] + timedelta(minutes=m) for m in sorted(points)]
+                    results.append({"Id": query["Id"], "Timestamps": stamps,
+                                    "Values": [points[m] for m in sorted(points)]})
+                return {"MetricDataResults": results}
+
+        monkeypatch.setattr(cost_estimate, "list_model_ids", lambda a, region: sorted(state["regions"].get(region, {})))
+        monkeypatch.setattr(cost_estimate, "resolve_profiles", lambda a, region: (state["profiles"].get(region, {}), True))
+        monkeypatch.setattr(cost_estimate, "_client", lambda a, s, region: FakeClient(region))
+        return state
+
+    @staticmethod
+    def account(**kw):
+        from bedrock_cost.excel_source import Account
+
+        base = dict(partner="P", account="111111111111", budget=0, tag_ratio=1.0, untag_ratio=1.0)
+        base.update(kw)
+        return Account(**base)
+
+    def test_sums_the_hour_and_finds_the_last_minute(self, minutes):
+        minutes["regions"] = {
+            "us-east-1": {"global.anthropic.claude-opus-5": {
+                "Invocations": {3: 10, 47: 2},
+                "InputTokenCount": {3: 1_000_000, 47: 200_000},
+                "OutputTokenCount": {3: 40_000},
+            }},
+            "us-west-2": {"global.anthropic.claude-opus-5": {"Invocations": {12: 5}, "InputTokenCount": {12: 300_000}}},
+        }
+        usage = cost_estimate.hour_usage(self.account(), self.HOUR)
+        assert usage.invocations == 17
+        assert usage.tokens == {"input": 1_500_000, "output": 40_000}
+        assert usage.last_call == self.HOUR + timedelta(minutes=47)
+        assert usage.errors == [] and usage.unpriced == []
+        # 全球跨区的 Opus 5：输入 $5/M、输出 $25/M；直连模型算无标签
+        assert usage.untag_raw == pytest.approx(1.5 * 5.0 + 0.04 * 25.0)
+        assert usage.tag_raw == 0
+
+    def test_asks_for_minutes_in_that_hour_only(self, minutes):
+        minutes["regions"] = {"us-east-1": {"global.anthropic.claude-opus-5": {"Invocations": {0: 1}}}}
+        cost_estimate.hour_usage(self.account(), self.HOUR + timedelta(minutes=30))   # 从整点算起
+        (query,) = minutes["queries"]
+        assert (query["StartTime"], query["EndTime"]) == (self.HOUR, self.HOUR + timedelta(hours=1))
+        assert {q["MetricStat"]["Period"] for q in query["MetricDataQueries"]} == {60}
+        assert {q["MetricStat"]["Metric"]["MetricName"] for q in query["MetricDataQueries"]} == {
+            "Invocations", *cost_estimate.TOKEN_METRICS,
+        }
+
+    def test_tagged_traffic_is_split_out_for_the_ratios(self, minutes):
+        info = profile("map-opus5", "anthropic.claude-opus-5", cross_region=True)
+        info = ProfileInfo(name=info.name, model=info.model, tag_value="migALPHA", model_arns=info.model_arns)
+        minutes["profiles"] = {"us-east-1": {"2kbsta0lwebx": info}}
+        minutes["regions"] = {"us-east-1": {"2kbsta0lwebx": {"Invocations": {5: 1}, "InputTokenCount": {5: 1_000_000}}}}
+        account = self.account(tag_spec="map-migrated=migALPHA", tag_ratio=1.0, untag_ratio=1.5)
+        usage = cost_estimate.hour_usage(account, self.HOUR)
+        assert usage.tag_raw == pytest.approx(5.0) and usage.untag_raw == 0
+        assert usage.marked(account) == pytest.approx(5.0)
+
+    def test_a_failing_region_is_reported_not_fatal(self, minutes):
+        minutes["regions"] = {
+            "us-east-1": {"global.anthropic.claude-opus-5": {"Invocations": {1: 3}}},
+            "us-west-2": {"global.anthropic.claude-opus-5": {"Invocations": {2: 4}}},
+        }
+        minutes["fail"] = {"us-west-2"}
+        usage = cost_estimate.hour_usage(self.account(), self.HOUR)
+        assert usage.invocations == 3
+        assert len(usage.errors) == 1 and usage.errors[0].startswith("us-west-2：")
+
+    def test_unpriced_models_are_named(self, minutes):
+        minutes["regions"] = {"us-east-1": {"anthropic.claude-mystery-9": {"InputTokenCount": {1: 1000}}}}
+        usage = cost_estimate.hour_usage(self.account(), self.HOUR)
+        assert usage.unpriced == ["anthropic.claude-mystery-9"]
+        assert usage.tokens == {"input": 1000} and usage.untag_raw == 0
+
+    def test_no_traffic_means_no_data(self, minutes):
+        usage = cost_estimate.hour_usage(self.account(), self.HOUR)
+        assert not usage.has_data and usage.last_call is None
