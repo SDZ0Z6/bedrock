@@ -523,6 +523,108 @@ systemctl list-timers 'bedrock-alerts*' --no-pager
 > 一条「开始有用量」，而那其实是早就在用了。额度告警则会直接报当前已经到达的最高那一档
 > （比如已经 85% 就发一条「已用 80%」，不会连刷 50 / 80 两条）。
 
+### 7.4 邮件告警（可选）
+
+后台每 5 分钟收一次各账号的告警邮箱，AWS 发来的滥用报告、疑似被盗用、暂停 / 关闭、工单、
+root 安全通知发成 TG 卡片（规则见 README《邮件告警》）。发 TG 用的就是 7.3 的 bot，**先把
+7.3 配好**。
+
+**① 邮箱那边先准备好**
+
+- **阿里邮箱**：管理员在管理后台开放「三方客户端登录」，并给这个账号开 IMAP；然后在网页
+  邮箱里「设置 → 账户与安全 → 账户安全 → 三方客户端安全密码 → 生成新密码」。这个 16 位
+  密码只显示一次，直接填进账号管理页，**不要经过聊天工具**。它可以单独删掉作废，不影响
+  网页登录。
+- **其他平台**：QQ / 163 要授权码，Gmail 要应用专用密码，腾讯企业邮开了安全登录时要客户端
+  专用密码。网页登录密码一般都登不上。
+- 邮箱设了「登录 IP 白名单」之类的访问策略的，把这台服务器的公网 IP 加进去。
+
+**② 服务器要能连出去**
+
+IMAP 走 993 端口。安全组的出方向默认全部放行；改过的话放行 TCP 993。在服务器上试一下
+（阿里邮箱国际站新加坡为例）：
+
+```bash
+timeout 5 bash -c '</dev/tcp/imap.sg.aliyun.com/993' && echo ok
+```
+
+**③（可选）固定群**
+
+root 安全类的邮件先发这里；邮件里的账号不在台账里、或那个账号没开 TG 告警时也发这里。
+不配就只发账号自己的群。bot 要先拉进这个群：
+
+```bash
+echo 'MAIL_ALERT_CHAT_IDS=-100xxxxxxxxxx' >> /opt/bedrock/.env && systemctl restart bedrock
+```
+
+**④ 在账号管理页填邮箱，点「测试连接」**
+
+修改弹窗的「告警邮箱」里选平台、填地址和密码，点「测试连接」：连上了会说收件箱里有几封、
+最近 50 封里有几封符合告警规则。保存后表格的「邮件告警」开关就是开的。再 dry-run 看一眼
+规则在真实邮箱上认出了什么：
+
+```bash
+cd /opt/bedrock && sudo -u bedrock .venv/bin/python -m bedrock_cost mail check --dry-run --recent 30 --save /tmp/mail-cards
+```
+
+不发、不改收信进度，要发的卡片存成 PNG，照 7.3 ④ 的 scp 拿下来看。
+
+**⑤ service + timer**
+
+`/etc/systemd/system/bedrock-mail.service`：
+
+```ini
+[Unit]
+Description=Bedrock 成本监控 · 邮件告警
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=bedrock
+Group=bedrock
+WorkingDirectory=/opt/bedrock
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/bedrock/.venv/bin/python -m bedrock_cost mail check
+# 每个邮箱登录一次，一般几秒；邮箱服务器慢的时候留足余量，但别超过 5 分钟一轮
+TimeoutStartSec=240
+
+# 和 bedrock.service 同一套加固。mail-state.json 写在 /opt/bedrock 下
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/bedrock
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+```
+
+`/etc/systemd/system/bedrock-mail.timer`：
+
+```ini
+[Unit]
+Description=每 5 分钟收一次告警邮箱
+
+[Timer]
+OnCalendar=*:0/5
+# 宕机期间错过的轮次不用补：下一轮会把这段时间新到的邮件一起收了
+Persistent=false
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+systemctl daemon-reload && systemctl enable --now bedrock-mail.timer
+```
+
+```bash
+systemctl list-timers bedrock-mail --no-pager
+```
+
+> **第一次跑只记下每个邮箱收到第几封，不补发旧邮件**：打开之后新到的才发。
+
 ---
 
 ## 8. Nginx + HTTPS + 加固
@@ -690,6 +792,18 @@ systemctl list-timers 'bedrock-alerts*' --no-pager
 systemctl start bedrock-alerts-daily.service
 ```
 
+### 看邮件告警的日志
+
+```bash
+journalctl -u bedrock-mail -n 50 --no-pager
+```
+
+登录失败、发不出去都会记在这里，并以非零退出。只想看某个账号的邮箱能不能登录（只读）：
+
+```bash
+cd /opt/bedrock && sudo -u bedrock .venv/bin/python -m bedrock_cost mail test --account <账号 ID>
+```
+
 ### 重启 / 停止
 
 ```bash
@@ -763,7 +877,8 @@ chown bedrock:bedrock /opt/bedrock/cred.xlsx && chmod 640 /opt/bedrock/cred.xlsx
 
 要备的只有两个文件，都不在 git 里（`alert-state.json` 不用备：丢了最多重新建一次
 用量基线、把已经到达的额度档位再报一遍；`last-known-costs.json` 也不用备：丢了最多是下次
-查询失败时没有上一次的数可顶）：
+查询失败时没有上一次的数可顶；`mail-state.json` 也不用备：丢了最多是每个邮箱重新建一次
+基线）。告警邮箱的密码在 `cred.xlsx` 里，跟着它一起备：
 
 ```bash
 scp -i C:\path\to\your-key.pem root@<ECS_IP>:/opt/bedrock/.env ./backup-env-$(date +%F)
@@ -790,6 +905,8 @@ scp -i C:\path\to\your-key.pem root@<ECS_IP>:/opt/bedrock/cred.xlsx ./backup-cre
 | `git pull` 报 local changes 冲突 | 服务器上不该改代码。`git checkout -- .` 丢弃本地改动后再拉（不会碰 `.env` / `cred.xlsx`） |
 | `git clone` 提示目录已存在 | `/opt/bedrock` 已经有内容。建用户时要加 `--no-create-home`，见 4.2 |
 | `git pull` 报 detected dubious ownership | 代码归 `bedrock` 而你用 root 跑 git。执行 `git config --global --add safe.directory /opt/bedrock`，见 5.3 |
+| 邮件告警报「登录被拒」 | 密码填成了网页登录密码（阿里邮箱要三方客户端安全密码）；或者邮箱后台没开 IMAP / 三方客户端登录，见 7.4 ① |
+| 邮件告警报「连接超时」 | 安全组出方向没放行 993；或者平台选错了区域（国际站新加坡、香港、德国、美国是不同的服务器），见 7.4 ② |
 
 ---
 

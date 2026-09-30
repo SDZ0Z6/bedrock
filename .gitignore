@@ -11,6 +11,8 @@ ledger-audit.log
 alert-state.json
 # 每个账号最近一次查询成功的累计消费（查询失败时顶上，见 last_known.py）
 last-known-costs.json
+# 邮件告警的收信进度和去重记录（见 mail_alerts.py）
+mail-state.json
 
 # Python
 __pycache__/

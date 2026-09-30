@@ -107,6 +107,26 @@ def _scratch_last_known(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "LAST_KNOWN_COSTS_PATH", tmp_path / "last-known-costs.json")
 
 
+@pytest.fixture(autouse=True)
+def _no_mail_servers(request, tmp_path, monkeypatch):
+    """邮件告警：不许真的连邮箱服务器，收信状态写到临时目录，固定群当没配。
+
+    要连的用例自己给 Session / probe 传 connect=（见 test_mail 的 FakeIMAP），或者再替换一次
+    mail_inbox._open。
+    """
+    from bedrock_cost import mail_inbox
+
+    monkeypatch.setattr(config, "MAIL_STATE_PATH", tmp_path / "mail-state.json")
+    monkeypatch.setattr(config, "MAIL_ALERT_CHAT_IDS", ())
+    if request.node.get_closest_marker("integration"):
+        return
+
+    def refuse(host, port, timeout):
+        raise AssertionError(f"测试想连邮箱服务器：{host}:{port}")
+
+    monkeypatch.setattr(mail_inbox, "_open", refuse)
+
+
 @pytest.fixture
 def ledger(tmp_path, monkeypatch):
     """临时台账，并让 config 指向它。"""

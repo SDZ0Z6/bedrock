@@ -1,9 +1,10 @@
 """cred.xlsx 账号台账的读与写。
 
-AK/SK 只在内存里传给 boto3：dataclass 的 repr 里被屏蔽，也不会进模板或日志。
+AK/SK 只在内存里传给 boto3：dataclass 的 repr 里被屏蔽，也不会进模板或日志。告警邮箱的
+密码（MAIL_PASSWORD）同样处理，只交给 IMAP 登录用。
 文件按 mtime+size 缓存，改完 Excel 刷新页面就能生效，不用重启服务。
 
-写入（账号管理页用）走 create_account / update_account / set_enabled 三个入口，
+写入（账号管理页用）走 create_account / update_account / set_enabled 和两个开关入口，
 它们共用同一条流水线：加锁 -> 校验 -> 备份 -> 临时文件原子替换 -> 清缓存 -> 记审计。
 删除是软删：只把 ENABLED 列改成 FALSE，行本身留着。这样行号不会移动，
 account.key（"账号#行号"）和各处按它建的缓存键就都还稳。
@@ -22,7 +23,7 @@ from pathlib import Path
 
 import openpyxl
 
-from . import config
+from . import config, mail_inbox
 
 # Excel 表头 -> 内部字段名。表头大小写、前后空格、列顺序都不敏感。
 REQUIRED_COLUMNS = {
@@ -46,12 +47,24 @@ REQUIRED_COLUMNS = {
 #              点（见 set_tg_enabled），修改弹窗不碰它
 #   TG_CHAT_IDS 告警发到哪些群。一格里放多个，逗号隔开（-100 开头的一串数字，
 #              或 @频道名）。页面上是一行一个，存的时候拼成一格
+#   MAIL_ENABLED  要不要收这个账号的告警邮箱（见 mail_alerts）。和 TG_ENABLED 一样空着算关，
+#              新增时填了邮箱就打开，之后只在表格里点（set_mail_enabled）
+#   MAIL_PROVIDER 邮箱平台，mail_inbox.PROVIDERS 里的 key（aliyun-sg、exmail……）
+#   MAIL_ADDRESS  邮箱地址，一般是这个 AWS 账号的 root 邮箱
+#   MAIL_PASSWORD 客户端登录密码（阿里邮箱是三方客户端安全密码）。和 SK 一样只进不出：
+#              页面上不回显，审计日志里只记「已更新」
+#   MAIL_SERVER   只有 MAIL_PROVIDER=custom 时才用：自己填的 IMAP 服务器 host:port
 OPTIONAL_COLUMNS = {
     "TAG": "tag_spec",
     "ENABLED": "enabled",
     "START_DATE": "start_date",
     "TG_ENABLED": "tg_enabled",
     "TG_CHAT_IDS": "tg_chat_ids",
+    "MAIL_ENABLED": "mail_enabled",
+    "MAIL_PROVIDER": "mail_provider",
+    "MAIL_ADDRESS": "mail_address",
+    "MAIL_PASSWORD": "mail_password",
+    "MAIL_SERVER": "mail_server",
 }
 
 COLUMNS = {**REQUIRED_COLUMNS, **OPTIONAL_COLUMNS}
@@ -109,11 +122,40 @@ class Account:
     # Telegram 告警：开关 + 发到哪些群。开关默认关，必须主动开
     tg_enabled: bool = False
     tg_chat_ids: tuple[str, ...] = ()
+    # 告警邮箱：开关 + 平台 / 地址 / 密码。开关同样默认关
+    mail_enabled: bool = False
+    mail_provider: str = ""
+    mail_address: str = ""
+    mail_password: str = field(default="", repr=False)
+    mail_server: str = ""
 
     @property
     def tg_active(self) -> bool:
         """真的会发消息：开关开着、至少填了一个群、账号本身也在启用。"""
         return self.enabled and self.tg_enabled and bool(self.tg_chat_ids)
+
+    @property
+    def mail_box(self) -> mail_inbox.Mailbox | None:
+        """要登录的邮箱。平台、地址、密码缺一样（或者自定义服务器认不出）就是 None。"""
+        return mail_inbox.mailbox_for(self.mail_provider, self.mail_address, self.mail_password, self.mail_server)
+
+    @property
+    def mail_configured(self) -> bool:
+        return self.mail_box is not None
+
+    @property
+    def mail_active(self) -> bool:
+        """真的会去收信：开关开着、邮箱填全了、账号本身也在启用。"""
+        return self.enabled and self.mail_enabled and self.mail_configured
+
+    @property
+    def mail_provider_label(self) -> str:
+        return mail_inbox.provider_label(self.mail_provider)
+
+    @property
+    def mail_password_saved(self) -> bool:
+        """页面上只能知道「存没存过」，密码本身永远不进模板。"""
+        return bool(self.mail_password)
 
     @property
     def ak_masked(self) -> str:
@@ -331,6 +373,11 @@ def _read_workbook(path: Path) -> list[Account]:
                     start_date=_to_date(cell(row, "start_date")),
                     tg_enabled=_to_flag(cell(row, "tg_enabled")),
                     tg_chat_ids=_split_chat_ids(cell(row, "tg_chat_ids")),
+                    mail_enabled=_to_flag(cell(row, "mail_enabled")),
+                    mail_provider=_clean(cell(row, "mail_provider")),
+                    mail_address=_clean(cell(row, "mail_address")),
+                    mail_password=_clean(cell(row, "mail_password")),
+                    mail_server=_clean(cell(row, "mail_server")),
                 )
             )
         return accounts
@@ -386,11 +433,13 @@ AUDIT_NAME = "ledger-audit.log"
 INTERNAL_TO_EXCEL = {internal: excel for excel, internal in COLUMNS.items()}
 
 # 可编辑字段。凭证不在其中，这就是「编辑不能改 AK/SK」的唯一定义处。
-# TG_ENABLED 也不在：开关只在表格里点（set_tg_enabled），弹窗里没有它。放进来的话，
-# 弹窗每保存一次，表单里「没有这个字段」就会被当成关，悄悄把告警关掉。
+# TG_ENABLED / MAIL_ENABLED 也不在：开关只在表格里点（set_tg_enabled / set_mail_enabled），
+# 弹窗里没有它们。放进来的话，弹窗每保存一次，表单里「没有这个字段」就会被当成关，
+# 悄悄把告警关掉。
+# MAIL_PASSWORD 也不在：它是「填了才换、留空不动」，单独写（见 _write_mail_password）。
 EDITABLE = (
     "partner", "account", "budget", "tag_ratio", "untag_ratio", "tag_spec", "start_date",
-    "tg_chat_ids",
+    "tg_chat_ids", "mail_provider", "mail_address", "mail_server",
 )
 # 新建时还要额外收凭证
 CREATE_ONLY = ("ak", "sk")
@@ -407,9 +456,14 @@ _NORMALIZE = {
     "tag_spec": _clean,
     "start_date": _to_date,
     "tg_chat_ids": _canon_chat_ids,
+    "mail_provider": _clean,
+    "mail_address": _clean,
+    "mail_server": _clean,
 }
 
 _ACCOUNT_ID = re.compile(r"^\d{12}$")
+_EMAIL = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
+MAX_MAIL_PASSWORD = 256
 # 和 telegram.CHAT_ID_PATTERN 同一个规则。不直接 import：台账模块不该依赖发消息的模块
 _CHAT_ID = re.compile(r"^(-?\d{5,20}|@[A-Za-z][A-Za-z0-9_]{4,31})$")
 MAX_TG_CHATS = 10
@@ -420,6 +474,19 @@ _write_lock = threading.Lock()
 
 class LedgerConflict(ExcelSourceError):
     """要改的那一行已经不是页面上看到的账号了（文件被别的途径换过）。"""
+
+
+class FormError(str):
+    """一条校验错误。它本身就是那句话（页面照常显示、测试照常比对）；page 说它属于弹窗的
+    哪一页：basic（基础信息）/ mail（告警邮箱）/ tg（Telegram 告警）。校验没过时弹窗停在
+    第一条错误所在的那一页，有错的页签上标红点。"""
+
+    page: str
+
+    def __new__(cls, text: str, page: str = "basic"):
+        error = super().__new__(cls, text)
+        error.page = page
+        return error
 
 
 # ---------------------------------------------------------------- 表单校验
@@ -454,17 +521,22 @@ def form_chat_ids(form) -> list[str]:
     return list(seen)
 
 
-def validate(form: dict, others: list[Account], creating: bool) -> tuple[dict, list[str]]:
+def validate(
+    form: dict, others: list[Account], creating: bool, current: Account | None = None
+) -> tuple[dict, list[str]]:
     """把表单文本校验成可以写进台账的一行。
 
     返回 (清洗后的字段, 错误列表)。错误一次收齐再返回——填错三个字段却只被
-    告知一个，用户要来回提交三次。
+    告知一个，用户要来回提交三次。告警邮箱和 TG 群的错误是 FormError，带着它属于弹窗的
+    哪一页；其余的是普通字符串，都在「基础信息」那页。
 
     others 是「除自己以外的全部账号」，含已停用的：停用不等于账号 ID 可以被
-    别人重用，否则恢复的时候就撞车了。
+    别人重用，否则恢复的时候就撞车了。current 是修改前的这个账号（新建时没有），
+    用来判断邮箱密码能不能留空不改。
     """
     errors: list[str] = []
     data = {name: _clean(form.get(name)) for name in (*EDITABLE, *CREATE_ONLY)}
+    data["mail_password"] = _clean(form.get("mail_password"))
 
     if not data["partner"]:
         errors.append("上游不能为空。")
@@ -519,12 +591,15 @@ def validate(form: dict, others: list[Account], creating: bool) -> tuple[dict, l
     data["tg_chat_ids"] = ",".join(chats)
     bad = [chat for chat in chats if not _CHAT_ID.match(chat)]
     if bad:
-        errors.append(
+        errors.append(FormError(
             f"群组 ID「{'」「'.join(bad)}」格式不对：群组是一串负数（超级群组以 -100 开头），"
-            "频道可以写 @频道名。"
-        )
+            "频道可以写 @频道名。",
+            "tg",
+        ))
     elif len(chats) > MAX_TG_CHATS:
-        errors.append(f"一个账号最多 {MAX_TG_CHATS} 个群，现在填了 {len(chats)} 个。")
+        errors.append(FormError(f"一个账号最多 {MAX_TG_CHATS} 个群，现在填了 {len(chats)} 个。", "tg"))
+
+    errors.extend(_validate_mail(data, creating, current))
 
     if creating:
         # 新建必须给凭证：没有 AK/SK 的账号在所有查询页都是查不出数的空壳
@@ -541,6 +616,47 @@ def validate(form: dict, others: list[Account], creating: bool) -> tuple[dict, l
         data.pop("sk", None)
 
     return data, errors
+
+
+def _validate_mail(data: dict, creating: bool, current: Account | None) -> list[FormError]:
+    """告警邮箱：可选。填了地址就要平台和密码，自定义平台还要服务器。
+
+    地址清空 = 不收这个邮箱了：平台、服务器、密码一起清掉（密码在 update_account 里清）。
+    修改时密码留空表示不改；但换了邮箱地址就必须重填——旧密码对新邮箱没有意义。
+    """
+    address = data["mail_address"]
+    if not address:
+        data["mail_provider"] = data["mail_server"] = data["mail_password"] = ""
+        return []
+
+    errors: list[str] = []
+    provider = data["mail_provider"] or mail_inbox.DEFAULT_PROVIDER
+    data["mail_provider"] = provider
+    if len(address) > 254 or not _EMAIL.match(address):
+        errors.append("告警邮箱的地址格式不对，应该形如 name@example.com。")
+    if provider not in mail_inbox.BY_KEY:
+        errors.append("不认识这个邮箱平台，请从下拉框里选。")
+    elif provider == mail_inbox.CUSTOM:
+        server = mail_inbox.parse_server(data["mail_server"])
+        if server is None:
+            errors.append("选了「其他平台」就要填 IMAP 服务器，形如 imap.example.com:993。")
+        else:
+            data["mail_server"] = f"{server[0]}:{server[1]}"
+    else:
+        data["mail_server"] = ""   # 预设平台的服务器地址写在代码里，台账里不存
+
+    password = data["mail_password"]
+    if password:
+        if len(password) > MAX_MAIL_PASSWORD or any(c in password for c in "\r\n\t"):
+            errors.append(f"邮箱密码看起来不对：最多 {MAX_MAIL_PASSWORD} 个字符，不能有换行。")
+    elif creating or current is None:
+        hint = mail_inbox.BY_KEY[provider].password_hint if provider in mail_inbox.BY_KEY else ""
+        errors.append(f"填了告警邮箱就要填密码{f'（{hint}）' if hint else ''}。")
+    elif not current.mail_password:
+        errors.append("这个账号还没存过邮箱密码，要填上。")
+    elif address.lower() != current.mail_address.lower():
+        errors.append("换了邮箱地址，要重新填这个邮箱的密码。")
+    return [FormError(error, "mail") for error in errors]
 
 
 # ---------------------------------------------------------------- 落盘
@@ -747,6 +863,33 @@ def _write_editable(sheet, index: dict[str, int], row: int, data: dict) -> list[
     return changes
 
 
+def _put_text(cell, value: str | None) -> None:
+    """写一格文本。openpyxl 会把「=」开头的字符串当成公式存——密码可能就是「=」开头的。"""
+    cell.value = value or None
+    if value and value.startswith("="):
+        cell.data_type = "s"
+
+
+def _write_mail_password(sheet, index: dict[str, int], row: int, data: dict) -> list[str]:
+    """邮箱密码：填了新的才换，留空不动；邮箱地址清空时一起清掉。
+
+    审计日志里只说换没换，永远不写密码本身。
+    """
+    new = data.get("mail_password") or ""
+    if data.get("mail_address") and not new:
+        return []   # 留空 = 不修改
+    if "mail_password" not in index and not new:
+        return []   # 本来就没有这一列，也没什么可清的
+    cell = sheet.cell(row=row, column=_ensure_column(sheet, index, "mail_password"))
+    before = _clean(cell.value)
+    if before == new:
+        return []
+    _put_text(cell, new)
+    if not new:
+        return ["MAIL_PASSWORD 已清除"]
+    return ["MAIL_PASSWORD 已更新" if before else "MAIL_PASSWORD 已设置"]
+
+
 # ---------------------------------------------------------------- 三个入口
 def create_account(data: dict, actor: str = "") -> str:
     """在台账末尾追加一行。data 必须是 validate() 校验过的。"""
@@ -765,10 +908,16 @@ def create_account(data: dict, actor: str = "") -> str:
         # 却留着旧开关值的行
         chats = _split_chat_ids(data.get("tg_chat_ids"))
         sheet.cell(row=row, column=_ensure_column(sheet, index, "tg_enabled")).value = bool(chats)
+        # 邮件告警同理：填了邮箱（validate 保证填了地址就有密码）就打开，没填就是关
+        password = data.get("mail_password") if data.get("mail_address") else ""
+        _put_text(sheet.cell(row=row, column=_ensure_column(sheet, index, "mail_password")), password)
+        mail_on = bool(data.get("mail_address") and password)
+        sheet.cell(row=row, column=_ensure_column(sheet, index, "mail_enabled")).value = mail_on
         started = data.get("start_date")
         when = f"，启用日期 {started.isoformat()}" if started else "（未设启用日期）"
         tg = f"，TG 告警已打开（{len(chats)} 个群）" if chats else ""
-        return f"新增账号 {data['account']}（{data['partner']}），额度 {data['budget']:g}{when}{tg}"
+        mail = f"，邮件告警已打开（{data['mail_address']}）" if mail_on else ""
+        return f"新增账号 {data['account']}（{data['partner']}），额度 {data['budget']:g}{when}{tg}{mail}"
 
     return _mutate(action, actor)
 
@@ -783,6 +932,7 @@ def update_account(key: str, data: dict, actor: str = "") -> str:
     def action(sheet, index) -> str:
         row = _locate(sheet, index, key)
         changes = _write_editable(sheet, index, row, data)
+        changes += _write_mail_password(sheet, index, row, data)
         # 开关不归弹窗管，但群组 ID 全删光了开关还开着，就成了「开着却没处发」——
         # 顺手关掉。和表格里「没填群开不了」是同一条规矩
         if not data["tg_chat_ids"] and "tg_enabled" in index:
@@ -790,6 +940,12 @@ def update_account(key: str, data: dict, actor: str = "") -> str:
             if _to_flag(switch.value):
                 switch.value = False
                 changes.append("TG_ENABLED 开 → 关（群组 ID 全删了）")
+        # 邮箱地址删了：同理，邮件告警跟着关
+        if not data.get("mail_address") and "mail_enabled" in index:
+            switch = sheet.cell(row=row, column=index["mail_enabled"])
+            if _to_flag(switch.value):
+                switch.value = False
+                changes.append("MAIL_ENABLED 开 → 关（告警邮箱删了）")
         if not changes:
             return ""
         return f"修改账号 {data['account']}：" + "；".join(changes)
@@ -815,6 +971,33 @@ def set_tg_enabled(key: str, enabled: bool, actor: str = "") -> str:
             return ""
         sheet.cell(row=row, column=column).value = bool(enabled)
         return f"{'开启' if enabled else '关闭'}账号 {key.rpartition('#')[0]} 的 TG 告警"
+
+    return _mutate(action, actor)
+
+
+def set_mail_enabled(key: str, enabled: bool, actor: str = "") -> str:
+    """账号管理表格里的邮件开关：只翻 MAIL_ENABLED 这一格。
+
+    开的时候要求这一行的邮箱已经填全（平台、地址、密码）——和 TG 开关一样，在锁里当场读
+    文件判断，不信页面上看到的。
+    """
+
+    def action(sheet, index) -> str:
+        row = _locate(sheet, index, key)
+        if enabled:
+            def value(name: str) -> str:
+                return _clean(sheet.cell(row=row, column=index[name]).value) if name in index else ""
+
+            box = mail_inbox.mailbox_for(
+                value("mail_provider"), value("mail_address"), value("mail_password"), value("mail_server")
+            )
+            if box is None:
+                raise ExcelSourceError("这个账号还没有填好告警邮箱（平台、地址、密码），先点「修改」填上再开。")
+        column = _ensure_column(sheet, index, "mail_enabled")
+        if _to_flag(sheet.cell(row=row, column=column).value) == enabled:
+            return ""
+        sheet.cell(row=row, column=column).value = bool(enabled)
+        return f"{'开启' if enabled else '关闭'}账号 {key.rpartition('#')[0]} 的邮件告警"
 
     return _mutate(action, actor)
 
