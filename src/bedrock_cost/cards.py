@@ -373,23 +373,31 @@ class Row:
 
 @dataclass
 class Details:
-    """一块深色面板：顶上可选「账号 UID」+ 账号小块，下面一行行标签和值。"""
+    """一块深色面板：顶上可选一行灰色小标题、「账号 UID」+ 账号小块，下面一行行标签和值。"""
 
     rows: list[Row]
     uid: str = ""
     ruled: bool = False   # 行与行之间画分隔线（测试消息那种）
+    title: str = ""       # 面板顶上的灰色小标题（「上一次有调用的那一小时」）
+
+    TITLE_H = 30
 
     def strings(self) -> list[str]:
+        title = [self.title] if self.title else []
         head = ["账号 UID", self.uid] if self.uid else []
-        return [*head, *(s for row in self.rows for s in (row.label, row.value))]
+        return [*title, *head, *(s for row in self.rows for s in (row.label, row.value))]
 
     def layout(self, pen: _Pen, x: float, y: float, w: float, tone: Tone) -> float:
         pad = 18
         row_h = 50 if self.ruled else 38
         head = (56 + 16) if self.uid else 0
-        height = (14 if self.uid else 0) + head + row_h * len(self.rows) + (0 if self.ruled else 8)
+        title_h = self.TITLE_H if self.title else 0
+        height = title_h + (14 if self.uid else 0) + head + row_h * len(self.rows) + (0 if self.ruled else 8)
         pen.box((x, y, x + w, y + height), 12, fill=PANEL)
         top = y
+        if self.title:
+            pen.text(x + pad, y + 14 + 9, self.title, _font(13, 700), TEXT_2)
+            top += title_h
         if self.uid:
             top += 14
             Uid(self.uid, chip=CHIP_ON_PANEL).layout(pen, x + pad, top, w - pad * 2, tone)

@@ -274,9 +274,14 @@ def mask_key(key: str) -> str:
     return f"{key[:8]}…{key[-4:]}" if len(key) > 12 else key[:4] + "…"
 
 
+def mask_email(text: str) -> str:
+    """邮箱地址打码：只留第一个字母和域名（r***@example.com）。TG 群里可能有用账号的人，
+    root 邮箱不该让他们看到全貌。"""
+    return _EMAIL.sub(lambda m: f"{m.group(1)}***@{m.group(2)}", text or "")
+
+
 def _mask(text: str) -> str:
-    text = _KEY.sub(lambda m: mask_key(m.group(0)), text)
-    return _EMAIL.sub(lambda m: f"{m.group(1)}***@{m.group(2)}", text)
+    return mask_email(_KEY.sub(lambda m: mask_key(m.group(0)), text))
 
 
 def safe_link(url: str) -> bool:

@@ -509,3 +509,148 @@ def estimate_split(
 
     result.unpriced = sorted(unpriced)
     return result
+
+
+# --------------------------------------------------------------- 告警用：一个小时里的用量
+@dataclass
+class HourUsage:
+    """一个整点小时里、四个区合计的用量，给「用量中断」卡片用。
+
+    last_call 是这一小时里最后一个有调用的分钟（UTC）：Bedrock 的 Invocations 按分钟发点，
+    精确到分钟就是 CloudWatch 能给的最细了。花费是 token × 牌价，和 estimate_split 同一套
+    定价、同样按有无标签拆开，好套台账的比率（和额度告警同口径）。
+    """
+
+    start: datetime
+    invocations: float = 0.0
+    tokens: dict[str, float] = field(default_factory=dict)   # 口径 -> token 数
+    last_call: datetime | None = None
+    tag_raw: float = 0.0
+    untag_raw: float = 0.0
+    unpriced: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)          # 读不到的区；有的话上面的数偏低
+
+    @property
+    def end(self) -> datetime:
+        return self.start + timedelta(hours=1)
+
+    @property
+    def total_tokens(self) -> float:
+        return sum(self.tokens.values())
+
+    @property
+    def has_data(self) -> bool:
+        return self.invocations > 0 or self.total_tokens > 0
+
+    def marked(self, account: Account) -> float:
+        return self.tag_raw * account.tag_ratio + self.untag_raw * account.untag_ratio
+
+
+# 按分钟取：Invocations 定位最后一次调用，四个 token 计数器算这一小时的量和钱
+USAGE_METRICS = ("Invocations", *TOKEN_METRICS)
+MINUTE_SECONDS = 60
+
+
+def hour_usage(account: Account, hour_start: datetime, regions: list[str] | None = None) -> HourUsage:
+    """[hour_start, hour_start + 1 小时) 里的调用次数、token、最后一次调用和预估花费。
+
+    一个区读不到不影响别的区，记在 errors 里（卡片上会写「可能偏低」）；价目表拉不到就
+    只报用量不报钱。按分钟取数的量：模型数 × 5 个指标 × 60 个点，一次 GetMetricData 装得下；
+    只在发「用量中断」的时候才查，花不了几分钱。
+    """
+    start = hour_start.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    result = HourUsage(start=start)
+    try:
+        table = load_prices()
+    except PricingError as exc:
+        table = None
+        result.errors.append(str(exc))
+
+    unpriced: set[str] = set()
+    for region in regions or list(DEFAULT_REGIONS):
+        try:
+            sums, last = _fetch_hour(account, region, start)
+        except Exception as exc:
+            result.errors.append(f"{region}：{friendly_error(exc, account)}")
+            continue
+        if not sums:
+            continue
+        if last is not None and (result.last_call is None or last > result.last_call):
+            result.last_call = last
+        profiles, _ = resolve_profiles(account, region)
+        for (model_id, metric), value in sums.items():
+            if metric == "Invocations":
+                result.invocations += value
+                continue
+            kind = METRIC_TO_KIND[metric]
+            result.tokens[kind] = result.tokens.get(kind, 0.0) + value
+            if table is None:
+                continue
+            model = underlying_model(model_id, profiles)
+            service_name = to_service_name(model)
+            price = table.get(service_name, tier_of(model_id, profiles)) if service_name else None
+            if price is None or not price.complete:
+                unpriced.add(model)
+                continue
+            cost = value * price.rate(kind)
+            if is_tagged(model_id, profiles, account):
+                result.tag_raw += cost
+            else:
+                result.untag_raw += cost
+    result.unpriced = sorted(unpriced)
+    return result
+
+
+def _fetch_hour(
+    account: Account, region: str, start: datetime
+) -> tuple[dict[tuple[str, str], float], datetime | None]:
+    """一个区、一个小时：{(ModelId, 指标): 这一小时的合计}，外加最后一个有调用的分钟。"""
+    model_ids = list_model_ids(account, region)
+    if not model_ids:
+        return {}, None
+    client = _client(account, "cloudwatch", region)
+    queries, labels = [], {}
+    for i, model_id in enumerate(sorted(model_ids)):
+        for j, metric in enumerate(USAGE_METRICS):
+            query_id = f"m{i}x{j}"
+            labels[query_id] = (model_id, metric)
+            queries.append({
+                "Id": query_id,
+                "MetricStat": {
+                    "Metric": {
+                        "Namespace": NAMESPACE,
+                        "MetricName": metric,
+                        "Dimensions": [{"Name": "ModelId", "Value": model_id}],
+                    },
+                    "Period": MINUTE_SECONDS,
+                    "Stat": "Sum",
+                },
+                "ReturnData": True,
+            })
+
+    sums: dict[tuple[str, str], float] = {}
+    last: datetime | None = None
+    for offset in range(0, len(queries), MAX_QUERIES_PER_CALL):
+        chunk = queries[offset : offset + MAX_QUERIES_PER_CALL]
+        token = None
+        while True:
+            kwargs = {"MetricDataQueries": chunk, "StartTime": start, "EndTime": start + timedelta(hours=1)}
+            if token:
+                kwargs["NextToken"] = token
+            response = client.get_metric_data(**kwargs)
+            for item in response.get("MetricDataResults", []):
+                key = labels.get(item["Id"])
+                if not key:
+                    continue
+                for stamp, value in zip(item.get("Timestamps", []), item.get("Values", [])):
+                    if value <= 0:
+                        continue
+                    sums[key] = sums.get(key, 0.0) + float(value)
+                    if key[1] == "Invocations":
+                        minute = stamp.astimezone(timezone.utc)
+                        if last is None or minute > last:
+                            last = minute
+            token = response.get("NextToken")
+            if not token:
+                break
+    return sums, last

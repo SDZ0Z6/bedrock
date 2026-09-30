@@ -21,7 +21,7 @@ import pytest
 
 from bedrock_cost import alerts, cards, config, cost_explorer, excel_source, telegram
 from bedrock_cost.alerts import AccountState, load_state, run_daily, run_hourly, save_state
-from bedrock_cost.cost_estimate import SplitEstimate
+from bedrock_cost.cost_estimate import HourUsage, SplitEstimate
 from bedrock_cost.cost_explorer import CostSplit
 from bedrock_cost.telegram import TelegramError
 
@@ -106,6 +106,8 @@ def cw(monkeypatch):
         "recent": {},           # {账号: (tag_raw, untag_raw)}——最近两天的估算
         "recent_errors": [],
         "calls": [],            # estimate_split 的调用记录 (账号, 起, 止)
+        "usage": {},            # {账号: HourUsage}——「用量中断」卡片上那一小时的用量
+        "usage_calls": [],      # hour_usage 的调用记录 (账号, 那一小时)
     }
 
     def fake_invocations(account, hours, regions=None):
@@ -119,8 +121,13 @@ def cw(monkeypatch):
         tag, untag = knobs["recent"].get(account.account, (0.0, 0.0))
         return SplitEstimate(tag_raw=tag, untag_raw=untag, errors=list(knobs["recent_errors"]))
 
+    def fake_usage(account, hour_start, regions=None):
+        knobs["usage_calls"].append((account.account, hour_start))
+        return knobs["usage"].get(account.account) or HourUsage(start=hour_start)
+
     monkeypatch.setattr(alerts, "hourly_invocations", fake_invocations)
     monkeypatch.setattr(alerts, "estimate_split", fake_estimate)
+    monkeypatch.setattr(alerts, "hour_usage", fake_usage)
     return knobs
 
 
@@ -527,6 +534,100 @@ class TestUsageSwitch:
         self.cw["invocations"][ALPHA] = [10]
         run_hourly(NOW, dry_run=True, log=quiet)
         assert not self.state_file.exists()
+
+
+class TestStoppedUsage:
+    """「用量中断」卡片上写上一次调用的时间（到分钟）、那一小时的用量和预估费用。"""
+
+    LAST_HOUR = datetime(2026, 9, 27, 5, tzinfo=UTC)          # NOW 时最近一个完整小时
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, ledger, state_file, cw, ce, sent):
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
+        self.cw, self.sent = cw, sent
+
+    def stop(self, usage=None):
+        """05:00 那一小时在用 → 06:00 那一小时没调用，发一张「用量中断」。"""
+        if usage is not None:
+            self.cw["usage"][ALPHA] = usage
+        self.cw["invocations"][ALPHA] = [10]
+        run_hourly(NOW, log=quiet)
+        self.cw["invocations"][ALPHA] = [0]
+        run_hourly(NOW + timedelta(hours=1), log=quiet)
+        (_, card), = self.sent.cards
+        return card
+
+    def usage(self, **kw):
+        base = dict(
+            start=self.LAST_HOUR, invocations=1234,
+            tokens={"input": 5_210_000, "output": 312_000, "cache_read": 12_300_000, "cache_write": 1_200_000},
+            last_call=self.LAST_HOUR + timedelta(minutes=47), tag_raw=40.0, untag_raw=5.6,
+        )
+        base.update(kw)
+        return HourUsage(**base)
+
+    def details(self, card) -> dict[str, str]:
+        panel = next(b for b in card.blocks if isinstance(b, cards.Details))
+        return {row.label: row.value for row in panel.rows}
+
+    def test_asks_for_the_last_active_hour(self):
+        self.stop(self.usage())
+        assert self.cw["usage_calls"] == [(ALPHA, self.LAST_HOUR)]
+
+    def test_the_last_call_is_to_the_minute(self):
+        card = self.stop(self.usage())
+        since = next(b for b in card.blocks if isinstance(b, cards.Since))
+        minute = (self.LAST_HOUR + timedelta(minutes=47)).astimezone().strftime("%m-%d %H:%M")
+        assert (since.label, since.value) == ("上一次有调用", minute)
+        assert f"上一次有调用：{minute}" in telegram.visible(card.caption)
+
+    def test_shows_calls_tokens_and_the_estimate(self):
+        card = self.stop(self.usage())
+        rows = self.details(card)
+        assert rows["调用次数"] == "1,234 次"
+        assert rows["Token 用量"] == "输入 5.2M · 输出 312.0K"
+        assert rows["缓存 Token"] == "读 12.3M · 写 1.2M"
+        # TAG 部分 × TAG_RATIO + UNTAG 部分 × UNTAG_RATIO，和额度告警同口径
+        ratio = LEDGER_ROWS[0][LEDGER_HEADER.index("UNTAG_RATIO")]
+        assert rows["预估费用"] == f"${40.0 * 1 + 5.6 * ratio:,.2f}"
+        panel = next(b for b in card.blocks if isinstance(b, cards.Details))
+        assert panel.title.startswith("上一次有调用的那一小时（")
+        assert "预估 $" in telegram.visible(card.caption) and "调用 1,234 次" in telegram.visible(card.caption)
+
+    def test_no_cache_row_without_cache_tokens(self):
+        rows = self.details(self.stop(self.usage(tokens={"input": 100, "output": 10})))
+        assert "缓存 Token" not in rows
+
+    def test_only_the_cache_counter_that_moved_is_listed(self):
+        rows = self.details(self.stop(self.usage(tokens={"input": 100, "output": 10, "cache_read": 5000})))
+        assert rows["缓存 Token"] == "读 5.0K"
+
+    def test_partial_numbers_say_so(self):
+        card = self.stop(self.usage(errors=["us-west-2：ThrottlingException"], unpriced=["anthropic.claude-x"]))
+        notes = next(b for b in card.blocks if isinstance(b, cards.Notes))
+        texts = [text for _, text in notes.items]
+        assert any("可能偏低" in t for t in texts) and any("anthropic.claude-x" in t for t in texts)
+
+    def test_without_data_it_falls_back_to_the_hour(self):
+        """按分钟的数据没取到（空的 HourUsage）：和以前一样只写到小时，不画用量面板。"""
+        card = self.stop()
+        since = next(b for b in card.blocks if isinstance(b, cards.Since))
+        assert since.value.endswith("那一小时")
+        assert not any(isinstance(b, cards.Details) for b in card.blocks)
+
+    def test_a_failing_detail_lookup_never_blocks_the_alert(self, monkeypatch):
+        def boom(account, hour_start, regions=None):
+            raise RuntimeError("CloudWatch 挂了")
+
+        monkeypatch.setattr(alerts, "hour_usage", boom)
+        card = self.stop()
+        assert card.kind == "stopped"
+        assert load_state()[ALPHA].active is False
+
+    def test_the_card_still_renders(self):
+        card = self.stop(self.usage(errors=["x"], unpriced=["y"]))
+        assert card.png().startswith(b"\x89PNG")
+        assert len(telegram.visible(card.caption)) <= telegram.MAX_CAPTION_CHARS
 
 
 # ================================================================== 额度阈值

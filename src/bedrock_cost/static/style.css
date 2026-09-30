@@ -1127,6 +1127,10 @@ dialog.modal > form {
 .confirm-lead { margin: 0 0 10px; font-size: 14px; }
 .confirm-list { margin: 0; padding-left: 20px; }
 .confirm-list li { margin: 6px 0; font-size: 12.5px; line-height: 1.7; color: var(--text-dim); }
+/* 删除确认窗里的「输入登录密码确认」 */
+.confirm-password { margin-top: 14px; }
+.confirm-password input { width: 100%; }
+.modal-body > .alert:first-child { margin-top: 0; }
 
 .error-list { margin: 6px 0 0; padding-left: 20px; }
 .error-list li { margin: 3px 0; }
