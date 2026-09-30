@@ -19,8 +19,6 @@
   </div>
 {%- endmacro %}
 
-{# 新增和修改共用同一组字段。uid 用来生成不重复的 id，好让 label 对得上。
-   凭证只在新增时出现，这是「编辑改不了 AK/SK」在模板层的体现。 #}
 {# 线条图标，16px，描边跟着文字颜色走。只放这一页用到的几个 #}
 {% macro icon(name) -%}
   <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -52,106 +50,218 @@
   {%- endif -%}
 {%- endmacro %}
 
-{% macro fields(uid, values, creating, tg_result=none) -%}
-  <div class="form-grid">
-    <div class="field">
-      <label for="{{ uid }}-partner">上游</label>
-      <input id="{{ uid }}-partner" name="partner" required maxlength="64"
-             value="{{ values.get('partner', '') }}">
-    </div>
-    <div class="field">
-      <label for="{{ uid }}-account">账号 ID</label>
-      <input id="{{ uid }}-account" name="account" required inputmode="numeric"
-             pattern="[0-9]{12}" title="12 位数字的 AWS 账号 ID"
-             placeholder="123456789012" value="{{ values.get('account', '') }}">
-    </div>
-    <div class="field">
-      <label for="{{ uid }}-budget">额度</label>
-      <input id="{{ uid }}-budget" name="budget" required inputmode="decimal"
-             placeholder="100000" value="{{ values.get('budget', '') }}">
-    </div>
-    <div class="field">
-      {# 概览页的消费和余额从这一天累计到今天，所以改它会改变整个账号的口径 #}
-      <label for="{{ uid }}-start-date">启用日期</label>
-      <input id="{{ uid }}-start-date" name="start_date" type="date" max="{{ today.isoformat() }}"
-             title="概览页从这一天开始累计消费；留空则按 Cost Explorer 最早可查日起算"
-             value="{{ values.get('start_date', '') }}">
-    </div>
-    <div class="field">
-      <label for="{{ uid }}-tag-ratio">TAG 比率</label>
-      <input id="{{ uid }}-tag-ratio" name="tag_ratio" required inputmode="decimal"
-             value="{{ values.get('tag_ratio', '1') }}">
-    </div>
-    <div class="field">
-      <label for="{{ uid }}-untag-ratio">UNTAG 比率</label>
-      <input id="{{ uid }}-untag-ratio" name="untag_ratio" required inputmode="decimal"
-             value="{{ values.get('untag_ratio', '1') }}">
-    </div>
-    <div class="field field-full">
-      <label for="{{ uid }}-tag">TAG（可选，留空则用默认标签键 {{ tag_key }}）</label>
-      <input id="{{ uid }}-tag" name="tag_spec" placeholder="{{ tag_key }}=migXXXXXXXX"
-             value="{{ values.get('tag_spec', '') }}">
-    </div>
+{# 表格里邮件开关的悬停提示，和 TG 开关一样旁边不放字 #}
+{% macro mail_title(account) -%}
+  {%- if not (account.mail_enabled or account.mail_configured) -%}
+    还没有填告警邮箱，先点「修改」填上
+  {%- else -%}
+    {{ '点一下关闭' if account.mail_enabled else '点一下开启' }}
+    {%- if account.mail_address %}（{{ account.mail_address }} · {{ account.mail_provider_label }}）
+    {%- else %}（没填告警邮箱，不会收信）{% endif %}
+    {%- if account.mail_enabled and not account.enabled %}。账号已停用，不会收信
+    {%- elif account.mail_enabled and not account.mail_configured %}。邮箱没填全，不会收信
+    {%- elif account.mail_enabled and not tg_configured %}。服务器没配 TELEGRAM_BOT_TOKEN，收到了也发不出去
+    {%- elif account.mail_enabled and not account.tg_active and not mail_fixed_chats %}。这个账号的 TG 告警没开，也没配固定群，收到了也发不出去
+    {%- elif account.mail_enabled and not account.tg_active %}。这个账号的 TG 告警没开，邮件告警会发到固定群
+    {%- endif %}
+  {%- endif -%}
+{%- endmacro %}
 
-    {# Telegram 告警的群组 ID。开关不在这里，只在表格的「TG 告警」列——
-       一个地方管开关，弹窗只管发到哪。 #}
-    <div class="field field-full tg-block">
-      {% set chats = values.get('tg_chat_ids') or [] %}
-      {% set results = tg_result.chats if tg_result and tg_result.chats else {} %}
-      <span class="field-label">TG 群组 ID <span class="tone-muted">（每个群一行，最多 {{ max_tg_chats }} 个）</span></span>
-      <div class="chat-rows" data-chat-rows data-max="{{ max_tg_chats }}">
-        {# 至少留一行空的，总得有个框能填 #}
-        {% for chat in (chats or ['']) %}
-          {% set outcome = results.get(chat) if chat else none %}
-          <div class="chat-row">
-            <input name="tg_chat_ids" inputmode="numeric" spellcheck="false" autocomplete="off"
-                   aria-label="群组 ID" placeholder="-1001234567890" value="{{ chat }}">
-            <button class="icon-btn" type="button" data-remove-chat
-                    title="删掉这个群" aria-label="删掉这个群">{{ icon('x') }}</button>
-            {% if outcome %}
-              <span class="chat-result {{ 'tone-ok' if outcome.ok else 'tone-danger' }}">
-                {{- '✓ ' if outcome.ok else '✗ ' }}{{ outcome.message }}</span>
-            {% endif %}
-          </div>
-        {% endfor %}
-      </div>
-      <div class="chat-actions">
-        <button class="btn btn-sm btn-ghost" type="button" data-add-chat>{{ icon('plus') }}添加群组</button>
-        {# formaction：提交的是同一个表单，所以测的就是此刻填着的这些 ID，不用先保存。
-           formnovalidate：别让 AK/SK 之类的必填项挡住测试。 #}
-        <button class="btn btn-sm" type="submit" formnovalidate
-                formaction="{{ url_for('accounts.tg_test') }}">发测试消息</button>
-      </div>
-      {% if tg_result %}
-        <div class="alert {{ 'alert-ok' if tg_result.ok else 'alert-error' }} tg-result">
-          {{ tg_result.message }}
+{# 新增和修改弹窗共用的字段，分三页：基础信息（必填）/ 告警邮箱（可选）/ Telegram 告警（可选）。
+   三页在同一个 <form> 里，切页只是换一页显示；点「保存」时三页的字段一起提交。
+   active 是打开时停在哪一页，error_pages 是有错误的那几页（页签上标红点）。
+   凭证只在新增时出现，这是「编辑改不了 AK/SK」在模板层的体现。 #}
+{% macro fields(uid, values, creating, tg_result=none, mail_result=none, password_saved=false,
+                active='basic', error_pages=(), ak_masked='') -%}
+  <div class="modal-tabs" role="tablist" aria-label="账号设置">
+    {% for key, label, optional in [('basic', '基础信息', false), ('mail', '告警邮箱', true), ('tg', 'Telegram 告警', true)] %}
+      <button class="modal-tab" type="button" role="tab" id="{{ uid }}-tab-{{ key }}" data-tab="{{ key }}"
+              aria-controls="{{ uid }}-page-{{ key }}" aria-selected="{{ 'true' if key == active else 'false' }}"
+              tabindex="{{ '0' if key == active else '-1' }}">
+        {{- label -}}
+        {%- if optional %}<span class="tab-optional">可选</span>{% endif -%}
+        {%- if key in error_pages %}<span class="tab-error" title="这一页有要改的地方"></span>{% endif -%}
+      </button>
+    {% endfor %}
+  </div>
+
+  <div class="tab-pages">
+    {# ------------------------------------------------ 第一页：基础信息 #}
+    <section class="tab-page{{ ' is-active' if active == 'basic' }}" role="tabpanel" data-page="basic"
+             id="{{ uid }}-page-basic" aria-labelledby="{{ uid }}-tab-basic">
+      <div class="form-grid">
+        <div class="field">
+          <label for="{{ uid }}-partner">上游</label>
+          <input id="{{ uid }}-partner" name="partner" required maxlength="64"
+                 value="{{ values.get('partner', '') }}">
         </div>
+        <div class="field">
+          <label for="{{ uid }}-account">账号 ID</label>
+          <input id="{{ uid }}-account" name="account" required inputmode="numeric"
+                 pattern="[0-9]{12}" title="12 位数字的 AWS 账号 ID"
+                 placeholder="123456789012" value="{{ values.get('account', '') }}">
+        </div>
+        <div class="field">
+          <label for="{{ uid }}-budget">额度</label>
+          <input id="{{ uid }}-budget" name="budget" required inputmode="decimal"
+                 placeholder="100000" value="{{ values.get('budget', '') }}">
+        </div>
+        <div class="field">
+          {# 概览页的消费和余额从这一天累计到今天，所以改它会改变整个账号的口径 #}
+          <label for="{{ uid }}-start-date">启用日期</label>
+          <input id="{{ uid }}-start-date" name="start_date" type="date" max="{{ today.isoformat() }}"
+                 title="概览页从这一天开始累计消费；留空则按 Cost Explorer 最早可查日起算"
+                 value="{{ values.get('start_date', '') }}">
+        </div>
+        <div class="field">
+          <label for="{{ uid }}-tag-ratio">TAG 比率</label>
+          <input id="{{ uid }}-tag-ratio" name="tag_ratio" required inputmode="decimal"
+                 value="{{ values.get('tag_ratio', '1') }}">
+        </div>
+        <div class="field">
+          <label for="{{ uid }}-untag-ratio">UNTAG 比率</label>
+          <input id="{{ uid }}-untag-ratio" name="untag_ratio" required inputmode="decimal"
+                 value="{{ values.get('untag_ratio', '1') }}">
+        </div>
+        <div class="field field-full">
+          <label for="{{ uid }}-tag">TAG（可选，留空则用默认标签键 {{ tag_key }}）</label>
+          <input id="{{ uid }}-tag" name="tag_spec" placeholder="{{ tag_key }}=migXXXXXXXX"
+                 value="{{ values.get('tag_spec', '') }}">
+        </div>
+        {% if creating %}
+          <div class="field">
+            <label for="{{ uid }}-ak">AK</label>
+            {# 关掉自动填充：浏览器会把这里当登录框，往里塞保存过的密码 #}
+            <input id="{{ uid }}-ak" name="ak" required autocomplete="off" spellcheck="false"
+                   placeholder="AKIA…">
+          </div>
+          <div class="field">
+            <label for="{{ uid }}-sk">SK</label>
+            <input id="{{ uid }}-sk" name="sk" type="password" required
+                   autocomplete="new-password" spellcheck="false" placeholder="写入后不再回显">
+          </div>
+          <p class="form-hint field-full">
+            AK / SK 只在这里填一次，之后既不回显也不可改。要更换凭证请停用旧账号、再新建一条。
+          </p>
+        {% endif %}
+      </div>
+      {% if not creating %}
+        <p class="form-hint page-note">
+          AK <code>{{ ak_masked or '（缺凭证）' }}</code> 不可修改。
+          要更换凭证请停用这个账号、再用新凭证新建一条。
+        </p>
       {% endif %}
-      {% if creating %}
-        {# 新增时填了群就直接打开 TG 告警（见 excel_source.create_account） #}
-        <p class="form-hint">填了群组 ID，账号建好就会打开 TG 告警，并往这些群发一张「新账号启用」卡片。</p>
-      {% endif %}
-      {% if not tg_configured %}
-        <p class="form-hint">服务器还没配置 <code>TELEGRAM_BOT_TOKEN</code>：群组 ID 可以先存，但在配置好之前一条都不会发，测试消息也发不出去。</p>
-      {% endif %}
-    </div>
+    </section>
 
-    {% if creating %}
-      <div class="field">
-        <label for="{{ uid }}-ak">AK</label>
-        {# 关掉自动填充：浏览器会把这里当登录框，往里塞保存过的密码 #}
-        <input id="{{ uid }}-ak" name="ak" required autocomplete="off" spellcheck="false"
-               placeholder="AKIA…">
+    {# ------------------------------------------------ 第二页：告警邮箱
+       平台 + 地址 + 密码（自定义平台再加服务器）。开关只在表格的「邮件告警」列。
+       密码和 SK 一样不回显：输入框永远是空的，留空保存 = 不改 #}
+    {% set provider = values.get('mail_provider') or mail_default_provider %}
+    {% set hint = (mail_providers | selectattr('key', 'equalto', provider) | map(attribute='password_hint') | first) or '' %}
+    <section class="tab-page{{ ' is-active' if active == 'mail' }}" role="tabpanel" data-page="mail"
+             id="{{ uid }}-page-mail" aria-labelledby="{{ uid }}-tab-mail">
+      <div class="field mail-block" data-mail-block>
+        <p class="form-hint">
+          填了就每 5 分钟收一次信，AWS 发来的封号、盗用、滥用、工单和 root 安全通知会发到 TG；不填就不收。
+          开关在表格的「邮件告警」列。
+        </p>
+        <div class="mail-grid">
+          <div class="field">
+            <label for="{{ uid }}-mail-provider">邮箱平台</label>
+            <select id="{{ uid }}-mail-provider" name="mail_provider" data-mail-provider>
+              {% for option in mail_providers %}
+                <option value="{{ option.key }}" data-hint="{{ option.password_hint }}"
+                        {%- if option.key == provider %} selected{% endif %}>{{ option.label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label for="{{ uid }}-mail-address">邮箱地址</label>
+            <input id="{{ uid }}-mail-address" name="mail_address" type="email" autocomplete="off" spellcheck="false"
+                   placeholder="这个 AWS 账号的 root 邮箱" value="{{ values.get('mail_address', '') }}">
+          </div>
+          <div class="field">
+            <label for="{{ uid }}-mail-password">密码</label>
+            {# new-password：别让浏览器把登录本站用的密码自动填进来 #}
+            <input id="{{ uid }}-mail-password" name="mail_password" type="password" autocomplete="new-password"
+                   spellcheck="false" placeholder="{{ '已保存，留空不修改' if password_saved else '客户端登录密码' }}">
+          </div>
+          <div class="field" data-mail-server{% if provider != 'custom' %} hidden{% endif %}>
+            <label for="{{ uid }}-mail-server">IMAP 服务器</label>
+            <input id="{{ uid }}-mail-server" name="mail_server" autocomplete="off" spellcheck="false"
+                   placeholder="imap.example.com:993" value="{{ values.get('mail_server', '') }}">
+          </div>
+        </div>
+        <p class="form-hint">
+          密码填<strong data-mail-hint>{{ hint or '这个平台给第三方客户端用的密码' }}</strong>，网页登录密码一般登不上；邮箱后台还要开着 IMAP。
+          只读地收，不会把邮件标成已读。
+        </p>
+        <div class="chat-actions">
+          <span></span>
+          {# 开着 JS 时用 fetch 测（弹窗和填着的密码原地不动）；没开 JS 就是一次普通提交 #}
+          <button class="btn btn-sm" type="submit" formnovalidate data-mail-test
+                  formaction="{{ url_for('accounts.mail_test') }}">测试连接</button>
+        </div>
+        <div class="alert mail-result {{ ('alert-ok' if mail_result.ok else 'alert-error') if mail_result }}"
+             data-mail-result role="status"{% if not mail_result %} hidden{% endif %}>
+          {{- mail_result.message if mail_result -}}
+        </div>
+        {% if creating %}
+          <p class="form-hint">填了邮箱，账号建好就会打开邮件告警。只发之后新到的邮件，不补发旧的。</p>
+        {% else %}
+          <p class="form-hint">清空邮箱地址就会关掉邮件告警，并删掉存着的密码。</p>
+        {% endif %}
       </div>
-      <div class="field">
-        <label for="{{ uid }}-sk">SK</label>
-        <input id="{{ uid }}-sk" name="sk" type="password" required
-               autocomplete="new-password" spellcheck="false" placeholder="写入后不再回显">
+    </section>
+
+    {# ------------------------------------------------ 第三页：Telegram 告警
+       只管发到哪些群。开关不在这里，只在表格的「TG 告警」列——一个地方管开关。 #}
+    <section class="tab-page{{ ' is-active' if active == 'tg' }}" role="tabpanel" data-page="tg"
+             id="{{ uid }}-page-tg" aria-labelledby="{{ uid }}-tab-tg">
+      <div class="field tg-block">
+        {% set chats = values.get('tg_chat_ids') or [] %}
+        {% set results = tg_result.chats if tg_result and tg_result.chats else {} %}
+        <p class="form-hint">
+          日报、用量和额度告警、账号变动通知，以及邮件告警，都发到这里填的群。开关在表格的「TG 告警」列。
+        </p>
+        <span class="field-label">TG 群组 ID <span class="tone-muted">（每个群一行，最多 {{ max_tg_chats }} 个）</span></span>
+        <div class="chat-rows" data-chat-rows data-max="{{ max_tg_chats }}">
+          {# 至少留一行空的，总得有个框能填 #}
+          {% for chat in (chats or ['']) %}
+            {% set outcome = results.get(chat) if chat else none %}
+            <div class="chat-row">
+              <input name="tg_chat_ids" inputmode="numeric" spellcheck="false" autocomplete="off"
+                     aria-label="群组 ID" placeholder="-1001234567890" value="{{ chat }}">
+              <button class="icon-btn" type="button" data-remove-chat
+                      title="删掉这个群" aria-label="删掉这个群">{{ icon('x') }}</button>
+              {% if outcome %}
+                <span class="chat-result {{ 'tone-ok' if outcome.ok else 'tone-danger' }}">
+                  {{- '✓ ' if outcome.ok else '✗ ' }}{{ outcome.message }}</span>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </div>
+        <div class="chat-actions">
+          <button class="btn btn-sm btn-ghost" type="button" data-add-chat>{{ icon('plus') }}添加群组</button>
+          {# formaction：提交的是同一个表单，所以测的就是此刻填着的这些 ID，不用先保存。
+             formnovalidate：别让 AK/SK 之类的必填项挡住测试。 #}
+          <button class="btn btn-sm" type="submit" formnovalidate
+                  formaction="{{ url_for('accounts.tg_test') }}">发测试消息</button>
+        </div>
+        {% if tg_result %}
+          <div class="alert {{ 'alert-ok' if tg_result.ok else 'alert-error' }} tg-result">
+            {{ tg_result.message }}
+          </div>
+        {% endif %}
+        {% if creating %}
+          {# 新增时填了群就直接打开 TG 告警（见 excel_source.create_account） #}
+          <p class="form-hint">填了群组 ID，账号建好就会打开 TG 告警，并往这些群发一张「新账号启用」卡片。</p>
+        {% endif %}
+        {% if not tg_configured %}
+          <p class="form-hint">服务器还没配置 <code>TELEGRAM_BOT_TOKEN</code>：群组 ID 可以先存，但在配置好之前一条都不会发，测试消息也发不出去。</p>
+        {% endif %}
       </div>
-      <p class="form-hint field-full">
-        AK / SK 只在这里填一次，之后既不回显也不可改。要更换凭证请停用旧账号、再新建一条。
-      </p>
-    {% endif %}
+    </section>
   </div>
 {%- endmacro %}
 
@@ -175,9 +285,14 @@
 </noscript>
 
 {# 开关旁边不放字，「开着却发不出去」就在这里说一次，不是每行一个 #}
-{% if not tg_configured and accounts | selectattr('tg_active') | list %}
+{% set tg_on = accounts | selectattr('tg_active') | list %}
+{% set mail_on = accounts | selectattr('mail_active') | list %}
+{% if not tg_configured and (tg_on or mail_on) %}
   <div class="alert alert-warn">
-    服务器还没配置 <code>TELEGRAM_BOT_TOKEN</code>：表格里开着的 TG 告警在配置好之前一条都不会发。
+    服务器还没配置 <code>TELEGRAM_BOT_TOKEN</code>：
+    {%- if tg_on %}表格里开着的 TG 告警在配置好之前一条都不会发{% endif %}
+    {%- if tg_on and mail_on %}；{% endif %}
+    {%- if mail_on %}开着的邮件告警收到了也发不出去{% endif %}。
   </div>
 {% endif %}
 
@@ -207,6 +322,7 @@
           <th class="num">UNTAG 比率</th>
           <th>TAG</th>
           <th>TG 告警</th>
+          <th>邮件告警</th>
           <th>AK</th>
           <th class="col-actions">操作</th>
         </tr>
@@ -251,6 +367,19 @@
                         aria-checked="{{ 'true' if account.tg_enabled else 'false' }}"
                         aria-label="{{ account.account }} 的 TG 告警"
                         title="{{ tg_title(account) }}"{% if not can_toggle %} disabled{% endif %}></button>
+              </form>
+            </td>
+            <td class="col-mail">
+              {# 和 TG 开关同一套规矩：邮箱没填全开不了，但开着的永远能关 #}
+              {% set can_mail = account.mail_enabled or account.mail_configured %}
+              <form class="inline-form" method="post" action="{{ url_for('accounts.mail_toggle') }}">
+                <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+                <input type="hidden" name="key" value="{{ account.key }}">
+                <input type="hidden" name="mail_enabled" value="{{ '0' if account.mail_enabled else '1' }}">
+                <button class="switch" type="submit" role="switch"
+                        aria-checked="{{ 'true' if account.mail_enabled else 'false' }}"
+                        aria-label="{{ account.account }} 的邮件告警"
+                        title="{{ mail_title(account) }}"{% if not can_mail %} disabled{% endif %}></button>
               </form>
             </td>
             <td>
@@ -300,7 +429,11 @@
     </header>
     <div class="modal-body">
       {% if open_create and errors %}{{ error_box(errors) }}{% endif %}
-      {{ fields('new', create_form, true, tg_test if open_create else none) }}
+      {{ fields('new', create_form, true,
+                tg_test if open_create else none,
+                mail_test if open_create else none,
+                active=open_page if open_create else 'basic',
+                error_pages=error_pages if open_create else ()) }}
     </div>
     <footer class="modal-foot">
       <span class="card-note">写入前会自动备份台账</span>
@@ -322,6 +455,9 @@
        'tag_spec': account.tag_spec,
        'start_date': account.start_date.isoformat() if account.start_date else '',
        'tg_chat_ids': account.tg_chat_ids,
+       'mail_provider': account.mail_provider,
+       'mail_address': account.mail_address,
+       'mail_server': account.mail_server,
      } %}
   {# 校验没过时回填用户刚填的值，别让人重打一遍 #}
   {% set values = edit_form if edit_key == account.key else current %}
@@ -338,11 +474,14 @@
       </header>
       <div class="modal-body">
         {% if edit_key == account.key and errors %}{{ error_box(errors) }}{% endif %}
-        {{ fields('e' ~ loop.index, values, false, tg_test if edit_key == account.key else none) }}
-        <p class="form-hint">
-          AK <code>{{ account.ak_masked or '（缺凭证）' }}</code> 不可修改。
-          要更换凭证请停用这个账号、再用新凭证新建一条。
-        </p>
+        {% set mine = edit_key == account.key %}
+        {{ fields('e' ~ loop.index, values, false,
+                  tg_test if mine else none,
+                  mail_test if mine else none,
+                  password_saved=account.mail_password_saved,
+                  active=open_page if mine else 'basic',
+                  error_pages=error_pages if mine else (),
+                  ak_masked=account.ak_masked) }}
       </div>
       <footer class="modal-foot">
         <span class="card-note">没有实际改动时不会写文件</span>
@@ -373,6 +512,9 @@
             <li>不再对它发起 Cost Explorer 查询（省钱）。</li>
             {% if account.tg_enabled and account.tg_chat_ids %}
               <li>它的 {{ account.tg_chat_ids | length }} 个 TG 群会收到一张「账号停用」卡片（带停用前的累计消费），之后不再收到它的任何消息。</li>
+            {% endif %}
+            {% if account.mail_active %}
+              <li>不再收它的告警邮箱（{{ account.mail_address }}）；恢复之后只发恢复以后新到的邮件。</li>
             {% endif %}
             <li>台账里的行、凭证和 TAG 配置都保留，随时可以在这一页恢复。</li>
           </ul>
@@ -405,11 +547,20 @@
     if (opener) {
       var target = document.getElementById(opener.getAttribute('data-open'));
       if (target) {
+        // 每次打开都从「基础信息」那一页开始，不停在上次关掉时的那一页
+        showPage(target, 'basic');
         target.showModal();
-        // showModal 默认聚焦第一个可聚焦元素，这里显式落到第一个输入框
-        var first = target.querySelector('input:not([type=hidden])');
+        // showModal 默认聚焦第一个可聚焦元素（页签），这里显式落到第一个输入框
+        var first = target.querySelector('.tab-page.is-active input:not([type=hidden])');
         if (first) first.focus();
       }
+      return;
+    }
+
+    // 弹窗里的页签：换一页显示。三页在同一个表单里，保存时一起提交
+    var tab = event.target.closest('[data-tab]');
+    if (tab) {
+      showPage(tab.closest('dialog'), tab.getAttribute('data-tab'));
       return;
     }
 
@@ -417,6 +568,32 @@
     if (closer) {
       var owner = closer.closest('dialog');
       if (owner) owner.close();
+      return;
+    }
+
+    // 告警邮箱的「测试连接」：用 fetch 发同一个表单，结果贴在按钮下面。
+    // 不整页刷新——密码不回填，刷新了就得重打一遍
+    var tester = event.target.closest('[data-mail-test]');
+    if (tester && window.fetch && window.FormData) {
+      event.preventDefault();
+      var box = tester.closest('[data-mail-block]').querySelector('[data-mail-result]');
+      var show = function (tone, text) {
+        box.className = 'alert mail-result' + (tone ? ' alert-' + tone : '');
+        box.textContent = text;
+        box.hidden = false;
+      };
+      tester.disabled = true;
+      show('', '正在连接邮箱服务器……');
+      fetch(tester.getAttribute('formaction'), {
+        method: 'POST',
+        body: new FormData(tester.form),
+        headers: { 'X-Requested-With': 'fetch' },
+        credentials: 'same-origin'
+      })
+        .then(function (response) { return response.json(); })
+        .then(function (result) { show(result.ok ? 'ok' : 'error', result.message); })
+        .catch(function () { show('error', '测试没发出去：页面可能已经过期，刷新后再试。'); })
+        .then(function () { tester.disabled = false; });
       return;
     }
 
@@ -452,6 +629,47 @@
     }
   });
 
+  // ---------------------------------------------------- 弹窗分页
+  function showPage(scope, key) {
+    if (!scope) return;
+    scope.querySelectorAll('[data-tab]').forEach(function (tab) {
+      var on = tab.getAttribute('data-tab') === key;
+      tab.setAttribute('aria-selected', on ? 'true' : 'false');
+      tab.tabIndex = on ? 0 : -1;
+    });
+    scope.querySelectorAll('[data-page]').forEach(function (page) {
+      page.classList.toggle('is-active', page.getAttribute('data-page') === key);
+    });
+  }
+
+  // 页签上按左右方向键换页（Home / End 到头尾），和常见的标签页控件一样
+  document.addEventListener('keydown', function (event) {
+    if (!(event.target instanceof Element)) return;
+    var tab = event.target.closest('[data-tab]');
+    if (!tab) return;
+    var tabs = Array.prototype.slice.call(tab.parentElement.querySelectorAll('[data-tab]'));
+    var index = tabs.indexOf(tab);
+    var next = { ArrowRight: index + 1, ArrowLeft: index - 1, Home: 0, End: tabs.length - 1 }[event.key];
+    if (next === undefined) return;
+    event.preventDefault();
+    var goal = tabs[(next + tabs.length) % tabs.length];
+    showPage(tab.closest('dialog'), goal.getAttribute('data-tab'));
+    goal.focus();
+  });
+
+  // 点「保存」时有必填项没填：浏览器要把焦点放到那个框上提示，但它可能在另一页，看不见就
+  // 聚焦不了、表单也不提交，看上去像按钮没反应。先翻到它所在的那一页。只管第一个——浏览器
+  // 提示的就是按顺序的第一个
+  var turning = false;
+  document.addEventListener('invalid', function (event) {
+    if (turning || !(event.target instanceof Element)) return;
+    var page = event.target.closest('[data-page]');
+    if (!page) return;
+    turning = true;
+    setTimeout(function () { turning = false; }, 0);
+    showPage(page.closest('dialog'), page.getAttribute('data-page'));
+  }, true);
+
   // 到上限就把「添加群组」按钮置灰，别让人加了之后才被服务端拒
   function syncAdder(rows) {
     var max = parseInt(rows.getAttribute('data-max'), 10) || 10;
@@ -459,6 +677,19 @@
     if (adder) adder.disabled = rows.querySelectorAll('.chat-row').length >= max;
   }
   document.querySelectorAll('[data-chat-rows]').forEach(syncAdder);
+
+  // 告警邮箱换平台：「其他平台」才要填服务器；密码提示跟着换成这家要的那种密码
+  document.addEventListener('change', function (event) {
+    if (!(event.target instanceof Element)) return;
+    var select = event.target.closest('[data-mail-provider]');
+    if (!select) return;
+    var block = select.closest('[data-mail-block]');
+    var server = block.querySelector('[data-mail-server]');
+    if (server) server.hidden = select.value !== 'custom';
+    var option = select.options[select.selectedIndex];
+    var hint = block.querySelector('[data-mail-hint]');
+    if (hint) hint.textContent = (option && option.getAttribute('data-hint')) || '这个平台给第三方客户端用的密码';
+  });
 
   document.querySelectorAll('dialog.modal').forEach(function (dialog) {
     // 点遮罩关闭。dialog 自身没有内边距、内容铺满，所以只有点在遮罩上时
@@ -468,15 +699,17 @@
     });
   });
 
-  // 服务端说这次提交没通过校验：把对应的弹窗重新打开，里面已经带着错误和回填值
+  // 服务端说这次提交没通过校验（或者刚测完）：把对应的弹窗重新打开，里面已经带着错误和
+  // 回填值，停在服务端指定的那一页——有错的第一页，或者刚测试的那一页
   var reopen = document.querySelector('dialog[data-reopen]');
   if (reopen) {
     reopen.showModal();
-    var tested = reopen.querySelector('.tg-result');
+    var active = reopen.querySelector('.tab-page.is-active') || reopen;
+    var tested = active.querySelector('.tg-result, .mail-result:not([hidden])');
     if (tested) {
       tested.scrollIntoView({ block: 'center' });
     } else {
-      var bad = reopen.querySelector('input:not([type=hidden])');
+      var bad = active.querySelector('input:not([type=hidden])');
       if (bad) bad.focus();
     }
   }

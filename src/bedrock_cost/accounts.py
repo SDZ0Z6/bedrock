@@ -11,15 +11,18 @@
 
 新增、停用、恢复账号之后，按 TG 开关给这个账号的群发一张通知卡片（_notify →
 alerts.notify_account）。台账先写好，通知发不出去只另起一条警告，不回滚改动。
+
+告警邮箱（平台 / 地址 / 密码）也在弹窗里填，开关在表格的「邮件告警」列，和 TG 一样。
+邮箱密码和 SK 一样不回显：修改时留空表示不改，页面上只说「已保存」。
 """
 
 from __future__ import annotations
 
 from datetime import date
 
-from flask import Blueprint, current_app, flash, redirect, render_template, request, session, url_for
+from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, session, url_for
 
-from . import alerts, config, excel_source, telegram
+from . import alerts, config, excel_source, mail_inbox, mail_rules, telegram
 from .auth import csrf_protect, login_required
 from .excel_source import Account, ExcelSourceError, load_accounts
 from .views import page_meta
@@ -53,6 +56,8 @@ def _form_values(form) -> dict:
     """
     values = {key: form.get(key) for key in form.keys()}
     values["tg_chat_ids"] = excel_source.form_chat_ids(form)
+    # 邮箱密码不回填：和 SK 一样，只在提交的那一下经过服务器，不再写回页面
+    values.pop("mail_password", None)
     return values
 
 
@@ -69,6 +74,11 @@ def _render(**extra):
         # 「发测试消息」的结果：{"ok": bool, "message": str}，显示在重新打开的弹窗里
         "tg_test": None,
         "max_tg_chats": excel_source.MAX_TG_CHATS,
+        # 告警邮箱：平台下拉框、「测试连接」的结果（没开 JS 时整页提交才用得到）
+        "mail_providers": mail_inbox.PROVIDERS,
+        "mail_default_provider": mail_inbox.DEFAULT_PROVIDER,
+        "mail_test": None,
+        "mail_fixed_chats": config.MAIL_ALERT_CHAT_IDS,
         "enabled_count": sum(1 for a in accounts if a.enabled),
         "fatal": fatal,
         "notes": [],
@@ -81,6 +91,13 @@ def _render(**extra):
         "edit_form": {},
     }
     context.update(extra)
+    # 重新打开的弹窗停在哪一页：有错就停在第一条错误所在的那页（有错的页签都标红点），
+    # 刚点过「发测试消息」/「测试连接」就停在那一页，否则从基础信息开始
+    pages = [getattr(error, "page", "basic") for error in context["errors"]]
+    context["error_pages"] = set(pages)
+    context["open_page"] = pages[0] if pages else (
+        "tg" if context["tg_test"] else "mail" if context["mail_test"] else "basic"
+    )
     context.update(page_meta())
     return render_template("accounts.html", **context)
 
@@ -131,7 +148,8 @@ def update():
         return redirect(url_for("accounts.index"))
 
     others = [a for a in existing if a.key != key]
-    data, errors = excel_source.validate(request.form, others, creating=False)
+    current = next(a for a in existing if a.key == key)
+    data, errors = excel_source.validate(request.form, others, creating=False, current=current)
     if errors:
         return _render(errors=errors, edit_key=key, edit_form=_form_values(request.form)), 400
 
@@ -220,6 +238,84 @@ def tg_toggle():
         return redirect(url_for("accounts.index"))
     flash(f"{note}。" if note else "本来就是这样，没有改动。", "ok" if note else "warn")
     return redirect(url_for("accounts.index"))
+
+
+@bp.route("/mail-toggle", methods=["POST"])
+@login_required
+@csrf_protect
+def mail_toggle():
+    """表格里的邮件开关：点一下只翻 MAIL_ENABLED 这一格。开的时候邮箱必须已经填全。"""
+    key = (request.form.get("key") or "").strip()
+    enabled = request.form.get("mail_enabled") == "1"
+    try:
+        note = excel_source.set_mail_enabled(key, enabled, actor=_actor())
+    except ExcelSourceError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("accounts.index"))
+    flash(f"{note}。" if note else "本来就是这样，没有改动。", "ok" if note else "warn")
+    return redirect(url_for("accounts.index"))
+
+
+def _wants_json() -> bool:
+    return request.headers.get("X-Requested-With") == "fetch"
+
+
+@bp.route("/mail-test", methods=["POST"])
+@login_required
+@csrf_protect
+def mail_test():
+    """弹窗里的「测试连接」：用此刻填着的邮箱登录一下，只读地看一眼收件箱。不写台账。
+
+    页面上用 fetch 调，回一段 JSON，弹窗和里面填着的密码都原地不动（密码不回填，整页
+    刷新的话就得重打一遍）。没开 JS 时按钮就是个普通的提交，整页刷新、重新打开弹窗。
+
+    修改弹窗里密码留空 = 用台账里存着的那个，和保存时「留空不改」同一个意思；但换了
+    邮箱地址就不能沿用旧密码。
+    """
+    key = (request.form.get("key") or "").strip()
+    current = None
+    if key:
+        existing, _ = _load_all()
+        current = next((a for a in existing if a.key == key), None)
+        if current is None:
+            if _wants_json():
+                return jsonify(ok=False, message="这个账号已经不在台账里了，页面可能已过期，刷新后再试。")
+            flash("这个账号已经不在台账里了，页面可能已过期。已重新加载。", "error")
+            return redirect(url_for("accounts.index"))
+
+    result = _probe_mailbox(request.form, current)
+    if _wants_json():
+        return jsonify(result)
+    values = _form_values(request.form)
+    if current is not None:
+        return _render(mail_test=result, edit_key=key, edit_form=values)
+    return _render(mail_test=result, create_form=values, open_create=True)
+
+
+def _probe_mailbox(form, current: Account | None) -> dict:
+    provider = (form.get("mail_provider") or mail_inbox.DEFAULT_PROVIDER).strip()
+    address = (form.get("mail_address") or "").strip()
+    server = (form.get("mail_server") or "").strip()
+    password = (form.get("mail_password") or "").strip()
+    if not address:
+        return {"ok": False, "message": "先填邮箱地址再测。"}
+    if provider not in mail_inbox.BY_KEY:
+        return {"ok": False, "message": "不认识这个邮箱平台，请从下拉框里选。"}
+    if provider == mail_inbox.CUSTOM and mail_inbox.parse_server(server) is None:
+        return {"ok": False, "message": "选了「其他平台」就要填 IMAP 服务器，形如 imap.example.com:993。"}
+    if (
+        not password and current is not None and current.mail_password
+        and address.lower() == current.mail_address.lower()
+    ):
+        password = current.mail_password
+    if not password:
+        return {"ok": False, "message": "先填密码再测。"}
+    box = mail_inbox.mailbox_for(provider, address, password, server)
+    try:
+        message = mail_inbox.probe(box, mail_rules.classify_headers)
+    except mail_inbox.MailError as exc:
+        return {"ok": False, "message": str(exc)}
+    return {"ok": True, "message": message}
 
 
 @bp.route("/toggle", methods=["POST"])

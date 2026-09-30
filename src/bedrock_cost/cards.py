@@ -6,7 +6,8 @@ Telegram 的文字消息只有粗体、等宽、引用这几种格式，做不�
 
 分两层：
   · Card 和几种块（Uid / Tiles / Meter / Table / Notes / Info / Since / Paragraph /
-    Status / Details / Divider）只描述「卡片上有什么」。alerts 里拼出来，测试直接断言它们；
+    Status / Details / Quote / Divider）只描述「卡片上有什么」。alerts 和 mail_alerts 里
+    拼出来，测试直接断言它们；
   · render() 把 Card 画成 PNG。量尺寸和真正画走同一套布局代码（_Pen 不带画布时只量
     不画），两边不会对不上。
 
@@ -60,6 +61,7 @@ PANEL = (26, 26, 26)       # 数字格、说明框的底色
 CHIP = (32, 32, 32)        # UID 小块
 CHIP_ON_PANEL = (14, 14, 14)  # 面板里的 UID 小块要比面板暗，放在黑底上的才比黑底亮
 TRACK = (42, 42, 42)       # 进度条的底槽
+QUOTE_TEXT = (214, 214, 214)  # 引用的邮件原文：比正文暗一点，看得出是贴过来的
 
 
 @dataclass(frozen=True)
@@ -409,8 +411,58 @@ class Details:
                 pen.text(right - width / 2, middle, row.value, font, _color(row.tone), anchor="mm")
             else:
                 font = value if row.bold else _font(16)
-                pen.text(right, middle, row.value, font, _color(row.tone), anchor="rm")
+                # 值太长会压到左边的标签上：放不下就截断，补一个省略号
+                room = right - (x + pad + _width(row.label, label) + 16)
+                pen.text(right, middle, _fit(row.value, font, room), font, _color(row.tone), anchor="rm")
             top += row_h
+        return height
+
+
+@dataclass
+class Quote:
+    """邮件原文节选：深色面板上一个灰色小标题，下面左边一道和卡片同色的竖条，
+    竖条右边是一行粗体（原邮件主题）和节选的原文。"""
+
+    label: str
+    text: str = ""        # 一行一段
+    heading: str = ""
+
+    HEAD_LINE = 21
+    LINE = 20
+    PARAGRAPH_GAP = 6
+
+    def strings(self) -> list[str]:
+        return [s for s in (self.label, self.heading, self.text) if s]
+
+    def layout(self, pen: _Pen, x: float, y: float, w: float, tone: Tone) -> float:
+        pad, indent = 14, 14   # 竖条 3 px + 间距
+        room = w - pad * 2 - indent
+        head_font, body = _font(14, 700), _font(13.5)
+        heads = _wrap(self.heading, head_font, room) if self.heading else []
+        paragraphs = [_wrap(part, body, room) for part in self.text.split("\n") if part.strip()]
+        quoted = (
+            len(heads) * self.HEAD_LINE
+            + (6 if heads and paragraphs else 0)
+            + sum(len(lines) for lines in paragraphs) * self.LINE
+            + self.PARAGRAPH_GAP * max(0, len(paragraphs) - 1)
+        )
+        height = pad + 18 + 8 + quoted + pad
+        pen.box((x, y, x + w, y + height), 12, fill=PANEL)
+        pen.text(x + pad, y + pad + 9, self.label, _font(13, 700), TEXT_2)
+        top = y + pad + 26
+        if quoted:
+            pen.box((x + pad, top, x + pad + 3, top + quoted), 1.5, fill=tone.edge)
+        for text in heads:
+            pen.text(x + pad + indent, top + self.HEAD_LINE / 2, text, head_font, WHITE)
+            top += self.HEAD_LINE
+        if heads and paragraphs:
+            top += 6
+        for index, lines in enumerate(paragraphs):
+            if index:
+                top += self.PARAGRAPH_GAP
+            for text in lines:
+                pen.text(x + pad + indent, top + self.LINE / 2, text, body, QUOTE_TEXT)
+                top += self.LINE
         return height
 
 
@@ -430,7 +482,7 @@ class Divider:
 class Card:
     """一张卡片 + 图片下面的那段文字。"""
 
-    kind: str            # daily / started / stopped / quota / test，dry-run 存图时当文件名
+    kind: str            # daily / started / stopped / quota / test / mail-*……，dry-run 存图时当文件名
     tone: str            # 边框、徽章的颜色：ok / warn / danger
     icon: str            # 标题前的图标，见 _icon
     title: str
@@ -625,6 +677,15 @@ def _font(size: float, weight: int = 400, mono: bool = False) -> ImageFont.FreeT
 
 def _width(text: str, font: ImageFont.FreeTypeFont) -> float:
     return font.getlength(text) / _K
+
+
+def _fit(text: str, font: ImageFont.FreeTypeFont, width: float) -> str:
+    """一行放不下就从后面截掉、补一个省略号。"""
+    if _width(text, font) <= width:
+        return text
+    while text and _width(text + "…", font) > width:
+        text = text[:-1]
+    return text.rstrip() + "…"
 
 
 # 能连在一起不断开的一串：英文单词、数字、金额、模型 ID 之类

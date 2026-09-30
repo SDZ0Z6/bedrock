@@ -7,6 +7,7 @@ AWS 的 AK/SK 不在这里，它们来自 cred.xlsx。
 from __future__ import annotations
 
 import os
+import re
 import secrets
 from pathlib import Path
 
@@ -189,6 +190,29 @@ if not ALERT_STATE_PATH.is_absolute():
 LAST_KNOWN_COSTS_PATH = Path(_text("LAST_KNOWN_COSTS_PATH", "last-known-costs.json"))
 if not LAST_KNOWN_COSTS_PATH.is_absolute():
     LAST_KNOWN_COSTS_PATH = BASE_DIR / LAST_KNOWN_COSTS_PATH
+
+# ---------------------------------------------------------------- 邮件告警
+# 邮箱（平台、地址、密码）和开关是**每个账号**的，在台账里（MAIL_* 几列），从账号管理页填。
+# 邮箱密码和 AK/SK 一样只在台账里，页面上不回显。这里只放全局的几项。
+#
+# 固定群：root 账号安全类的邮件（MFA 被停用、登录要验证、重置密码）先发这里——root 是运维
+# 管的，不是用账号的人；邮件里写的账号不在台账里、或那个账号没开 TG 告警时，也发这里。
+# 逗号隔开，可以填几个。空着就只发账号自己的群。
+MAIL_ALERT_CHAT_IDS = tuple(
+    dict.fromkeys(piece for piece in re.split(r"[,，;；\s]+", _text("MAIL_ALERT_CHAT_IDS")) if piece)
+)
+
+# 收信状态：每个邮箱收到了第几封、最近发过哪些告警（去重用）。和台账放一起，
+# systemd 的 ReadWritePaths 已经覆盖
+MAIL_STATE_PATH = Path(_text("MAIL_STATE_PATH", "mail-state.json"))
+if not MAIL_STATE_PATH.is_absolute():
+    MAIL_STATE_PATH = BASE_DIR / MAIL_STATE_PATH
+
+# 连邮箱服务器的超时（秒）
+MAIL_TIMEOUT = _number("MAIL_TIMEOUT", 20)
+
+# 同一个账号、同一个主题的告警多少分钟内只发一次：AWS 常从两个地址各发一封一样的通知
+MAIL_DEDUPE_MINUTES = _number("MAIL_DEDUPE_MINUTES", 60)
 
 
 def startup_warnings() -> list[str]:

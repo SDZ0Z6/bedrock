@@ -975,27 +975,83 @@ dialog.modal > form {
 }
 .modal-body > .form-hint { margin-top: 14px; }
 
-/* 弹窗里的 TG 群组 ID：一行一个 + 测试按钮，和上面的台账字段隔一道线。
-   开关不在弹窗里，只在表格里 */
-.form-grid .tg-block {
+/* 新增 / 修改弹窗分三页：基础信息 / 告警邮箱 / Telegram 告警。
+   三页叠在同一格里、只显示当前那页：弹窗按最高的那一页定高，切页时底部的按钮不跳 */
+.modal-tabs {
+  display: flex;
+  flex-wrap: wrap;   /* 手机上放不下就折行。别用 overflow：页签压线的那 1px 会撑出一条滚动条 */
+  gap: 2px;
+  margin: -6px 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+.modal-tab {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: -1px;
+  padding: 8px 12px 9px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.modal-tab:hover { color: var(--text); }
+.modal-tab[aria-selected="true"] { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
+.modal-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 6px 6px 0 0; }
+.tab-optional {
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-mute);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 17px;
+}
+/* 这一页有校验没过的字段 */
+.tab-error { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
+.tab-pages { display: grid; }
+.tab-page { grid-area: 1 / 1; min-width: 0; visibility: hidden; }
+.tab-page.is-active { visibility: visible; }
+.tab-page > .page-note { margin-top: 14px; }
+
+/* 弹窗里的 TG 群组 ID：一行一个 + 测试按钮。开关不在弹窗里，只在表格里 */
+.tg-block {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding-top: 14px;
-  border-top: 1px solid var(--line);
 }
 /* 几个框共用一个标题，用不了 <label for>，样式照抄 .field label */
 .field .field-label { font-size: 12px; color: var(--text-dim); }
 
 .chat-rows { display: flex; flex-direction: column; gap: 6px; }
 .chat-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
-/* 盖过 .form-grid .field input 的 width: 100%：换行布局里一个 100% 宽的输入框
-   会把旁边的 × 挤到下一行去 */
-.form-grid .tg-block .chat-row input { flex: 1 1 0; width: auto; min-width: 0; }
+/* 输入框占满这一行剩下的宽度，× 始终跟在它右边 */
+.tg-block .chat-row input { flex: 1 1 0; width: auto; min-width: 0; }
 .chat-result { flex: 1 0 100%; font-size: 12px; line-height: 1.5; padding-left: 2px; }
 .chat-actions { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .chat-actions .btn svg { width: 14px; height: 14px; margin-right: 4px; }
 .tg-block .tg-result { margin: 2px 0 0; }
+
+/* 弹窗里的告警邮箱：平台 / 地址 / 密码排一行（窄屏自动折） */
+.mail-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px 12px;
+}
+.mail-grid .field input,
+.mail-grid .field select { width: 100%; max-width: none; }
+/* .field 是 flex，会盖掉 hidden 属性默认的 display: none */
+.mail-block [hidden] { display: none !important; }
+.mail-block .mail-result { margin: 2px 0 0; }
 
 /* ------------------------------------------------------- 开关 */
 /* 表格「TG 告警」列：<button role="switch" aria-checked>，点了就提交。
