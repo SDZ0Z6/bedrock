@@ -1,6 +1,7 @@
 {# 账号页的「配额」页签（原来的模型配额页）：这个账号每个应用推理配置在四个区的 TPM / TPD。
    读不到的情况走右上角的弹窗；读不到推理配置时表格退回按「模型 × 区域」列，下面有一句说明。 #}
 {% extends "account_base.html" %}
+{% from "_macros.html" import refresh_link %}
 {% block loading_label %}正在拉四个区的配额{% endblock %}
 {% block loading_note %}首次约 45 秒，Service Quotas 限流；之后走缓存{% endblock %}
 
@@ -28,9 +29,10 @@
       </select>
     </div>
     <div class="filters-end">
-      <a class="btn" href="{{ url_for('account.quota', number=account.account, model=selected_model or None, region=selected_region or None, refresh=1) }}"
-         title="跳过缓存，重新拉一次四个区的 Service Quotas 和推理配置"
-         data-loading="正在重新拉四个区的配额" data-loading-note="跳过缓存，约 45 秒">强制刷新</a>
+      {{ refresh_link(url_for('account.quota', number=account.account, model=selected_model or None,
+                              region=selected_region or None, refresh=1),
+                      '跳过缓存，重新拉一次四个区的 Service Quotas 和推理配置', '正在重新拉四个区的配额',
+                      '跳过缓存，约 45 秒') }}
     </div>
   </div>
   <noscript><button class="btn btn-primary" type="submit">查询</button></noscript>

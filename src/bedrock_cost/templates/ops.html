@@ -1,5 +1,5 @@
 {% extends "shell.html" %}
-{% from "_macros.html" import avatar %}
+{% from "_macros.html" import avatar, account_cell, refresh_link %}
 {% block title %}运营看板 · Bedrock 成本监控{% endblock %}
 {% block page_title %}运营看板{% endblock %}
 {% block page_sub -%}
@@ -54,7 +54,7 @@
   <div class="alert alert-error"><div><strong>读不到台账：</strong>{{ fatal }}</div></div>
 {% else %}
 
-{# 时间段和强制刷新放在内容区左边，不放页头右边：右上角是报错弹窗的位置，
+{# 时间段和「刷新数据」放在内容区左边，不放页头右边：右上角是报错弹窗的位置，
    报错一直留着直到手动关，会把页头右边的按钮盖住 #}
 <div class="ops-bar">
   <nav class="seg" aria-label="时间段">
@@ -63,9 +63,8 @@
          {% if key == period.key %}aria-current="page"{% endif %} data-loading="正在汇总{{ label }}的数">{{ label }}</a>
     {% endfor %}
   </nav>
-  <a class="btn" href="{{ url_for('ops.index', period=period.key, refresh=1) }}"
-     title="跳过缓存，重新查 Cost Explorer 和 CloudWatch"
-     data-loading="正在重新汇总" data-loading-note="跳过缓存，十几秒">强制刷新</a>
+  {{ refresh_link(url_for('ops.index', period=period.key, refresh=1),
+                  '跳过缓存，重新查 Cost Explorer 和 CloudWatch', '正在重新汇总', '跳过缓存，十几秒') }}
 </div>
 
 {% if not accounts %}
@@ -238,14 +237,11 @@
             {% for row in business.accounts %}
               {% set account = row.account %}
               <tr>
-                <td class="sticky-col" data-sort="{{ account.label }}">
+                <td class="sticky-col" data-sort="{{ (account.email or account.account) | lower }}">
                   <a class="ident-cell ident-link" href="{{ url_for('account.cost', number=account.account) }}"
                      data-loading="正在查各维度消费" title="看这个账号的成本">
                     {{ avatar(account.avatar, small=true) }}
-                    <span class="acct-cell">
-                      <span class="acct-cell-id">{{ account.account }}</span>
-                      {%- if account.email %}<span class="acct-cell-mail">{{ account.email }}</span>{% endif %}
-                    </span>
+                    {{ account_cell(account.account, account.email) }}
                   </a>
                 </td>
                 <td data-sort="{{ account.partner }}">{{ account.partner }}</td>
@@ -304,10 +300,7 @@
               <a class="ident-cell ident-link" href="{{ url_for('account.summary', number=account.account) }}"
                  data-loading="正在读这个账号" title="打开这个账号的页面">
                 {{ avatar(account.avatar, small=true) }}
-                <span class="acct-cell">
-                  <span class="acct-cell-id">{{ account.account }}</span>
-                  {%- if account.email %}<span class="acct-cell-mail">{{ account.email }}</span>{% endif %}
-                </span>
+                {{ account_cell(account.account, account.email) }}
               </a>
               <ul class="watch-issues">
                 {% for issue in item.issues %}

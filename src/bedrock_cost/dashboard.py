@@ -45,13 +45,18 @@ def _parts(error) -> tuple[str, str, str, str]:
     return account, region, reason.strip(), text
 
 
+def who(account) -> str:
+    """提示里说是哪个账号：邮箱在前、号码在后；没填邮箱就只写号码。"""
+    return f"{account.email} · {account.account}" if account.email else account.account
+
+
 def region_toasts(errors, account: Account | None, what: str = "查询失败") -> list[Toast]:
     """一个账号几个区的报错：原因相同的合成一条（「3 个区查询失败」），原始报错按区列在详情里。"""
     groups: dict[str, list[tuple[str, str]]] = {}
     for error in errors:
         _, region, reason, detail = _parts(error)
         groups.setdefault(reason, []).append((region, detail))
-    sub = f"{account.label} · {account.account}" if account else ""
+    sub = who(account) if account else ""
     toasts = []
     for reason, items in groups.items():
         regions = [region for region, _ in items if region]
@@ -78,13 +83,13 @@ def account_toasts(errors, accounts: list[Account], what: str) -> list[Toast]:
         numbers = list(dict.fromkeys(number for number, _ in items if number))
         if len(numbers) == 1 and numbers[0] in by_id:
             acct = by_id[numbers[0]]
-            title, sub = what, f"{acct.label} · {acct.account}"
+            title, sub = what, who(acct)
         else:
             title, sub = (f"{len(numbers)} 个账号{what}" if numbers else what), ""
         lines = []
         for number, text in items:
             acct = by_id.get(number)
-            lines.append(f"{acct.label} · {number}：{text}" if acct else text)
+            lines.append(f"{who(acct)}：{text}" if acct else text)
         toasts.append(Toast("error", title, sub, reason, "\n".join(lines)))
     return toasts
 
@@ -109,6 +114,14 @@ class CardRow:
         self.spark = chart.render_spark(activity.daily, accent=accent) if activity.daily else ""
 
     @property
+    def state(self) -> str:
+        return card_state(self)
+
+    @property
+    def state_label(self) -> str:
+        return STATES[self.state]
+
+    @property
     def issue(self) -> str:
         """卡片上那行红字：消费查询为什么失败，一句话。"""
         if not self.row.error:
@@ -126,11 +139,23 @@ class CardRow:
         return getattr(self.row, name)
 
 
+# 卡片上的状态，也是概览「状态」那排筛选签。CloudWatch 读不到（activity 是 unknown）和
+# Cost Explorer 查询失败都算异常：两种都是账号本身在报错，不是「不知道有没有在用」
+STATES = {"active": "活跃", "stopped": "已中断", "idle": "无调用", "error": "异常"}
+
+
+def card_state(row) -> str:
+    if row.error or row.activity.kind == "unknown":
+        return "error"
+    return row.activity.kind
+
+
 def risk_rank(card: CardRow) -> int:
-    """「有问题的排前面」：查询失败 → 用量中断 → 其余。"""
-    if card.error:
+    """卡片的默认顺序，有问题的排前面：异常 → 用量中断 → 其余。"""
+    state = card_state(card)
+    if state == "error":
         return 0
-    return 1 if card.activity.kind == "stopped" else 2
+    return 1 if state == "stopped" else 2
 
 
 def lifecycle_counts(rows, tags: list[LifecycleTag]) -> list[SimpleNamespace]:
@@ -149,13 +174,11 @@ def lifecycle_counts(rows, tags: list[LifecycleTag]) -> list[SimpleNamespace]:
     return out
 
 
-STATE_FILTERS = (("active", "活跃"), ("stopped", "已中断"), ("idle", "无调用"), ("unknown", "用量未知"), ("error", "查询异常"))
-
-
 def state_counts(rows) -> list[SimpleNamespace]:
+    """筛选签上每个状态有几个账号。一个账号只落在一个状态里，几个签的数加起来就是全部。"""
     out = []
-    for key, label in STATE_FILTERS:
-        count = sum(1 for row in rows if (row.error if key == "error" else row.activity.kind == key))
+    for key, label in STATES.items():
+        count = sum(1 for row in rows if card_state(row) == key)
         if count:
             out.append(SimpleNamespace(key=key, label=label, count=count))
     return out

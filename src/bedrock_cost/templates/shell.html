@@ -147,7 +147,12 @@
   <div class="toast-stack" id="toasts">
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% for category, message in messages %}
-        {{ toast(category, message) }}
+        {# 操作结果是 {title, sub, text} 三段（views.flash_result），报错之类是一句话 #}
+        {% if message is mapping %}
+          {{ toast(category, message['title'], message['sub'], message['text']) }}
+        {% else %}
+          {{ toast(category, message) }}
+        {% endif %}
       {% endfor %}
     {% endwith %}
     {% for item in toasts or [] %}

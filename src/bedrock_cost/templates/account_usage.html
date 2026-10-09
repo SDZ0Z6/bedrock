@@ -2,7 +2,7 @@
    一排筛选 → 四张指标卡（点哪张主图画哪个指标）→ 主图（四区合计和四个区是五个视图）
    → 模型占比 / 模型 × 区域 / 一周作息 → 精简的明细表。 #}
 {% extends "account_base.html" %}
-{% from "_macros.html" import range_picker %}
+{% from "_macros.html" import range_picker, refresh_link %}
 {% block loading_label %}正在拉 CloudWatch 指标{% endblock %}
 
 {% block tab_content %}
@@ -37,10 +37,9 @@
     </div>
 
     <div class="filters-end">
-      <a class="btn" href="{{ url_for('account.usage', number=account.account, metric=metric_key, tags=tag_filter,
-                                      period=window.period_key, start=local_start, end=local_end, refresh=1) }}"
-         title="跳过缓存，重新查 CloudWatch"
-         data-loading="正在重新拉 CloudWatch 指标" data-loading-note="跳过缓存">强制刷新</a>
+      {{ refresh_link(url_for('account.usage', number=account.account, metric=metric_key, tags=tag_filter,
+                              period=window.period_key, start=local_start, end=local_end, refresh=1),
+                      '跳过缓存，重新查 CloudWatch', '正在重新拉 CloudWatch 指标') }}
     </div>
   </div>
   <noscript><button class="btn btn-primary" type="submit">查询</button></noscript>

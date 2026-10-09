@@ -47,7 +47,7 @@ class TestDelete:
         for index, (attrs, cells) in enumerate(table_rows(html), start=1):
             actions = cells[-1]
             assert f'data-open="dlg-del-{index}"' in actions
-            assert f'aria-label="删除 {attrs["data-number"]}"' in actions
+            assert f'aria-label="删除 {attrs["data-who"]}"' in actions
             assert "删除" not in text(actions)                     # 和别的操作一样只有图标
 
     def test_the_dialog_asks_for_the_login_password(self, admin, ledger):
@@ -69,7 +69,7 @@ class TestDelete:
         header, *rows = raw_rows(ledger)
         assert rows[0] == [None] * len(header)                   # 整行清空，凭证、邮箱一起没了
         assert rows[1][header.index("ACCOUNT")] == 222222222222   # 下面那行原地不动
-        assert ("ok", "删除账号 111111111111（ALPHA）。") in toasts(page(admin))
+        assert ("ok", "已删除账号 acct-one@example.com 台账里这一行已经清空。") in toasts(page(admin))
 
     def test_other_rows_keep_their_keys(self, admin, ledger):
         """不删行：删行会让下面所有账号的行号上移，key 和各处的缓存键跟着错位。"""

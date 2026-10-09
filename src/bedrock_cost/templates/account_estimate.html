@@ -1,7 +1,7 @@
 {# 账号页的「预估」页签（原来的预估成本页）：CloudWatch 的 token 量 × AWS 公开牌价，
    用来补 Cost Explorer 那一两天的延迟。 #}
 {% extends "account_base.html" %}
-{% from "_macros.html" import range_picker %}
+{% from "_macros.html" import range_picker, refresh_link %}
 {% block loading_label %}正在拉用量和单价{% endblock %}
 
 {% block tab_content %}
@@ -14,8 +14,8 @@
                       '最早只能选到启用日期' if account.start_date else '') }}
     </div>
     <div class="filters-end">
-      <a class="btn" href="{{ url_for('account.estimate', number=account.account, start=start.isoformat(), end=end.isoformat(), refresh=1) }}"
-         title="跳过缓存，重新拉用量和单价" data-loading="正在重新拉用量和单价" data-loading-note="跳过缓存">强制刷新</a>
+      {{ refresh_link(url_for('account.estimate', number=account.account, start=start.isoformat(), end=end.isoformat(), refresh=1),
+                      '跳过缓存，重新拉用量和单价', '正在重新拉用量和单价') }}
     </div>
   </div>
   <noscript><button class="btn btn-primary" type="submit">查询</button></noscript>

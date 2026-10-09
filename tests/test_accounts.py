@@ -282,13 +282,13 @@ def test_停用的账号在页面上仍然可见并可一键恢复(admin, ledger
     post(admin, "/accounts/toggle", key=target.key, enabled="0")
     html = page(admin)
     (attrs, cells), _ = table_rows(html)
-    assert attrs["data-number"] == "111111111111"
+    assert attrs["data-who"] == "acct-one@example.com"
     assert attrs["class"] == "row-off" and attrs["data-state"] == "off"
     assert text(cells[3]) == "停用"
     # 恢复是安全可逆的，不再拦一道确认：它是操作格里的一个直接提交表单
     actions = cells[-1]
     assert 'action="/accounts/toggle"' in actions and 'name="enabled" value="1"' in actions
-    assert 'aria-label="恢复 111111111111"' in actions
+    assert 'aria-label="恢复 acct-one@example.com"' in actions
     assert html.count('id="dlg-off-') == len(LEDGER_ROWS) - 1
 
 
@@ -568,23 +568,24 @@ class TestAccountEmail:
         log = (ledger.parent / excel_source.AUDIT_NAME).read_text(encoding="utf-8")
         assert "EMAIL 空 → acct-one@example.com" in log
 
-    def test_the_table_shows_it_under_the_number(self, admin, ledger):
+    def test_the_table_shows_it_above_the_number(self, admin, ledger):
+        """主行邮箱（一眼认得出是谁），副行号码。"""
         (_, cells), _ = table_rows(page(admin))
         ident = cells[0]
-        assert text(ident) == "A 111111111111 acct-one@example.com"   # 头像字母、号码、邮箱
-        assert '<span class="acct-cell-mail" title="acct-one@example.com">acct-one@example.com</span>' in ident
+        assert text(ident) == "A acct-one@example.com 111111111111"   # 头像字母、邮箱、号码
+        assert '<span class="acct-cell-sub">111111111111</span>' in ident
 
     def test_an_old_account_says_it_is_missing(self, admin, ledger):
         rewrite_ledger(ledger)
         (_, cells), _ = table_rows(page(admin))
-        assert "未填账号邮箱" in text(cells[0])
-        assert "acct-cell-mail" not in cells[0]
+        assert text(cells[0]) == "A 111111111111 未填账号邮箱"          # 没有邮箱：号码当主行
+        assert 'class="acct-cell-name tab-num"' in cells[0] and "acct-cell-sub" not in cells[0]
 
     def test_the_dialogs_name_it(self, admin, ledger):
         html = page(admin)
-        assert '<span class="modal-sub">111111111111 · acct-one@example.com</span>' in _dialog(html, 'id="dlg-edit-1"')
-        assert "<strong>111111111111</strong>（acct-one@example.com）吗" in _dialog(html, 'id="dlg-off-1"')
-        assert "<strong>111111111111</strong>（acct-one@example.com）吗" in _dialog(html, 'id="dlg-del-1"')
+        assert '<span class="modal-sub">acct-one@example.com · 111111111111</span>' in _dialog(html, 'id="dlg-edit-1"')
+        assert "<strong>acct-one@example.com</strong>（111111111111）吗" in _dialog(html, 'id="dlg-off-1"')
+        assert "<strong>acct-one@example.com</strong>（111111111111）吗" in _dialog(html, 'id="dlg-del-1"')
 
     def test_the_field_is_a_required_email_input(self, admin, ledger):
         html = page(admin)
@@ -1236,14 +1237,14 @@ class TestIconButtons:
     def test_edit_and_disable_are_icons(self, admin, ledger):
         html = page(admin)
         assert ">修改</button>" not in html and ">停用</button>" not in html
-        assert 'aria-label="修改 111111111111"' in html
-        assert 'aria-label="停用 111111111111"' in html
+        assert 'aria-label="修改 acct-one@example.com"' in html
+        assert 'aria-label="停用 acct-one@example.com"' in html
 
     def test_restore_is_an_icon(self, admin, ledger):
         post(admin, "/accounts/toggle", key=by_account("111111111111").key, enabled="0")
         html = page(admin)
         assert ">恢复</button>" not in html
-        assert 'aria-label="恢复 111111111111"' in html
+        assert 'aria-label="恢复 acct-one@example.com"' in html
 
     def test_icons_still_open_their_dialogs(self, admin, ledger):
         """换的只是外观：弹窗照旧由 data-open 打开，停用照旧先确认。"""
@@ -1293,17 +1294,17 @@ class TestTable:
         post(admin, "/accounts/toggle", key=by_account("222222222222").key, enabled="0")
         (one, _), (two, _) = table_rows(page(admin))
         assert one["data-key"] == by_account("111111111111").key
-        assert one["data-search"].split() == ["111111111111", "acct-one@example.com", "alpha"]   # 小写，搜的时候也转小写
+        assert one["data-search"].split() == ["acct-one@example.com", "111111111111", "alpha"]   # 小写，搜的时候也转小写
         assert (one["data-partner"], one["data-state"], one["data-alert"], one["data-life"]) == ("ALPHA", "on", "tg", "正常|风控")
-        assert one["data-edit"] == "dlg-edit-1" and one["data-number"] == "111111111111"
+        assert one["data-edit"] == "dlg-edit-1" and one["data-who"] == "acct-one@example.com"
         assert (two["data-state"], two["data-alert"], two["data-life"], two["class"]) == ("off", "", "", "row-off")
 
     def test_the_account_cell_links_to_the_account_page(self, admin, ledger):
         (_, cells), _ = table_rows(page(admin))
         ident = cells[0]
-        assert 'data-sort="111111111111"' in ident
+        assert 'data-sort="acct-one@example.com"' in ident                # 按主行（邮箱）排
         assert re.search(r'<span class="avatar [^"]*\bavatar-sm\b[^"]*"[^>]*><span>A</span></span>', ident)
-        assert '<a class="acct-cell-id" href="/account/111111111111/"' in ident
+        assert re.search(r'<a class="acct-cell-name"\s+href="/account/111111111111/"', ident)
 
     def test_the_state_cell_keeps_the_masked_ak_in_its_title(self, admin, ledger):
         (_, cells), _ = table_rows(page(admin))
@@ -1339,7 +1340,7 @@ class TestTable:
         assert text(second[2]) == "未标记"
         for cells, number in ((first, "111111111111"), (second, "222222222222")):
             assert "data-life-edit" in cells[2]                  # 铅笔：打开整页共用的那个小弹层
-            assert f'aria-label="改 {number} 的生命周期"' in cells[2]
+            assert f'aria-label="改 {EMAILS[number]} 的生命周期"' in cells[2]
 
     def test_toolbar(self, admin, ledger):
         html = page(admin)
@@ -1388,16 +1389,53 @@ class TestToasts:
 
     def test_a_result_pops_up(self, admin, ledger):
         post(admin, "/accounts/create", **NEW_FORM)
-        assert toasts(page(admin)) == [("ok", "新增账号 333333333333（GAMMA），额度 150000（未设启用日期）。")]
+        assert toasts(page(admin)) == [
+            ("ok", "已添加账号 acct-three@example.com 没填启用日期，累计消费从 Cost Explorer 最早能查的那天算起。")
+        ]
+
+    def test_filling_in_a_missing_email_says_so_in_words(self, admin, ledger):
+        """老账号补上邮箱：提示说「改了账号邮箱」，不是审计日志里的「EMAIL 空 → …」。"""
+        rewrite_ledger(ledger)
+        _edit(admin, by_account("111111111111"), email="acct-one@example.com")
+        assert toasts(page(admin)) == [("ok", "已保存 acct-one@example.com 改了账号邮箱。")]
+        log = (ledger.parent / excel_source.AUDIT_NAME).read_text(encoding="utf-8")
+        assert "EMAIL 空 → acct-one@example.com" in log                # 审计日志照旧按列记
+
+    def test_several_fields_are_listed_by_their_names(self, admin, ledger):
+        _edit(admin, by_account("111111111111"), budget="777", start_date="2026-08-02", partner="ALPHA2")
+        assert toasts(page(admin)) == [("ok", "已保存 acct-one@example.com 改了上游、额度和启用日期。")]
+
+    def test_a_cleared_chat_list_says_the_switch_went_off(self, admin, ledger):
+        _edit(admin, by_account("111111111111"), tg_chat_ids="-1001234567890")
+        post(admin, "/accounts/tg-toggle", key=by_account("111111111111").key, tg_enabled="1")
+        page(admin)                                                        # 吃掉上面两步的提示
+        _edit(admin, by_account("111111111111"), tg_chat_ids=[""])
+        assert toasts(page(admin)) == [
+            ("ok", "已保存 acct-one@example.com 改了 TG 群组。群组 ID 全删了，TG 告警跟着关了。"),
+        ]
+
+    def test_switches_and_restores_name_the_account(self, admin, ledger):
+        key = by_account("111111111111").key
+        _edit(admin, by_account("111111111111"), tg_chat_ids="-1001234567890")
+        page(admin)
+        post(admin, "/accounts/tg-toggle", key=key, tg_enabled="1")
+        assert toasts(page(admin)) == [("ok", "TG 告警已开启 acct-one@example.com")]
+        post(admin, "/accounts/tg-toggle", key=key, tg_enabled="1")         # 页面过期，又点了一次「开」
+        assert toasts(page(admin)) == [("info", "没有改动 acct-one@example.com TG 告警本来就是开着的。")]
+        post(admin, "/accounts/toggle", key=key, enabled="0")
+        assert toasts(page(admin))[0] == ("ok", "已停用账号 acct-one@example.com")   # 后面还有一条：TG 通知发不出去
+        post(admin, "/accounts/toggle", key=key, enabled="1")
+        assert toasts(page(admin))[0] == ("ok", "已恢复账号 acct-one@example.com")
 
     def test_it_is_shown_once(self, admin, ledger):
         post(admin, "/accounts/create", **NEW_FORM)
         page(admin)
         assert toasts(page(admin)) == []
 
-    def test_nothing_changed_is_a_warning(self, admin, ledger):
+    def test_nothing_changed_is_just_a_note(self, admin, ledger):
+        """没改东西不是警告：一条会自己消失的提示。"""
         _edit(admin, by_account("111111111111"))
-        assert toasts(page(admin)) == [("warn", "没有任何字段发生变化，台账未改动。")]
+        assert toasts(page(admin)) == [("info", "没有改动 acct-one@example.com 填的和台账里一样，什么都没写。")]
 
     def test_validation_errors_stay_in_the_dialog(self, admin, ledger):
         html = post(admin, "/accounts/create", **{**NEW_FORM, "budget": "abc"}).get_data(as_text=True)
@@ -1496,13 +1534,15 @@ class TestAccountNotices:
         assert by_account("111111111111").enabled is False            # 照样停用了
         shown = toasts(page(admin))
         assert [tone for tone, _ in shown] == ["ok", "warn"]          # 改动成功，通知另起一条警告
-        assert "停用账号 111111111111" in shown[0][1]
+        assert shown[0][1] == "已停用账号 acct-one@example.com"
         assert "TG 通知没有全部发出去" in shown[1][1] and "连不上 Telegram" in shown[1][1]
 
     def test_missing_token_is_reported(self, admin, ledger):
         """测试里默认没有 Token：通知发不了，要说出来，而不是悄悄不发。"""
         post(admin, "/accounts/create", **NEW_FORM, tg_chat_ids=self.CHAT)
-        assert "TG 通知没有全部发出去：服务器没有配置 TELEGRAM_BOT_TOKEN" in page(admin)
+        shown = toasts(page(admin))
+        assert [tone for tone, _ in shown] == ["ok", "warn"]
+        assert shown[1][1].startswith("TG 通知没有全部发出去 服务器没有配置 TELEGRAM_BOT_TOKEN")
         assert by_account("333333333333") is not None                 # 账号照样建好了
 
     def test_the_disable_dialog_says_what_will_be_sent(self, admin, ledger):

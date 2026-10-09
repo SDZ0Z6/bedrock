@@ -1,7 +1,7 @@
 {# 账号页的「成本」页签（原来的成本和使用情况页）：这个账号在一段时间里按服务或标签
    拆开的消费，金额是按台账比率折算后的。 #}
 {% extends "account_base.html" %}
-{% from "_macros.html" import range_picker %}
+{% from "_macros.html" import range_picker, refresh_link %}
 {% block loading_label %}正在查各维度消费{% endblock %}
 
 {% block tab_content %}
@@ -32,9 +32,9 @@
       </select>
     </div>
     <div class="filters-end">
-      <a class="btn" href="{{ url_for('account.cost', number=account.account, start=start.isoformat(), end=end.isoformat(),
-                                      dim=dimension, granularity=granularity, refresh=1) }}"
-         title="跳过缓存，重新查 Cost Explorer" data-loading="正在重新查各维度消费" data-loading-note="跳过缓存">强制刷新</a>
+      {{ refresh_link(url_for('account.cost', number=account.account, start=start.isoformat(), end=end.isoformat(),
+                              dim=dimension, granularity=granularity, refresh=1),
+                      '跳过缓存，重新查 Cost Explorer', '正在重新查各维度消费') }}
     </div>
   </div>
   <noscript><button class="btn btn-primary" type="submit">查询</button></noscript>

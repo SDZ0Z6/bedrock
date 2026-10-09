@@ -270,9 +270,9 @@ class TestBusiness:
         head, rows, _ = table(page(board), "account")
         assert head == ["账号", "上游", "生命周期", "收入", "AWS 原价", "毛利", "毛利率", "收入比上月同期", "额度使用"]
         assert rows == [
-            ["B 222222222222 beta@example.com", "BETA", "风控", "$1,485.00", "$1,350.00", "$135.00", "9.09%", "持平", "11.55%"],
-            ["A 111111111111 alpha@example.com", "ALPHA", "正常", "$1,395.00", "$1,350.00", "$45.00", "3.23%", "持平", "2.17%"],
-            ["A 444444444444 alpha2@example.com", "ALPHA", "", "$900.00", "$750.00", "$150.00", "16.67%", "—", "1.80%"],
+            ["B beta@example.com 222222222222", "BETA", "风控", "$1,485.00", "$1,350.00", "$135.00", "9.09%", "持平", "11.55%"],
+            ["A alpha@example.com 111111111111", "ALPHA", "正常", "$1,395.00", "$1,350.00", "$45.00", "3.23%", "持平", "2.17%"],
+            ["A alpha2@example.com 444444444444", "ALPHA", "", "$900.00", "$750.00", "$150.00", "16.67%", "—", "1.80%"],
         ]
 
     def test_accounts_link_to_their_cost_tab(self, board):
@@ -370,7 +370,7 @@ class TestProblems:
         fail_daily(monkeypatch, {"222222222222"})
         html = page(board)
         [toast] = toasts(html)
-        assert (toast.tone, toast.title, toast.sub) == ("error", "查不到 Cost Explorer", "beta · 222222222222")
+        assert (toast.tone, toast.title, toast.sub) == ("error", "查不到 Cost Explorer", "beta@example.com · 222222222222")
         assert toast.text == "Cost Explorer 请求过于频繁，请稍后重试"
         assert "ThrottlingException: Rate exceeded (222222222222)" in toast.detail
 
@@ -379,7 +379,7 @@ class TestProblems:
         assert total[2:5] == ["$2,295.00", "$2,100.00", "$195.00"]              # 只剩 alpha 和 alpha2
         assert partners[1][:3] == ["BETA", "1 1 个查不到", "$0.00"]
         _, accounts, _ = table(html, "account")
-        assert accounts[-1] == ["B 222222222222 beta@example.com", "BETA", "风控", "查不到", "—", "—", "—", "—", "11.55%"]
+        assert accounts[-1] == ["B beta@example.com 222222222222", "BETA", "风控", "查不到", "—", "—", "—", "—", "11.55%"]
         # 查不到的格子 data-sort 留空，点表头排序时沉底
         block = re.search(r'id="detail-account".*?</table>', html, re.S).group(0)
         assert '<td class="num err-cell" data-sort=""' in block
@@ -390,7 +390,7 @@ class TestProblems:
         html = page(board)
         [toast] = toasts(html)
         assert (toast.title, toast.sub, toast.text) == (
-            "查不到累计消费", "beta · 222222222222", "凭证缺少 ce:GetCostAndUsage 权限",
+            "查不到累计消费", "beta@example.com · 222222222222", "凭证缺少 ce:GetCostAndUsage 权限",
         )
         assert ("danger", "查不到 Cost Explorer", "凭证缺少 ce:GetCostAndUsage 权限") in watch(html)[0][1]
         card = scrape(html[html.index(">额度</h3>") : html.index("</article>", html.index(">额度</h3>"))])

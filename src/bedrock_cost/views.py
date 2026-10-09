@@ -45,6 +45,14 @@ def page_meta() -> dict:
     }
 
 
+def flash_result(title: str, who: str = "", text: str = "", tone: str = "ok") -> None:
+    """操作结果的弹窗：粗体一句话，后面灰字说是哪个账号，下面一行补充说明（后两个都可以空）。
+
+    存进 flash 的是一个 dict，shell.html 认得出来、分三段画；别处 flash 的一句话照旧是标题。
+    """
+    flash({"title": title, "sub": who, "text": text}, tone)
+
+
 def tz_name() -> str:
     """本机时区写成 UTC+08:00。Windows 上 tzname() 会给出「Malay Peninsula Standard
     Time」这种长名字，放在标签里太占地方也不够明确。"""
@@ -138,10 +146,10 @@ def _ce_toasts(failed) -> list[dashboard.Toast]:
         stale = sum(1 for card in cards if card.stale_as_of)
         text = reason + ("。卡片上已标出，有上一次数据的照常显示" if stale else "。卡片上已标出")
         if len(cards) == 1:
-            title, sub = "查不到 Cost Explorer", f"{cards[0].label} · {cards[0].account}"
+            title, sub = "查不到 Cost Explorer", dashboard.who(cards[0])
         else:
             title, sub = f"{len(cards)} 个账号查不到 Cost Explorer", ""
-        detail = "\n".join(f"{card.label} · {card.account}：{card.error_detail}" for card in cards)
+        detail = "\n".join(f"{dashboard.who(card)}：{card.error_detail}" for card in cards)
         toasts.append(dashboard.Toast("error", title, sub, text, detail))
     return toasts
 
@@ -205,5 +213,5 @@ def clear_cache():
     activity.clear_cache()
     dashboard.clear_cache()
     ops_report.clear_cache()
-    flash("已清空缓存，下一次查询会重新调用 Cost Explorer 和 CloudWatch。", "ok")
+    flash_result("已清空缓存", text="下一次打开页面会重新查 Cost Explorer 和 CloudWatch。")
     return redirect(request.referrer or url_for("main.index"))

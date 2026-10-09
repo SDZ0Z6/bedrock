@@ -74,6 +74,37 @@ class TestPages:
         assert list(pages(dialog)) == ["basic", "mail", "tg"]
 
     @pytest.mark.parametrize("marker", ['id="dlg-create"', 'id="dlg-edit-1"'])
+    def test_every_tab_starts_with_an_icon(self, admin, ledger, marker):
+        """页签名字前面一个线条小图标：基础信息是证件，告警邮箱是信封，Telegram 是纸飞机。"""
+        dialog = _dialog(page(admin), marker)
+        labels = [label for _, _, label in TAB.findall(dialog)]
+        assert len(labels) == 3
+        assert all(label.lstrip().startswith('<svg class="icon"') for label in labels)
+
+    @pytest.mark.parametrize("marker", ['id="dlg-create"', 'id="dlg-edit-1"'])
+    def test_the_alert_pages_open_on_their_fields(self, admin, ledger, marker):
+        """告警邮箱、Telegram 告警两页没有顶部那段说明，一打开就是要填的东西。"""
+        found = pages(_dialog(page(admin), marker))
+        for key, first in (("mail", 'name="mail_provider"'), ("tg", 'name="tg_chat_ids"')):
+            body = found[key][1]
+            assert "setting-intro" not in body
+            assert "<p" not in body[: body.index(first)]
+
+    @pytest.mark.parametrize("marker", ['id="dlg-create"', 'id="dlg-edit-1"'])
+    def test_the_email_comes_before_the_number(self, admin, ledger, marker):
+        """和各页面一样，邮箱在前、号码在后；打开弹窗时光标落在邮箱上。"""
+        basic = pages(_dialog(page(admin), marker))["basic"][1]
+        assert basic.index('name="email"') < basic.index('name="account"')
+        assert "querySelector('.tab-page.is-active [name=\"email\"]')" in page(admin)
+
+    def test_enter_saves_instead_of_testing_the_mailbox(self, admin, ledger):
+        """表单里第一个提交按钮是「告警邮箱」页里的「测试连接」：浏览器默认的回车会去点它。
+        页面脚本接管回车，改成点底部的主按钮（保存 / 添加账号）。"""
+        html = page(admin)
+        assert "event.isComposing" in html                      # 输入法选字时的回车不算
+        assert "requestSubmit(main)" in html and "'.modal-foot [type=\"submit\"]'" in html
+
+    @pytest.mark.parametrize("marker", ['id="dlg-create"', 'id="dlg-edit-1"'])
     def test_every_field_is_on_its_own_page(self, admin, ledger, marker):
         found = pages(_dialog(page(admin), marker))
         wanted = {

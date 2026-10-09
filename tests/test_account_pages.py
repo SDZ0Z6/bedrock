@@ -36,6 +36,7 @@ from .test_web import (  # noqa: F401  page_env / usage_states 是 autouse，imp
     rewrite,
     scrape,
     toasts,
+    usage_state,
     usage_states,
 )
 
@@ -144,6 +145,43 @@ class TestHeader:
             (f"{ALPHA}#2", "selected"), (f"{BETA}#3", ""), (f"{GAMMA}#4", ""),
         ]
         assert form.index('<optgroup label="已停用">') < form.index(f'value="{GAMMA}#4"')   # 停用的放最后一组
+
+    def test_the_email_is_the_title_and_the_number_comes_next(self, pages):
+        """主行是邮箱（号码一眼认不出是谁），号码在下面那行的最前面。"""
+        html = hero(get(pages, f"/account/{BETA}/"))
+        assert scrape(re.search(r"<h1[^>]*>(.*?)</h1>", html, re.S).group(1)) == "beta@example.com"
+        sub = scrape(re.search(r'<p class="acct-hero-sub">(.*?)</p>', html, re.S).group(1))
+        assert sub.startswith(f"{BETA} · BETA ·")
+
+    def test_without_an_email_the_number_is_the_title(self, pages, book):
+        rewrite(book, book_rows(EMAIL={BETA: ""}))
+        html = hero(get(pages, f"/account/{BETA}/"))
+        assert scrape(re.search(r"<h1[^>]*>(.*?)</h1>", html, re.S).group(1)) == BETA
+        assert scrape(re.search(r'<p class="acct-hero-sub">(.*?)</p>', html, re.S).group(1)).startswith("未填账号邮箱")
+
+    def test_the_picker_puts_the_email_first(self, pages):
+        html = get(pages, f"/account/{ALPHA}/")
+        button = re.search(r'<button class="acct-picker-btn".*?</button>', html, re.S).group(0)
+        assert [scrape(text) for text in re.findall(r'<span class="acct-picker-(?:name|sub)"[^>]*>(.*?)</span>', button)] == [
+            "alpha@example.com", ALPHA,
+        ]
+        options = re.findall(r'<span class="acct-opt-name[^"]*">(.*?)</span>\s*<span class="acct-opt-sub[^"]*">(.*?)</span>', html)
+        assert options == [("alpha@example.com", ALPHA), ("beta@example.com", BETA), ("gamma@example.com", GAMMA)]
+        # 不开 JS 时的原生下拉也是邮箱在前
+        assert re.search(rf'<option value="{ALPHA}#2"\s*selected>alpha@example.com · {ALPHA} · ALPHA</option>', html)
+
+    @pytest.mark.parametrize("tab", [key for key, _ in TABS])
+    def test_unreadable_usage_is_an_error(self, pages, usage_states, tab):
+        """用量读不到（四个区都被拒）就是异常：红色的签，和概览卡片上一个说法。"""
+        usage_states[BETA] = usage_state("unknown", errors=["us-east-1：被拒绝"])
+        chip = re.search(r'<span class="acct-chip k-(\w+)">(.*?)</span>', hero(get(pages, f"/account/{BETA}/{tab}")), re.S)
+        assert (chip.group(1), scrape(chip.group(2))) == ("error", "异常")
+
+    def test_a_cost_explorer_failure_is_an_error_too(self, pages, monkeypatch):
+        """摘要页签查不到累计消费：用量明明在跑，状态也算异常（账号本身在报错）。"""
+        fail_cumulative(monkeypatch, {ALPHA: ce_failure(ALPHA)})
+        chip = re.search(r'<span class="acct-chip k-(\w+)">(.*?)</span>', hero(get(pages, f"/account/{ALPHA}/")), re.S)
+        assert (chip.group(1), scrape(chip.group(2))) == ("error", "异常")
 
     def test_edit_link_opens_this_row_in_account_management(self, pages):
         assert f'href="/accounts/?edit={BETA}%233"' in get(pages, f"/account/{BETA}/")
@@ -378,7 +416,7 @@ class TestSummaryTab:
         html = get(pages, f"/account/{ALPHA}/")
         [toast] = toasts(html)
         assert (toast.tone, toast.title, toast.sub, toast.text) == (
-            "error", "查不到 Cost Explorer", f"alpha · {ALPHA}", "凭证缺少 ce:GetCostAndUsage 权限",
+            "error", "查不到 Cost Explorer", f"alpha@example.com · {ALPHA}", "凭证缺少 ce:GetCostAndUsage 权限",
         )
         assert "is not authorized to perform: ce:GetCostAndUsage" in toast.detail
         assert "没有查到消费数据 · 额度 $500,000.00" in scrape(html)
@@ -402,14 +440,14 @@ class TestSummaryTab:
         monkeypatch.setattr(cloudwatch_metrics, "_fetch_region", fetch)
         [toast] = toasts(get(pages, f"/account/{ALPHA}/"))
         assert (toast.title, toast.sub, toast.text) == (
-            "4 个区读不到 CloudWatch", f"alpha · {ALPHA}", "凭证缺少 cloudwatch:GetMetricData 权限",
+            "4 个区读不到 CloudWatch", f"alpha@example.com · {ALPHA}", "凭证缺少 cloudwatch:GetMetricData 权限",
         )
         assert toast.detail.splitlines() == [f"{r}：AccessDenied ({r})" for r in cloudwatch_metrics.DEFAULT_REGIONS]
 
     def test_daily_cost_failure_is_its_own_toast(self, pages, monkeypatch):
         fail_daily(monkeypatch, {ALPHA})
         [toast] = toasts(get(pages, f"/account/{ALPHA}/"))
-        assert (toast.title, toast.sub) == ("查不到每天的成本", f"alpha · {ALPHA}")
+        assert (toast.title, toast.sub) == ("查不到每天的成本", f"alpha@example.com · {ALPHA}")
 
 
 # ====================================================================== 成本
@@ -488,7 +526,7 @@ class TestCostTab:
         html = get(pages, f"/account/{ALPHA}/cost")
         [toast] = toasts(html)
         assert (toast.title, toast.sub, toast.text) == (
-            "查不到 Cost Explorer", f"alpha · {ALPHA}", "Cost Explorer 请求过于频繁，请稍后重试",
+            "查不到 Cost Explorer", f"alpha@example.com · {ALPHA}", "Cost Explorer 请求过于频繁，请稍后重试",
         )
         assert "所选区间没有消费数据。" in scrape(html)
 
@@ -581,7 +619,7 @@ class TestUsageTab:
         assert "四个区都读不到 CloudWatch（原因见右上角），这段时间的调用量看不到——不是没有调用。" in scrape(html)
         cards = re.findall(r'<a class="metric-card"[^>]*>(.*?)</a>', html, re.S)
         assert all(scrape(card).endswith("— 读不到 CloudWatch") for card in cards)
-        assert [(t.title, t.sub) for t in toasts(html)] == [("4 个区读不到 CloudWatch", f"alpha · {ALPHA}")]
+        assert [(t.title, t.sub) for t in toasts(html)] == [("4 个区读不到 CloudWatch", f"alpha@example.com · {ALPHA}")]
 
     def test_unreadable_tags_are_flagged(self, pages, monkeypatch):
         """读不到推理配置上的标签时全部流量都会算成无标签，标签筛选不可信，得说出来。"""
@@ -738,7 +776,7 @@ class TestEstimateTab:
         monkeypatch.setattr(cost_estimate, "_fetch_region", lambda account, region, start, end, stamps: ({}, False, error))
         html = get(pages, f"/account/{ALPHA}/estimate")
         assert [(t.title, t.sub, t.text) for t in toasts(html)] == [
-            ("4 个区读不到 CloudWatch", f"alpha · {ALPHA}", "凭证缺少 cloudwatch:ListMetrics 权限"),
+            ("4 个区读不到 CloudWatch", f"alpha@example.com · {ALPHA}", "凭证缺少 cloudwatch:ListMetrics 权限"),
         ]
 
     def test_a_crash_in_the_data_layer_is_shown_not_a_500(self, pages, monkeypatch):

@@ -1,4 +1,4 @@
-{# 一个账号的页面：面包屑 + 页头（头像、号码、邮箱、状态、切换账号、编辑）+ 五个页签。
+{# 一个账号的页面：面包屑 + 页头（头像、邮箱、号码、状态、切换账号、编辑）+ 五个页签。
    五个页签都继承这一页，页头在页签之间不变。各页签只填 tab_content。
    看的是哪个账号写在网址里（/account/<号码>/…），能直接收藏或发给别人。 #}
 {% extends "shell.html" %}
@@ -22,15 +22,18 @@
     {{ avatar(account.avatar, large=true) }}
     <div class="acct-hero-main">
       <div class="acct-hero-title">
-        <h1>{{ account.account }}</h1>
+        {# 主行是邮箱（号码一眼认不出是谁），号码放在下面那行的最前面。没填邮箱时号码当主行 #}
+        <h1 {% if not account.email %}class="tab-num"{% endif %}>{{ account.email or account.account }}</h1>
         {% if activity %}
-          <span class="acct-chip k-{{ 'error' if activity.kind == 'unknown' and query_failed else activity.kind }}">
-            <i class="state-dot k-{{ activity.kind }}" aria-hidden="true"></i>{{ activity.label }}</span>
+          {# 和概览卡片同一套：用量读不到、消费查询失败都算异常（见 dashboard.STATES） #}
+          {% set state = 'error' if activity.kind == 'unknown' or query_failed else activity.kind %}
+          <span class="acct-chip k-{{ state }}">
+            <i class="state-dot k-{{ state }}" aria-hidden="true"></i>{{ '异常' if state == 'error' else activity.label }}</span>
         {% endif %}
         {% if not account.enabled %}<span class="acct-chip">已停用</span>{% endif %}
       </div>
       <p class="acct-hero-sub">
-        {%- if account.email %}<span>{{ account.email }}</span>{% else %}<span class="tone-warn">未填账号邮箱</span>{% endif %}
+        {%- if account.email %}<span class="tab-num">{{ account.account }}</span>{% else %}<span class="tone-warn">未填账号邮箱</span>{% endif %}
         <span class="dot-sep" aria-hidden="true">·</span><span>{{ account.partner }}</span>
         <span class="dot-sep" aria-hidden="true">·</span>
         {%- if account.start_date %}<span title="启用日期 {{ account.start_date.isoformat() }}">{{ account.start_date.isoformat() }} 启用 · 第 {{ days_active }} 天</span>

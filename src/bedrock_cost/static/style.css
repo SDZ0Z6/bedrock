@@ -384,7 +384,7 @@ td.num, th.num, .tab-num { font-variant-numeric: tabular-nums; }
 .filters-row + .filters-row { padding-top: 14px; border-top: 1px solid var(--line); }
 .presets { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .filters .presets { margin-left: auto; }
-/* 一排里靠右的那一组（强制刷新之类） */
+/* 一排里靠右的那一组（「刷新数据」之类） */
 .filters-end { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 
 /* 老页面上的圆角快捷按钮。新页面用 .seg */
@@ -463,7 +463,7 @@ td.num, th.num, .tab-num { font-variant-numeric: tabular-nums; }
  * 原始报错收在「查看详情」后面。 */
 .toast-stack {
   position: fixed;
-  /* 页头右侧刻意留空（强制刷新、排序这些都放在筛选条里），弹窗盖在这里不挡东西 */
+  /* 页头右侧刻意留空（「刷新数据」这些都放在筛选条里），弹窗盖在这里不挡东西 */
   top: 16px;
   right: 20px;
   z-index: 90;
@@ -700,10 +700,10 @@ tfoot td, tfoot th {
   border-bottom: none;
 }
 
-/* 账号的身份格：号码一行，邮箱一行。号码是主标识，邮箱帮人认 */
+/* 账号的身份格：主行邮箱（一眼认得出是谁），副行号码（等宽数字、灰一点） */
 .acct-cell { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.acct-cell-id { font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: .01em; }
-.acct-cell-mail { font-size: 12px; color: var(--text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.acct-cell-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.acct-cell-sub { font-size: 12px; color: var(--text-mute); font-variant-numeric: tabular-nums; letter-spacing: .01em; }
 .acct-cell-none { font-size: 12px; color: var(--warn); }
 
 /* ------------------------------------------------------- 老的使用率进度条 */
@@ -831,7 +831,25 @@ tfoot td, tfoot th {
   margin: 4px 0 22px;
 }
 .overview-filters { display: flex; flex-direction: column; gap: 10px; }
-.overview-tools { display: flex; align-items: center; gap: 10px; }
+/* 筛选签右边的「刷新数据」：和筛选签一个样子。图标的转动写在下面的动画段里 */
+.refresh-btn {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 14px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text-dim);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.refresh-btn:hover { border-color: var(--line-strong); color: var(--text); text-decoration: none; }
+/* 「刷新数据」的两个箭头（胶囊和方角按钮里都是它） */
+.refresh-btn .refresh-icon,
+.btn .refresh-icon { width: 14px; height: 14px; flex: 0 0 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .fchips { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .fchips-label { min-width: 64px; font-size: 13px; color: var(--text-mute); }
 .fchip {
@@ -1037,14 +1055,16 @@ tfoot td, tfoot th {
 }
 .acct-chip.k-active { color: var(--text); }
 .acct-chip.k-stopped { background: var(--panel-3); border-color: var(--panel-3); color: var(--text); }
-.acct-chip.k-error { background: var(--danger-tint); border-color: var(--danger-edge); color: var(--danger); }
+.acct-chip.k-error,
+.acct-chip.k-unknown { background: var(--danger-tint); border-color: var(--danger-edge); color: var(--danger); }
 
 /* 头像旁边三行：带色点的状态小字、主行邮箱（大一点、加粗）、副行号码。
-   状态的字跟着语气上色：活跃绿、已中断黄、查询异常红，其余灰 */
+   状态的字跟着语气上色：活跃绿、已中断黄、异常红，无调用灰 */
 .acct-status { display: flex; align-items: center; gap: 7px; margin: 0 0 3px; font-size: 12.5px; font-weight: 500; color: var(--text-mute); }
 .acct-status.k-active { color: var(--ok); }
 .acct-status.k-stopped { color: var(--warn); }
-.acct-status.k-error { color: var(--danger); }
+.acct-status.k-error,
+.acct-status.k-unknown { color: var(--danger); }
 .acct-name { margin: 0; font-size: 16.5px; font-weight: 600; line-height: 1.35; letter-spacing: -0.005em;
              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .acct-sub { margin: 1px 0 0; font-size: 13px; color: var(--text-mute); font-variant-numeric: tabular-nums; letter-spacing: .01em; }
@@ -1126,7 +1146,7 @@ tfoot td, tfoot th {
   display: flex;
   align-items: center;
   gap: 9px;
-  width: 360px;
+  width: 380px;
   max-width: 100%;
   height: 36px;
   padding: 0 32px 0 6px;
@@ -1144,8 +1164,9 @@ tfoot td, tfoot th {
 .acct-picker-btn:focus-visible { outline: none; border-color: var(--accent-strong); box-shadow: 0 0 0 3px var(--accent-tint); }
 .acct-picker-btn .avatar-sm,
 .acct-picker-btn .avatar-sm > span { width: 24px; height: 24px; }
-.acct-picker-id { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.acct-picker-mail { min-width: 0; color: var(--text-mute); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 主行邮箱（太长就省略号），后面跟着灰色的号码 */
+.acct-picker-name { min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acct-picker-sub { flex: 0 0 auto; color: var(--text-mute); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 .acct-picker-pop {
   position: absolute;
@@ -1189,8 +1210,9 @@ tfoot td, tfoot th {
 .acct-opt.is-active { background: var(--hover-strong); }
 .acct-opt[aria-selected="true"] { background: var(--panel-3); }
 .acct-opt-text { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
-.acct-opt-id { font-size: 13.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.acct-opt-mail { font-size: 12.5px; color: var(--text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acct-opt-name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acct-opt-sub { font-size: 12.5px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
+.acct-opt-sub.tone-warn { color: var(--warn); }
 .acct-opt-side { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: 0 0 auto; font-size: 12px; color: var(--text-mute); }
 .acct-opt-check { width: 16px; height: 16px; flex: 0 0 16px; fill: none; stroke: var(--text); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; visibility: hidden; }
 .acct-opt[aria-selected="true"] .acct-opt-check { visibility: visible; }
@@ -1239,8 +1261,9 @@ tfoot td, tfoot th {
 .state-dot.k-active { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-tint); }
 .state-dot.k-stopped { border: 1.6px solid var(--warn); }
 .state-dot.k-idle { background: #c2c0b6; }
-.state-dot.k-unknown { border: 1.6px dashed var(--text-mute); }
-.state-dot.k-error { background: var(--danger); border-radius: 2px; transform: rotate(45deg) scale(.85); }
+/* 异常：红色小菱形。用量读不到（unknown）也算异常，和它一个样子 */
+.state-dot.k-error,
+.state-dot.k-unknown { background: var(--danger); border-radius: 2px; transform: rotate(45deg) scale(.85); }
 .state-error { color: var(--danger); align-items: flex-start; }
 .state-error .state-sub { color: var(--danger); white-space: normal; }
 .state-icon { width: 14px; height: 14px; flex: 0 0 14px; margin-top: 2px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
@@ -1457,11 +1480,11 @@ th[aria-sort="descending"]::after { content: "↓"; opacity: 1; color: var(--acc
 .col-ratio { font-variant-numeric: tabular-nums; }
 .ratio-sep { margin: 0 4px; color: var(--text-mute); }
 
-/* 账号格：头像 + 号码（点了去这个账号的页面）+ 邮箱 */
+/* 账号格：头像 + 邮箱（点了去这个账号的页面）+ 号码 */
 .ident-cell { display: flex; align-items: center; gap: 10px; min-width: 0; }
-a.acct-cell-id { color: var(--text); text-decoration: none; }
-a.acct-cell-id:hover { color: var(--accent-dim); text-decoration: underline; text-underline-offset: 2px; }
-.accounts-table .acct-cell-mail { max-width: 210px; }
+a.acct-cell-name { color: var(--text); text-decoration: none; }
+a.acct-cell-name:hover { color: var(--accent-dim); text-decoration: underline; text-underline-offset: 2px; }
+.accounts-table .acct-cell-name { max-width: 230px; }
 
 /* 生命周期格：几个签 + 一支铅笔（有鼠标的设备上划到这一行才露出来） */
 .life-cell { display: flex; align-items: center; gap: 6px; }
@@ -1691,6 +1714,19 @@ dialog.modal > form { display: flex; flex-direction: column; max-height: calc(10
 }
 .modal-tab:hover { color: var(--text); }
 .modal-tab[aria-selected="true"] { color: var(--text); font-weight: 500; border-bottom-color: var(--accent); }
+/* 页签名字前面的线条小图标：没选中时浅一点，选中跟着字变深 */
+.modal-tab .icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: .8;
+}
+.modal-tab[aria-selected="true"] .icon { opacity: 1; }
 .modal-tab:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: -2px; border-radius: 6px 6px 0 0; }
 .tab-optional {
   padding: 0 6px;
@@ -1708,21 +1744,11 @@ dialog.modal > form { display: flex; flex-direction: column; max-height: calc(10
 .tab-page.is-active { visibility: visible; }
 .tab-page > .page-note { margin-top: 14px; }
 
-/* 弹窗里「告警邮箱」「Telegram 告警」两页同一个骨架：一段浅底说明 → 字段（各自的小字提示
-   贴在字段下面）→ 一道细线隔开的测试按钮 → 结果 → 页脚一句提示 */
+/* 弹窗里「告警邮箱」「Telegram 告警」两页同一个骨架：字段（各自的小字提示贴在字段下面）
+   → 一道细线隔开的测试按钮 → 结果 → 页脚一句提示 */
 .setting-block { display: flex; flex-direction: column; gap: 16px; }
 /* .field 是 flex，会盖掉 hidden 属性默认的 display: none */
 .setting-block [hidden] { display: none !important; }
-.setting-intro {
-  margin: 0;
-  padding: 11px 14px;
-  border: 1px solid var(--line-soft);
-  border-radius: 10px;
-  background: var(--panel-2);
-  font-size: 13px;
-  line-height: 1.65;
-  color: var(--text-dim);
-}
 .setting-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.5fr); gap: 14px; }
 .setting-grid .field-full { grid-column: 1 / -1; }
 .setting-grid .field input,
@@ -1923,6 +1949,11 @@ dialog.modal > form { display: flex; flex-direction: column; max-height: calc(10
   .heat-cell,
   .week-cell { animation: cell-in .45s ease backwards; animation-delay: calc(var(--i, 0) * 16ms); }
   @keyframes cell-in { from { opacity: 0; transform: scale(.82); } }
+  /* 「刷新数据」：悬停时图标转半圈，点了就一直转到新页面回来（app.js 加 is-busy） */
+  [data-refresh] .refresh-icon { transition: transform .5s cubic-bezier(.33, 1, .68, 1); }
+  [data-refresh]:hover .refresh-icon { transform: rotate(180deg); }
+  [data-refresh].is-busy .refresh-icon { animation: refresh-spin .9s linear infinite; }
+  @keyframes refresh-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 }
 
 /* 图例做成可以点的签：点一下只看这一项 */
@@ -1998,6 +2029,7 @@ dialog.modal > form { display: flex; flex-direction: column; max-height: calc(10
 .near-list { display: flex; flex-direction: column; gap: 12px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
 .near-title { margin: 0; font-size: 12.5px; color: var(--text-mute); }
 .near-item .bar-item-name { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.near-name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .near-item .avatar-sm,
 .near-item .avatar-sm > span { width: 22px; height: 22px; font-size: 11px; }
 .near-item .meter { --meter: var(--ok); }
@@ -2016,7 +2048,8 @@ dialog.modal > form { display: flex; flex-direction: column; max-height: calc(10
 .avatar-lg.avatar-emoji > span { font-size: 24px; }
 .acct-hero-main { flex: 1 1 360px; min-width: 0; }
 .acct-hero-title { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.acct-hero-title h1 { margin: 0; font-size: 30px; line-height: 1.2; font-variant-numeric: tabular-nums; }
+/* 主行是邮箱：太长时折行，不把右边的切换账号挤出去 */
+.acct-hero-title h1 { min-width: 0; margin: 0; font-size: 30px; line-height: 1.2; overflow-wrap: anywhere; }
 .acct-hero-sub { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0 0; font-size: 13.5px; color: var(--text-dim); }
 .acct-hero-sub .dot-sep { color: var(--line-strong); }
 .acct-hero-actions { display: flex; align-items: center; gap: 10px; }
@@ -2218,7 +2251,7 @@ dialog.modal > form { display: flex; flex-direction: column; max-height: calc(10
 
 /* 账号格整格是个链接：去这个账号的页面 */
 a.ident-link { color: inherit; text-decoration: none; border-radius: 8px; }
-a.ident-link:hover .acct-cell-id { color: var(--accent-dim); text-decoration: underline; text-underline-offset: 2px; }
+a.ident-link:hover .acct-cell-name { color: var(--accent-dim); text-decoration: underline; text-underline-offset: 2px; }
 a.ident-link:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 
 /* 需要关注：一个账号一行，右边是它的几个问题（最要紧的在前） */
@@ -2232,7 +2265,7 @@ a.ident-link:focus-visible { outline: 2px solid var(--accent-strong); outline-of
   border-bottom: 1px solid var(--line-soft);
 }
 .watch-item:first-child { padding-top: 2px; }
-.watch-item .acct-cell-mail { max-width: 180px; }
+.watch-item .acct-cell-name { max-width: 190px; }
 .watch-issues { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .issue {
   display: inline-flex;

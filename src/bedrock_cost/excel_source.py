@@ -1026,18 +1026,28 @@ def _show(value: object) -> str:
     return _clean(value) or "空"
 
 
-def _write_editable(sheet, index: dict[str, int], row: int, data: dict) -> list[str]:
-    """写入可编辑字段，返回真正发生变化的项（供审计和页面提示用）。"""
-    changes: list[str] = []
+class Note(str):
+    """一次写入的审计描述：它本身就是写进审计日志的那句话。fields 是真正改了的字段（内部名），
+    账号管理页的提示用它说人话（「改了额度和启用日期」），不用回头去拆审计日志里的字。"""
+
+    fields: tuple[str, ...]
+
+    def __new__(cls, text: str, fields=()):
+        note = super().__new__(cls, text)
+        note.fields = tuple(fields)
+        return note
+
+
+def _write_editable(sheet, index: dict[str, int], row: int, data: dict) -> dict[str, str]:
+    """写入可编辑字段，返回真正发生变化的项 {字段: 审计里的那半句}（供审计和页面提示用）。"""
+    changes: dict[str, str] = {}
     for name in EDITABLE:
         column = _ensure_column(sheet, index, name)
         before = sheet.cell(row=row, column=column).value
         after = data[name]
         if _NORMALIZE[name](before) == after:
             continue
-        changes.append(
-            f"{INTERNAL_TO_EXCEL[name]} {_show(before)} → {_show(after)}"
-        )
+        changes[name] = f"{INTERNAL_TO_EXCEL[name]} {_show(before)} → {_show(after)}"
         # 必须写 .value，不能用 cell(..., value=after)：openpyxl 的 cell() 把
         # value=None 当成「没给值」直接跳过，于是「把启用日期清空」会变成空操作
         # ——审计日志记了「→ 空」，单元格却纹丝不动。
@@ -1114,23 +1124,24 @@ def update_account(key: str, data: dict, actor: str = "") -> str:
     def action(sheet, index) -> str:
         row = _locate(sheet, index, key)
         changes = _write_editable(sheet, index, row, data)
-        changes += _write_mail_password(sheet, index, row, data)
+        for line in _write_mail_password(sheet, index, row, data):
+            changes["mail_password"] = line
         # 开关不归弹窗管，但群组 ID 全删光了开关还开着，就成了「开着却没处发」——
         # 顺手关掉。和表格里「没填群开不了」是同一条规矩
         if not data["tg_chat_ids"] and "tg_enabled" in index:
             switch = sheet.cell(row=row, column=index["tg_enabled"])
             if _to_flag(switch.value):
                 switch.value = False
-                changes.append("TG_ENABLED 开 → 关（群组 ID 全删了）")
+                changes["tg_enabled"] = "TG_ENABLED 开 → 关（群组 ID 全删了）"
         # 邮箱地址删了：同理，邮件告警跟着关
         if not data.get("mail_address") and "mail_enabled" in index:
             switch = sheet.cell(row=row, column=index["mail_enabled"])
             if _to_flag(switch.value):
                 switch.value = False
-                changes.append("MAIL_ENABLED 开 → 关（告警邮箱删了）")
+                changes["mail_enabled"] = "MAIL_ENABLED 开 → 关（告警邮箱删了）"
         if not changes:
             return ""
-        return f"修改账号 {data['account']}：" + "；".join(changes)
+        return Note(f"修改账号 {data['account']}：" + "；".join(changes.values()), changes)
 
     return _mutate(action, actor, backup=True)
 

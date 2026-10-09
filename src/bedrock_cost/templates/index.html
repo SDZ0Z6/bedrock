@@ -1,5 +1,5 @@
 {% extends "shell.html" %}
-{% from "_macros.html" import avatar %}
+{% from "_macros.html" import avatar, refresh_link %}
 {% block title %}概览 · Bedrock 成本监控{% endblock %}
 {% block page_title %}概览{% endblock %}
 {% block loading_label %}正在查 Cost Explorer{% endblock %}
@@ -13,13 +13,14 @@
   {%- endif -%}
 {%- endblock %}
 
+{# 跳过缓存重查。和旁边的筛选签一个样子（圆角胶囊、白底细边）。
+   不放页头：右上角的报错弹窗会把它盖住，偏偏有报错的时候最想点它 #}
 {% macro refresh_button() -%}
-  <a class="btn" href="{{ url_for('main.index', refresh=1) }}"
-     title="跳过缓存，重新调用 Cost Explorer 和 CloudWatch"
-     data-loading="正在重新查 Cost Explorer" data-loading-note="跳过缓存">强制刷新</a>
+  {{ refresh_link(url_for('main.index', refresh=1), '跳过 ' ~ cache_label ~ ' 的缓存，重新查 Cost Explorer 和 CloudWatch',
+                  '正在重新查 Cost Explorer', pill=true) }}
 {%- endmacro %}
 
-{# 出不了报表时没有筛选条，强制刷新只能放在页头 #}
+{# 出不了报表时没有筛选条（也没有报错弹窗），刷新只能放在页头 #}
 {% block page_actions %}{% if not report %}{{ refresh_button() }}{% endif %}{% endblock %}
 
 {# 卡片三列小标签前面的图标：上游（一栋楼）、启用日期（日历）、已启用（钟） #}
@@ -74,7 +75,9 @@
           <p class="near-title">快用完的账号</p>
           {% for row in near_limit %}
             <div class="bar-item near-item">
-              <span class="bar-item-name">{{ avatar(row.avatar, small=true) }}{{ row.label }}</span>
+              {# 卡片窄，和旁边两张图的图例一样写短名（邮箱 @ 前面那段），全称和号码在悬停提示里 #}
+              <span class="bar-item-name" title="{% if row.email %}{{ row.email }} · {% endif %}{{ row.account }}">
+                {{- avatar(row.avatar, small=true) }}<span class="near-name">{{ row.label }}</span></span>
               <span class="bar-item-value">{{ row.usage_pct | pct }}</span>
               {# 进场时一条接一条长到位（--delay 错开） #}
               <div class="meter tone-{{ row.level }}" aria-hidden="true"><i style="width: {{ row.bar_width }}%; --delay: {{ 300 + loop.index0 * 120 }}ms"></i></div>
@@ -161,39 +164,22 @@
         </div>
       </div>
     {% endif %}
-    <div class="overview-tools">
-      {% if report.rows %}
-        <label class="sr-only" for="acct-sort">卡片排序</label>
-        <select class="select" id="acct-sort" title="卡片排序">
-          <option value="risk">有问题的排前面</option>
-          <option value="usage">按使用率</option>
-          <option value="balance">按余额（少的在前）</option>
-          <option value="order">按台账顺序</option>
-        </select>
-      {% endif %}
-      {{ refresh_button() }}
-    </div>
+    {{ refresh_button() }}
   </div>
 
   <!-- ------------------------------------------------ 账号卡片 -->
   <section class="acct-grid" id="acct-grid" aria-label="账号">
+    {# 顺序是服务端排好的：异常的在前，然后是用量中断的，同一档里使用率高的在前 #}
     {% for row in report.rows %}
-      {% set chip = 'error' if row.activity.kind == 'unknown' and row.error else row.activity.kind %}
-      <article class="acct-card"
-               data-life="{{ row.lifecycle | join('|') }}"
-               data-state="{{ row.activity.kind }}{% if row.error %} error{% endif %}"
-               data-risk="{{ 0 if row.error else (1 if row.activity.kind == 'stopped' else 2) }}"
-               data-usage="{{ row.usage_pct if row.usage_pct is not none else -1 }}"
-               data-balance="{{ row.balance if row.has_numbers else '' }}"
-               data-order="{{ row.order }}">
+      <article class="acct-card" data-life="{{ row.lifecycle | join('|') }}" data-state="{{ row.state }}">
         <div class="acct-body">
         <div class="acct-top">
           {{ avatar(row.avatar) }}
           {# 状态是名字上面一行带色点的小字；主行是邮箱（一眼认得出是谁），副行是号码。
              没填邮箱时号码当主行。状态不占右上角，邮箱就能用满整行宽度 #}
           <div class="acct-ident">
-            <p class="acct-status k-{{ chip }}">
-              <i class="state-dot k-{{ row.activity.kind }}" aria-hidden="true"></i>{{ row.activity.label }}</p>
+            <p class="acct-status k-{{ row.state }}">
+              <i class="state-dot k-{{ row.state }}" aria-hidden="true"></i>{{ row.state_label }}</p>
             {% if row.email %}
               <p class="acct-name" title="{{ row.email }}">{{ row.email }}</p>
               <p class="acct-sub">{{ row.account }}</p>
@@ -276,7 +262,7 @@
           {# 卡片里唯一的链接，它的 ::after 盖住整张卡片：点哪里都是进这个账号的页面 #}
           <a class="btn btn-dark acct-go" href="{{ url_for('account.summary', number=row.account) }}"
              data-loading="正在读这个账号"
-             aria-label="查看 {{ row.account }}{% if row.email %}（{{ row.email }}）{% endif %} 的详情">查看详情</a>
+             aria-label="查看 {{ row.email or row.account }}{% if row.email %}（{{ row.account }}）{% endif %} 的详情">查看详情</a>
         </div>
       </article>
     {% endfor %}
@@ -299,7 +285,6 @@
 (function () {
   const grid = document.getElementById('acct-grid');
   const empty = document.getElementById('acct-empty');
-  const sort = document.getElementById('acct-sort');
   if (!grid) return;
   const cards = [...grid.querySelectorAll('.acct-card')];
   const picked = { life: new Set(), state: new Set() };
@@ -309,10 +294,9 @@
     let shown = 0;
     for (const card of cards) {
       const life = card.dataset.life ? card.dataset.life.split('|') : [];
-      const state = card.dataset.state.split(' ');
       const okLife = !picked.life.size || life.some(v => picked.life.has(v))
         || (picked.life.has('__none__') && !life.length);
-      const okState = !picked.state.size || state.some(v => picked.state.has(v));
+      const okState = !picked.state.size || picked.state.has(card.dataset.state);
       card.hidden = !(okLife && okState);
       if (!card.hidden) shown += 1;
     }
@@ -334,35 +318,6 @@
         other.setAttribute('aria-pressed', String(on));
       }
       apply();
-    });
-  }
-
-  // ---- 排序。选择记在浏览器里，下次打开还是这个顺序
-  const num = (card, key) => {
-    const raw = card.dataset[key];
-    return raw === '' || raw === undefined ? NaN : Number(raw);
-  };
-  const orders = {
-    risk: (a, b) => num(a, 'risk') - num(b, 'risk') || num(b, 'usage') - num(a, 'usage'),
-    usage: (a, b) => num(b, 'usage') - num(a, 'usage'),
-    // 查不到余额的放最后
-    balance: (a, b) => (isNaN(num(a, 'balance')) - isNaN(num(b, 'balance')))
-                       || num(a, 'balance') - num(b, 'balance'),
-    order: (a, b) => num(a, 'order') - num(b, 'order'),
-  };
-  function reorder(key) {
-    const sorted = [...cards].sort((a, b) => orders[key](a, b) || num(a, 'order') - num(b, 'order'));
-    grid.prepend(...sorted);
-  }
-  if (sort) {
-    try {
-      const saved = localStorage.getItem('overview-sort');
-      if (saved && orders[saved]) sort.value = saved;
-    } catch (e) { /* 存不了就用默认 */ }
-    reorder(sort.value);
-    sort.addEventListener('change', function () {
-      reorder(sort.value);
-      try { localStorage.setItem('overview-sort', sort.value); } catch (e) { /* 同上 */ }
     });
   }
 })();

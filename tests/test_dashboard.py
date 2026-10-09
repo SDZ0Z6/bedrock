@@ -113,10 +113,10 @@ class TestRegionToasts:
         errors = [denied("us-east-1"), denied("us-east-2"), denied("us-west-1"),
                   denied("us-west-2", reason=SLOW)]
         assert dashboard.region_toasts(errors, ALPHA, "读不到 CloudWatch") == [
-            Toast("error", "3 个区读不到 CloudWatch", "alpha · 111111111111", SCP,
+            Toast("error", "3 个区读不到 CloudWatch", "alpha@example.com · 111111111111", SCP,
                   "us-east-1：AccessDenied in us-east-1\nus-east-2：AccessDenied in us-east-2\n"
                   "us-west-1：AccessDenied in us-west-1"),
-            Toast("error", "us-west-2 读不到 CloudWatch", "alpha · 111111111111", SLOW,
+            Toast("error", "us-west-2 读不到 CloudWatch", "alpha@example.com · 111111111111", SLOW,
                   "us-west-2：AccessDenied in us-west-2"),
         ]
 
@@ -124,7 +124,7 @@ class TestRegionToasts:
         """Cost Explorer 不分区：标题就是那句话，详情里不带区域前缀。"""
         error = QueryError(account=ALPHA.account, reason="该区间暂无成本数据", detail="DataUnavailableException")
         assert dashboard.region_toasts([error], ALPHA, "查不到每天的成本") == [
-            Toast("error", "查不到每天的成本", "alpha · 111111111111", "该区间暂无成本数据", "DataUnavailableException"),
+            Toast("error", "查不到每天的成本", "alpha@example.com · 111111111111", "该区间暂无成本数据", "DataUnavailableException"),
         ]
 
     def test_legacy_strings(self):
@@ -141,7 +141,7 @@ class TestRegionToasts:
 
     def test_label_falls_back_to_the_number(self):
         toast = dashboard.region_toasts([denied("us-east-1", GAMMA.account)], GAMMA)[0]
-        assert toast.sub == "333333333333 · 333333333333"
+        assert toast.sub == "333333333333"          # 没填邮箱：只写号码
 
     def test_nothing_to_report(self):
         assert dashboard.region_toasts([], ALPHA) == []
@@ -153,16 +153,16 @@ class TestAccountToasts:
                   denied("us-west-2", BETA.account, reason=SLOW)]
         assert dashboard.account_toasts(errors, [ALPHA, BETA], "读不到 CloudWatch") == [
             Toast("error", "2 个账号读不到 CloudWatch", "", SCP,
-                  "alpha · 111111111111：AccessDenied in us-east-1\n"
-                  "alpha · 111111111111：AccessDenied in us-east-2\n"
-                  "beta · 222222222222：AccessDenied in us-east-1"),
-            Toast("error", "读不到 CloudWatch", "beta · 222222222222", SLOW,
-                  "beta · 222222222222：AccessDenied in us-west-2"),
+                  "alpha@example.com · 111111111111：AccessDenied in us-east-1\n"
+                  "alpha@example.com · 111111111111：AccessDenied in us-east-2\n"
+                  "beta@example.com · 222222222222：AccessDenied in us-east-1"),
+            Toast("error", "读不到 CloudWatch", "beta@example.com · 222222222222", SLOW,
+                  "beta@example.com · 222222222222：AccessDenied in us-west-2"),
         ]
 
     def test_one_account_several_regions_names_the_account(self):
         toasts = dashboard.account_toasts([denied("us-east-1"), denied("us-west-1")], [ALPHA, BETA], "读不到 CloudWatch")
-        assert [(t.title, t.sub) for t in toasts] == [("读不到 CloudWatch", "alpha · 111111111111")]
+        assert [(t.title, t.sub) for t in toasts] == [("读不到 CloudWatch", "alpha@example.com · 111111111111")]
         assert len(toasts[0].detail.splitlines()) == 2
 
     def test_account_not_in_the_ledger(self):
@@ -177,8 +177,8 @@ class TestAccountToasts:
         )
         assert [(t.title, t.text) for t in toasts] == [("2 个账号查不到累计消费", "凭证无效")]
         assert toasts[0].detail.splitlines() == [
-            "beta · 222222222222：BETA / 222222222222：凭证无效",
-            "alpha · 111111111111：ALPHA / 111111111111：凭证无效",
+            "beta@example.com · 222222222222：BETA / 222222222222：凭证无效",
+            "alpha@example.com · 111111111111：ALPHA / 111111111111：凭证无效",
         ]
 
     def test_errors_that_name_no_account(self):
@@ -230,6 +230,16 @@ class TestCardRow:
         assert item.spark.startswith('<svg class="spark-svg"')
         assert f'fill="{chart.TONE_COLORS[tone]}"' in item.spark
 
+    @pytest.mark.parametrize(
+        "kind, failed, state, label",
+        [("active", False, "active", "活跃"), ("stopped", False, "stopped", "已中断"), ("idle", False, "idle", "无调用"),
+         ("unknown", False, "error", "异常"), ("active", True, "error", "异常")],
+    )
+    def test_state(self, kind, failed, state, label):
+        """卡片上那行状态：用量读不到、消费查不到都是异常，其余照用量状态。"""
+        item = card(failed_row() if failed else ok_row(), kind=kind)
+        assert (item.state, item.state_label) == (state, label)
+
     def test_no_spark_without_daily_numbers(self):
         assert card(daily=()).spark == ""
 
@@ -251,10 +261,11 @@ class TestCardRow:
 
 
 class TestRiskRank:
-    def test_failed_then_stopped_then_the_rest(self):
+    def test_errors_then_stopped_then_the_rest(self):
         assert dashboard.risk_rank(card(failed_row(), kind="stopped")) == 0
+        assert dashboard.risk_rank(card(kind="unknown")) == 0          # 用量读不到也是异常
         assert dashboard.risk_rank(card(kind="stopped")) == 1
-        for kind in ("active", "idle", "unknown"):
+        for kind in ("active", "idle"):
             assert dashboard.risk_rank(card(kind=kind)) == 2
 
     def test_sorting_like_the_overview(self):
@@ -283,12 +294,13 @@ class TestFilterCounts:
         rows = [
             SimpleNamespace(error=None, activity=SimpleNamespace(kind="active")),
             SimpleNamespace(error=None, activity=SimpleNamespace(kind="active")),
-            SimpleNamespace(error="凭证无效", activity=SimpleNamespace(kind="stopped")),
-            SimpleNamespace(error=None, activity=SimpleNamespace(kind="unknown")),
+            SimpleNamespace(error=None, activity=SimpleNamespace(kind="stopped")),
+            SimpleNamespace(error="凭证无效", activity=SimpleNamespace(kind="stopped")),   # 消费查不到：异常
+            SimpleNamespace(error=None, activity=SimpleNamespace(kind="unknown")),         # 用量读不到：也是异常
         ]
         counts = [(c.key, c.label, c.count) for c in dashboard.state_counts(rows)]
-        assert counts == [("active", "活跃", 2), ("stopped", "已中断", 1), ("unknown", "用量未知", 1),
-                          ("error", "查询异常", 1)]
+        assert counts == [("active", "活跃", 2), ("stopped", "已中断", 1), ("error", "异常", 2)]   # 无调用没人，不列
+        assert sum(count for *_, count in counts) == len(rows)          # 一个账号只落在一个状态里
 
     def test_near_limit(self):
         rows = [SimpleNamespace(label=name, has_numbers=ok, usage_pct=used)

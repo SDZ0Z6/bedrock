@@ -38,16 +38,66 @@ from .auth import (
     record_failure,
 )
 from .excel_source import Account, ExcelSourceError, load_accounts
-from .views import page_meta
+from .views import flash_result, page_meta
 
 bp = Blueprint("accounts", __name__, url_prefix="/accounts")
 
 # 头像弹窗里一排现成的表情，点一下填进去；想用别的直接在框里打
 AVATAR_EMOJIS = ("🦊", "🐼", "🐳", "🦉", "🐙", "🌵", "🍊", "🚀", "⭐", "💎")
 
+# 保存之后的提示里各字段的叫法。审计日志写的是 Excel 表头（EMAIL、BUDGET……），页面上说人话
+FIELD_NAMES = {
+    "email": "账号邮箱",
+    "account": "账号 ID",
+    "partner": "上游",
+    "budget": "额度",
+    "start_date": "启用日期",
+    "tag_ratio": "TAG 比率",
+    "untag_ratio": "UNTAG 比率",
+    "tag_spec": "TAG",
+    "lifecycle": "生命周期",
+    "avatar_emoji": "头像",
+    "avatar_color": "头像底色",
+    "mail_provider": "邮箱平台",
+    "mail_address": "告警邮箱",
+    "mail_password": "邮箱密码",
+    "mail_server": "IMAP 服务器",
+    "tg_chat_ids": "TG 群组",
+}
+
 
 def _actor() -> str:
     return session.get("user") or ""
+
+
+def _who(account: Account | None, fallback: str = "") -> str:
+    """提示里说是哪个账号：账号邮箱，没填邮箱用号码。"""
+    if account is None:
+        return fallback
+    return account.email or account.account
+
+
+def _glue(head: str, tail: str) -> str:
+    """中文后面紧跟英文或数字时空一格（「改了 TG 群组」），和页面上别处的写法一样。"""
+    return f"{head} {tail}" if tail[:1].isascii() and tail[:1].isalnum() else head + tail
+
+
+def _listed(names: list[str]) -> str:
+    """「额度」「额度和启用日期」「上游、额度和启用日期」。"""
+    if len(names) <= 1:
+        return "".join(names)
+    return _glue("、".join(names[:-1]) + "和", names[-1])
+
+
+def _changed(fields) -> str:
+    """修改账号之后的说明：改了哪几项。开关是跟着清空自动关的，另起一句说。"""
+    names = [FIELD_NAMES[name] for name in FIELD_NAMES if name in fields]
+    text = _glue("改了", _listed(names)) + "。" if names else ""
+    if "tg_enabled" in fields:
+        text += "群组 ID 全删了，TG 告警跟着关了。"
+    if "mail_enabled" in fields:
+        text += "告警邮箱清空了，邮件告警跟着关了。"
+    return text
 
 
 def _load_all() -> tuple[list[Account], str | None]:
@@ -186,12 +236,19 @@ def create():
         return _render(errors=errors, create_form=_form_values(request.form), open_create=True), 400
 
     try:
-        note = excel_source.create_account(data, actor=_actor())
+        excel_source.create_account(data, actor=_actor())
     except ExcelSourceError as exc:
         return _render(errors=[str(exc)], create_form=_form_values(request.form), open_create=True), 409
 
-    told, problems = _notify("created", lambda a: a.account == data["account"])
-    flash(f"{note}。{told}", "ok")
+    account = _find(lambda a: a.account == data["account"])
+    told, problems = _announce("created", account) if account else ("", [])
+    # 填了群 / 邮箱，开关是建账号时顺手打开的（见 create_account），得说一声
+    switched = [name for name, on in (("TG 告警", account and account.tg_enabled),
+                                       ("邮件告警", account and account.mail_enabled)) if on]
+    text = (f"{_listed(switched)}已打开。" if switched else "") + told
+    if not data.get("start_date"):
+        text += "没填启用日期，累计消费从 Cost Explorer 最早能查的那天算起。"
+    flash_result("已添加账号", _who(account, data["account"]), text)
     _warn(problems)
     return redirect(url_for("accounts.index"))
 
@@ -224,18 +281,20 @@ def update():
         return _render(errors=[str(exc)], edit_key=key, edit_form=_form_values(request.form)), 409
 
     if not note:
-        flash("没有任何字段发生变化，台账未改动。", "warn")
+        flash_result("没有改动", _who(current), "填的和台账里一样，什么都没写。", tone="info")
         return redirect(url_for("accounts.index"))
+    # 按行号找：这次可能连账号 ID 一起改了，key 里的号码就对不上了
+    row = key.rpartition("#")[2]
+    after = _find(lambda a: str(a.row) == row)
     told, problems = "", []
-    if current.mail_enabled and not data.get("mail_address"):
+    if current.mail_enabled and not data.get("mail_address") and after is not None:
         # 清空了告警邮箱，邮件告警跟着关了（见 update_account）：和在表格里点关一样通知群。
         # 卡片上要写被关掉的是哪个邮箱，所以用改之前的地址；发不发、发给谁按改之后的 TG 设置
-        after = next((a for a in _load_all()[0] if a.key == key), None)
-        if after is not None:
-            told, problems = _announce(
-                "mail_off", replace(after, mail_address=current.mail_address, mail_provider=current.mail_provider)
-            )
-    flash(f"{note}。{told}", "ok")
+        told, problems = _announce(
+            "mail_off", replace(after, mail_address=current.mail_address, mail_provider=current.mail_provider)
+        )
+    flash_result("已保存", _who(after, data["email"] or data["account"]),
+                 _changed(getattr(note, "fields", ())) + told)
     _warn(problems)
     return redirect(url_for("accounts.index"))
 
@@ -312,7 +371,11 @@ def tg_toggle():
     except ExcelSourceError as exc:
         flash(str(exc), "error")
         return redirect(url_for("accounts.index"))
-    flash(f"{note}。" if note else "本来就是这样，没有改动。", "ok" if note else "warn")
+    who = _who(_find(lambda a: a.key == key), key.rpartition("#")[0])
+    if not note:
+        flash_result("没有改动", who, f"TG 告警本来就是{'开' if enabled else '关'}着的。", tone="info")
+    else:
+        flash_result(f"TG 告警已{'开启' if enabled else '关闭'}", who)
     return redirect(url_for("accounts.index"))
 
 
@@ -328,12 +391,14 @@ def mail_toggle():
     except ExcelSourceError as exc:
         flash(str(exc), "error")
         return redirect(url_for("accounts.index"))
+    account = _find(lambda a: a.key == key)
+    who = _who(account, key.rpartition("#")[0])
     if not note:
-        flash("本来就是这样，没有改动。", "warn")
+        flash_result("没有改动", who, f"邮件告警本来就是{'开' if enabled else '关'}着的。", tone="info")
         return redirect(url_for("accounts.index"))
     # 开 / 关邮件告警都给这个账号的群发一张卡片（跟 TG 开关走，见 alerts.notify_account）
-    told, problems = _notify("mail_on" if enabled else "mail_off", lambda a: a.key == key)
-    flash(f"{note}。{told}", "ok")
+    told, problems = _announce("mail_on" if enabled else "mail_off", account) if account else ("", [])
+    flash_result(f"邮件告警已{'开启' if enabled else '关闭'}", who, told)
     _warn(problems)
     return redirect(url_for("accounts.index"))
 
@@ -413,12 +478,14 @@ def toggle():
     except ExcelSourceError as exc:
         flash(str(exc), "error")
         return redirect(url_for("accounts.index"))
+    account = _find(lambda a: a.key == key)
+    who = _who(account, key.rpartition("#")[0])
     if not note:
-        flash("状态本来就是这样，没有改动。", "warn")
+        flash_result("没有改动", who, f"账号本来就是{'启用' if enabled else '停用'}的。", tone="info")
         return redirect(url_for("accounts.index"))
 
-    told, problems = _notify("restored" if enabled else "disabled", lambda a: a.key == key)
-    flash(f"{note}。{told}", "ok")
+    told, problems = _announce("restored" if enabled else "disabled", account) if account else ("", [])
+    flash_result("已恢复账号" if enabled else "已停用账号", who, told)
     _warn(problems)
     return redirect(url_for("accounts.index"))
 
@@ -451,11 +518,13 @@ def delete():
     clear_failures(ip)
 
     try:
-        note = excel_source.delete_account(key, actor=_actor())
+        excel_source.delete_account(key, actor=_actor())
     except ExcelSourceError as exc:
         flash(str(exc), "error")
         return redirect(url_for("accounts.index"))
-    flash(f"{note}。", "ok")
+    # 行已经清空了，是谁要用删之前读到的
+    gone = next(a for a in existing if a.key == key)
+    flash_result("已删除账号", _who(gone), "台账里这一行已经清空。")
     return redirect(url_for("accounts.index"))
 
 
@@ -471,32 +540,39 @@ def lifecycle():
     key = (request.form.get("key") or "").strip()
     tags = excel_source.form_lifecycle(request.form)
 
-    def done(ok: bool, message: str, status: int = 200, names: list[str] | None = None):
+    def done(tone: str, title: str, who: str = "", text: str = "", status: int = 200,
+             names: list[str] | None = None):
+        # 结果都从右上角弹出来：页面脚本拿 JSON 自己弹（appToast），没开 JS 时走 flash
         if _wants_json():
-            payload: dict = {"ok": ok, "message": message}
+            payload: dict = {"ok": tone != "error", "tone": tone, "title": title, "sub": who, "text": text}
             if names is not None:
                 colors = excel_source.lifecycle_colors(_lifecycle())
                 gray = excel_source.LIFECYCLE_COLORS["gray"][1]
                 payload["tags"] = [{"name": name, "color": colors.get(name, gray)} for name in names]
             return jsonify(payload), status
-        flash(message, "ok" if ok else "error")
+        flash_result(title, who, text, tone=tone)
         return redirect(url_for("accounts.index"))
 
+    failed = "生命周期没有保存"
     existing, fatal = _load_all()
     if fatal:
-        return done(False, fatal, 500)
+        return done("error", failed, text=fatal, status=500)
     current = next((a for a in existing if a.key == key), None)
     if current is None:
-        return done(False, "这个账号已经不在台账里了，页面可能已过期，刷新后再试。", 409)
+        return done("error", failed, text="这个账号已经不在台账里了，页面可能已过期，刷新后再试。", status=409)
     known = {tag.name for tag in _lifecycle()} | set(current.lifecycle)
     unknown = [name for name in tags if name not in known]
     if unknown:
-        return done(False, f"标签清单里没有「{'」「'.join(unknown)}」，刷新页面再选。", 400)
+        return done("error", failed, _who(current),
+                    f"标签清单里没有「{'」「'.join(unknown)}」，刷新页面再选。", status=400)
     try:
         note = excel_source.set_lifecycle(key, tags, actor=_actor())
     except ExcelSourceError as exc:
-        return done(False, str(exc), 409)
-    return done(True, f"{note}。" if note else "没有改动。", names=tags)
+        return done("error", failed, _who(current), str(exc), status=409)
+    if not note:
+        return done("info", "没有改动", _who(current), names=tags)
+    return done("ok", "已更新生命周期", _who(current),
+                f"现在是：{'、'.join(tags)}。" if tags else "现在没有标签。", names=tags)
 
 
 @bp.route("/lifecycle/add", methods=["POST"])
@@ -507,10 +583,10 @@ def lifecycle_add():
     name = (request.form.get("name") or "").strip()
     color = (request.form.get("color") or "").strip()
     try:
-        note = excel_source.add_lifecycle(name, color, actor=_actor())
+        excel_source.add_lifecycle(name, color, actor=_actor())
     except ExcelSourceError as exc:
         return _render(open_life=True, life_error=str(exc), life_form={"name": name, "color": color}), 400
-    flash(f"{note}。", "ok")
+    flash_result(f"已添加标签「{name}」")
     return redirect(url_for("accounts.index", tags=1))
 
 
@@ -520,32 +596,32 @@ def lifecycle_add():
 def lifecycle_remove():
     """从标签清单里删一个，打了这个标签的账号上一起去掉。页面上要点两下才删。"""
     name = (request.form.get("name") or "").strip()
+    # 删之前数一下打了它的账号，提示里说一起去掉了几个
+    tagged = sum(1 for account in _load_all()[0] if name in account.lifecycle)
     try:
         note = excel_source.remove_lifecycle(name, actor=_actor())
     except ExcelSourceError as exc:
         flash(str(exc), "error")
         return redirect(url_for("accounts.index", tags=1))
     if note:
-        flash(f"{note}。", "ok")
+        flash_result(f"已删除标签「{name}」", text=f"{tagged} 个账号上的一起去掉了。" if tagged else "")
     else:
-        flash(f"标签清单里已经没有「{name}」了。", "warn")
+        flash_result("没有改动", text=f"标签清单里已经没有「{name}」了。", tone="info")
     return redirect(url_for("accounts.index", tags=1))
 
 
-def _notify(event: str, match) -> tuple[str, list[str]]:
-    """账号刚新增 / 停用 / 恢复、邮件告警刚开 / 关：按 TG 开关给它的群发一张通知卡片。
-
-    返回（追加在提示条后面的一句话, 发送时的问题）。台账在这之前已经写好了，
-    通知发不出去不影响改动本身，只另起一条警告说清楚。
-    """
+def _find(match) -> Account | None:
+    """刚写完台账，重新读一遍找到这个账号（提示里要写它的邮箱，通知卡片要用它）。"""
     accounts, _ = _load_all()
-    account = next((a for a in accounts if match(a)), None)
-    if account is None:
-        return "", []
-    return _announce(event, account)
+    return next((a for a in accounts if match(a)), None)
 
 
 def _announce(event: str, account: Account) -> tuple[str, list[str]]:
+    """账号刚新增 / 停用 / 恢复、邮件告警刚开 / 关：按 TG 开关给它的群发一张通知卡片。
+
+    返回（追加在提示后面的一句话, 发送时的问题）。台账在这之前已经写好了，
+    通知发不出去不影响改动本身，只另起一条警告说清楚。
+    """
     summary = alerts.notify_account(event, account, log=current_app.logger.warning)
     if summary is None:          # 这个账号没开 TG 告警，或者没填群
         return "", []
@@ -555,4 +631,4 @@ def _announce(event: str, account: Account) -> tuple[str, list[str]]:
 
 def _warn(problems: list[str]) -> None:
     if problems:
-        flash("TG 通知没有全部发出去：" + "；".join(problems), "warn")
+        flash_result("TG 通知没有全部发出去", text="；".join(problems), tone="warn")

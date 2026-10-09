@@ -1,4 +1,4 @@
-"""账号的用量状态（activity.py）：活跃 / 已中断 / 无调用 / 用量未知，最近一次调用精确到分钟，
+"""账号的用量状态（activity.py）：活跃 / 已中断 / 无调用 / 异常，最近一次调用精确到分钟，
 近 14 天的迷你柱图，以及缓存。
 
 CloudWatch 两条路都换成假的：按小时的调用次数（cloudwatch_metrics.build_metrics）和一分钟
@@ -71,7 +71,7 @@ def cw(monkeypatch):
 # ---------------------------------------------------------------- 文案
 class TestTexts:
     @pytest.mark.parametrize(
-        "kind, label", [("active", "活跃"), ("stopped", "已中断"), ("idle", "无调用"), ("unknown", "用量未知")]
+        "kind, label", [("active", "活跃"), ("stopped", "已中断"), ("idle", "无调用"), ("unknown", "异常")]
     )
     def test_label(self, kind, label):
         assert Activity(kind=kind).label == label

@@ -23,12 +23,12 @@
 
 {% macro _account_option(account, selected) %}
         <option value="{{ account.key }}" {% if account.key == selected %}selected{% endif %}>
-          {{- account.account }}{% if account.email %}（{{ account.email }}）{% endif %} · {{ account.partner -}}
+          {%- if account.email %}{{ account.email }} · {% endif %}{{ account.account }} · {{ account.partner -}}
         </option>
 {%- endmacro %}
 
-{# 账号选择器：ID 和邮箱分开显示，能搜。原生 <select> 一直在里面，不开 JS 也能选；
-   开了 JS 由 static/app.js 换成按钮 + 弹层。
+{# 账号选择器：邮箱是主行、号码是副行（和别处一样），能搜。原生 <select> 一直在里面，
+   不开 JS 也能选；开了 JS 由 static/app.js 换成按钮 + 弹层。
    href 给了（里面的 __ID__ 换成账号号码）就是「跳到那个账号的页面」，没给就是改
    select 的值、交给所在的表单提交。 #}
 {% macro account_picker(accounts, selected, label_id, href='') -%}
@@ -41,11 +41,11 @@
       <button class="acct-picker-btn" type="button" aria-haspopup="listbox" aria-expanded="false"
               aria-labelledby="{{ label_id }} acct-picker-current" hidden>
         {{ avatar(current.avatar, small=true) }}
-        <span class="acct-picker-id" id="acct-picker-current">{{ current.account }}</span>
-        <span class="acct-picker-mail">{{ current.email }}</span>
+        <span class="acct-picker-name" id="acct-picker-current">{{ current.email or current.account }}</span>
+        {% if current.email %}<span class="acct-picker-sub">{{ current.account }}</span>{% endif %}
       </button>
       <div class="acct-picker-pop" hidden>
-        <input class="acct-picker-search" type="search" placeholder="搜 ID、邮箱或上游" autocomplete="off"
+        <input class="acct-picker-search" type="search" placeholder="搜邮箱、ID 或上游" autocomplete="off"
                role="combobox" aria-expanded="true" aria-controls="acct-picker-list" aria-autocomplete="list"
                aria-label="搜索账号">
         <ul class="acct-picker-list" id="acct-picker-list" role="listbox" aria-label="账号">
@@ -54,12 +54,17 @@
             {% for account in items %}
               <li class="acct-opt" role="option" id="acct-opt-{{ group }}-{{ loop.index }}" data-group="{{ group }}"
                   data-value="{{ account.key }}" data-number="{{ account.account }}"
-                  data-search="{{ account.account }} {{ account.email }} {{ account.partner }}"
+                  data-search="{{ account.email }} {{ account.account }} {{ account.partner }}"
                   aria-selected="{{ 'true' if account.key == current.key else 'false' }}">
                 {{ avatar(account.avatar, small=true) }}
                 <span class="acct-opt-text">
-                  <span class="acct-opt-id">{{ account.account }}</span>
-                  <span class="acct-opt-mail">{{ account.email or '未填账号邮箱' }}</span>
+                  {% if account.email %}
+                    <span class="acct-opt-name">{{ account.email }}</span>
+                    <span class="acct-opt-sub">{{ account.account }}</span>
+                  {% else %}
+                    <span class="acct-opt-name tab-num">{{ account.account }}</span>
+                    <span class="acct-opt-sub tone-warn">未填账号邮箱</span>
+                  {% endif %}
                 </span>
                 <span class="acct-opt-side">{{ account.partner }}</span>
                 <svg class="acct-opt-check" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7"/></svg>
@@ -73,11 +78,25 @@
   </div>
 {%- endmacro %}
 
-{# 表格里的账号格：号码一行，邮箱一行 #}
+{# 「刷新数据」：跳过缓存重查这一页。图标 + 字；pill 是圆角胶囊（概览上和筛选签站在一起），
+   否则是普通按钮的方角（各页签的筛选条里，和下拉框站在一起）。点了之后图标一直转到新页面回来
+   （app.js 认 data-refresh）。都放在内容区，不放页头右边：那里是报错弹窗的位置 #}
+{% macro refresh_link(href, title, loading, note='跳过缓存', pill=false) -%}
+  <a class="{{ 'refresh-btn' if pill else 'btn' }}" href="{{ href }}" title="{{ title }}"
+     data-loading="{{ loading }}" data-loading-note="{{ note }}" data-refresh>
+    <svg class="refresh-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.2 8a5.8 5.8 0 0 1 10-4l1.6 1.5"/>
+      <path d="M13.8 2.2v3.3h-3.3"/><path d="M13.8 8a5.8 5.8 0 0 1-10 4l-1.6-1.5"/><path d="M2.2 13.8v-3.3h3.3"/></svg>刷新数据</a>
+{%- endmacro %}
+
+{# 表格、清单里的账号格：主行邮箱，副行号码；没填邮箱时号码当主行 #}
 {% macro account_cell(number, email) -%}
   <span class="acct-cell">
-    <span class="acct-cell-id">{{ number }}</span>
-    {%- if email %}<span class="acct-cell-mail" title="{{ email }}">{{ email }}</span>{% endif %}
+    {%- if email %}
+      <span class="acct-cell-name" title="{{ email }}">{{ email }}</span>
+      <span class="acct-cell-sub">{{ number }}</span>
+    {%- else %}
+      <span class="acct-cell-name tab-num">{{ number }}</span>
+    {%- endif %}
   </span>
 {%- endmacro %}
 

@@ -147,8 +147,8 @@
     <a class="viz-link" href="{{ url_for('accounts.index', edit=account.key) }}" data-loading="正在读台账">修改</a>
   </div>
   <dl class="info-grid">
-    <div><dt>上游</dt><dd>{{ account.partner }}</dd></div>
     <div><dt>账号邮箱</dt><dd>{{ account.email or '未填' }}</dd></div>
+    <div><dt>上游</dt><dd>{{ account.partner }}</dd></div>
     <div><dt>启用日期</dt><dd>{{ account.start_date.isoformat() if account.start_date else '未填' }}</dd></div>
     <div><dt>额度</dt><dd>{{ account.budget | money }}</dd></div>
     <div><dt>TAG 比率</dt><dd>{{ account.tag_ratio | ratio }}</dd></div>

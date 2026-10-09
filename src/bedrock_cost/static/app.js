@@ -45,11 +45,18 @@
 
   // 页面脚本里弹一条（fetch 存完之后说结果）：照 shell.html 里的模板克隆。
   // 最新的放最上面；文字一律 textContent，不拼 HTML
-  window.appToast = function (tone, title, text) {
+  // 和服务端的 flash_result 一样三段：粗体一句话、后面灰字说是哪个账号、下面一行补充说明
+  window.appToast = function (tone, title, text, sub) {
     const template = document.querySelector('template[data-toast-template="' + tone + '"]');
     if (!stack || !template) return;
     const toast = template.content.firstElementChild.cloneNode(true);
     toast.querySelector('.toast-title').textContent = title;
+    if (sub) {
+      const who = document.createElement('span');
+      who.className = 'toast-sub';
+      who.textContent = sub;
+      toast.querySelector('.toast-head').append(who);
+    }
     if (text) {
       const line = document.createElement('p');
       line.className = 'toast-text';
@@ -59,6 +66,18 @@
     stack.prepend(toast);
     if (toast.hasAttribute('data-auto')) autoDismiss(toast);
   };
+
+  // ------------------------------------------------------------ 「刷新数据」
+  // 点了之后图标一直转（CSS 认 .is-busy），等新页面回来；点完又按后退（bfcache 原样端回来）就停。
+  // 用 Ctrl / ⌘ 点是在新标签页打开，这一页不等
+  document.addEventListener('click', function (event) {
+    const link = event.target instanceof Element ? event.target.closest('[data-refresh]') : null;
+    if (!link || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    link.classList.add('is-busy');
+  });
+  window.addEventListener('pageshow', function () {
+    for (const link of document.querySelectorAll('[data-refresh].is-busy')) link.classList.remove('is-busy');
+  });
 
   // ------------------------------------------------------------ 数字从 0 数上来
   // 额度仪表中间的大数字和使用率，跟着弧一起动（同样 1.2 秒、同一条缓动）。只在系统没开

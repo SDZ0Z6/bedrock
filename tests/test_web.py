@@ -416,7 +416,7 @@ class TestShell:
             assert f'<template data-toast-template="{tone}">' in html
         assert '<script src="/static/app.js"></script>' in html
         script = (STATIC / "app.js").read_text(encoding="utf-8")
-        assert "window.appToast = function (tone, title, text)" in script
+        assert "window.appToast = function (tone, title, text, sub)" in script
         assert "textContent = title" in script          # 文字一律 textContent，不拼 HTML
 
     def test_flash_messages_become_toasts(self, logged_in, ledger, fake_costs):
@@ -592,8 +592,6 @@ class TestOverviewPage:
         card = cards(logged_in.get("/").get_data(as_text=True))["222222222222"]
         spent = spent_so_far("222222222222")
         usage = spent / 100_000 * 100
-        # 排序脚本读 data-usage
-        assert float(re.search(r'data-usage="([^"]+)"', card).group(1)) == pytest.approx(usage)
         text = scrape(card)
         for words in (f"{usage:.2f}%", f"${100_000 - spent:,.2f}", f"${spent:,.2f}", "$100,000.00"):
             assert words in text
@@ -616,6 +614,13 @@ class TestOverviewPage:
 
         assert chips("life") == [("", "全部 2"), ("正常", "正常 1"), ("结算", "结算 0"), ("风控", "风控 1")]
         assert chips("state") == [("", "全部 2"), ("active", "活跃 1"), ("stopped", "已中断 1")]
+        usage_states["111111111111"] = usage_state("unknown", errors=["us-east-1：被拒绝"])
+        html_error = logged_in.get("/").get_data(as_text=True)
+        block = re.search(r'data-group="state">(.*?)</div>', html_error, re.S).group(1)
+        assert [(value, scrape(label)) for value, label in re.findall(
+            r'<button class="fchip" type="button" data-value="([^"]*)"[^>]*>(.*?)</button>', block, re.S)] == [
+            ("", "全部 2"), ("stopped", "已中断 1"), ("error", "异常 1"),
+        ]
         assert html.count('aria-pressed="true"') == 2                          # 两组默认都是「全部」
         # 卡片上带着筛选要用的值
         card = cards(html)["222222222222"]
@@ -632,15 +637,13 @@ class TestOverviewPage:
         fail_cumulative(monkeypatch, {"222222222222": ce_failure("222222222222")})
         assert order() == ["222222222222", "111111111111"]          # 查不到的比中断的还靠前
 
-    def test_sort_menu(self, logged_in, book, fake_costs):
+    def test_there_is_no_sort_menu(self, logged_in, book, fake_costs):
+        """排序下拉拿掉了：卡片就按服务端排好的顺序（有问题的在前，见 test_problems_come_first）。"""
         html = logged_in.get("/").get_data(as_text=True)
-        menu = re.search(r'<select class="select" id="acct-sort"[^>]*>(.*?)</select>', html, re.S).group(1)
-        assert re.findall(r'<option value="(\w+)">', menu) == ["risk", "usage", "balance", "order"]
-        # 排序在浏览器里做，卡片上带着排序要用的值；选择记在 localStorage
+        assert 'id="acct-sort"' not in html and "overview-sort" not in html
         card = cards(html)["111111111111"]
-        for attribute in ("data-risk=", "data-usage=", "data-balance=", 'data-order="0"'):
-            assert attribute in card
-        assert "localStorage.getItem('overview-sort')" in html
+        for attribute in ("data-risk=", "data-usage=", "data-balance=", "data-order="):
+            assert attribute not in card
 
     def test_has_no_date_filter(self, logged_in, book, fake_costs):
         """额度是一次性发的，拿某个可选区间的消费去比它没有意义。
@@ -654,10 +657,11 @@ class TestOverviewPage:
         assert "各自从启用日期累计到" in html
 
     def test_refresh_button_sits_with_the_filters(self, logged_in, book, fake_costs):
-        """有报表时强制刷新和排序放在一起；页头右边留给报错弹窗。"""
+        """有报表时「刷新数据」在筛选签的右边，和筛选签一个样子；页头右边留给报错弹窗。"""
         html = logged_in.get("/").get_data(as_text=True)
-        tools = re.search(r'<div class="overview-tools">(.*?)</div>\s*</div>', html, re.S).group(1)
-        assert 'href="/?refresh=1"' in tools and "强制刷新" in tools
+        bar = html[html.index('<div class="overview-bar">') : html.index('<section class="acct-grid"')]
+        button = re.search(r'<a class="refresh-btn" href="/\?refresh=1"[^>]*>(.*?)</a>', bar, re.S)
+        assert button and scrape(button.group(1)) == "刷新数据"
         assert '<div class="page-actions"></div>' in html
 
     def test_old_bookmarks_with_dates_still_work(self, logged_in, book, fake_costs):
@@ -702,15 +706,16 @@ class TestOverviewProblems:
         html = logged_in.get("/").get_data(as_text=True)
 
         [toast] = toasts(html)
-        assert (toast.tone, toast.title, toast.sub) == ("error", "查不到 Cost Explorer", "beta · 222222222222")
+        assert (toast.tone, toast.title, toast.sub) == ("error", "查不到 Cost Explorer", "beta@example.com · 222222222222")
         assert toast.text == "凭证缺少 ce:GetCostAndUsage 权限。卡片上已标出"
-        assert toast.detail.startswith("beta · 222222222222：An error occurred (AccessDeniedException)")
+        assert toast.detail.startswith("beta@example.com · 222222222222：An error occurred (AccessDeniedException)")
         assert not toast.auto                                   # 报错留着，等人关
 
         found = cards(html)
         assert list(found)[0] == "222222222222"                  # 有问题的排前面
         card = found["222222222222"]
-        assert 'data-risk="0"' in card
+        assert 'data-state="error"' in card                     # 消费查不到：状态是异常
+        assert re.search(r'<p class="acct-status k-error">.*?异常</p>', card, re.S)
         assert "消费查询失败：凭证缺少 ce:GetCostAndUsage 权限" in scrape(card)
         assert "没有查到消费" in scrape(card)
         assert "查询失败 1 个" in scrape(html)
@@ -721,7 +726,7 @@ class TestOverviewProblems:
         [toast] = toasts(logged_in.get("/").get_data(as_text=True))
         assert (toast.title, toast.sub) == ("2 个账号查不到 Cost Explorer", "")
         assert sorted(line.split("：")[0] for line in toast.detail.splitlines()) == [
-            "alpha · 111111111111", "beta · 222222222222",
+            "alpha@example.com · 111111111111", "beta@example.com · 222222222222",
         ]
 
     def test_unknown_usage_is_a_toast(self, logged_in, book, fake_costs, usage_states):
@@ -735,11 +740,14 @@ class TestOverviewProblems:
         html = logged_in.get("/").get_data(as_text=True)
 
         [toast] = toasts(html)
-        assert (toast.title, toast.sub) == ("读不到 CloudWatch", "alpha · 111111111111")
+        assert (toast.title, toast.sub) == ("读不到 CloudWatch", "alpha@example.com · 111111111111")
         assert toast.text == "被组织的 SCP（服务控制策略）显式拒绝 cloudwatch:ListMetrics"
         assert toast.detail.count("explicit deny in a service control policy") == 2
         card = cards(html)["111111111111"]
-        assert "k-unknown" in card and "用量未知" in scrape(card)
+        # 读不到用量就是账号在报错：状态叫异常，红色，和查不到消费的筛到一起
+        assert 'data-state="error"' in card
+        assert re.search(r'<p class="acct-status k-error">.*?异常</p>', card, re.S)
+        assert "读不到 CloudWatch" in scrape(card)
 
     def test_daily_cost_failure_is_reported_once(self, logged_in, book, fake_costs, monkeypatch):
         """近 30 天那张图另查一遍 CE。累计查得到、按天查不到：单独说一句；
@@ -747,7 +755,7 @@ class TestOverviewProblems:
         fail_daily(monkeypatch, {"111111111111"})
         [toast] = toasts(logged_in.get("/").get_data(as_text=True))
         assert (toast.title, toast.sub, toast.text) == (
-            "查不到每天的成本", "alpha · 111111111111", "Cost Explorer 请求过于频繁，请稍后重试",
+            "查不到每天的成本", "alpha@example.com · 111111111111", "Cost Explorer 请求过于频繁，请稍后重试",
         )
 
         fail_cumulative(monkeypatch, {"111111111111": ce_failure("111111111111")})

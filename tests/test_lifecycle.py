@@ -356,9 +356,10 @@ class TestInlineEdit:
     def test_saves_and_answers_with_the_colors(self, admin, ledger):
         response = set_life(admin, by_account("111111111111").key, "正常", "风控")
         assert response.status_code == 200
+        # 结果和别的操作一样从右上角说：粗体一句话、灰字是哪个账号、下面一行现在是什么
         assert response.get_json() == {
-            "ok": True,
-            "message": "账号 111111111111 的生命周期：空 → 正常、风控。",
+            "ok": True, "tone": "ok", "title": "已更新生命周期", "sub": "acct-one@example.com",
+            "text": "现在是：正常、风控。",
             "tags": [{"name": "正常", "color": GREEN}, {"name": "风控", "color": RED}],
         }
         assert by_account("111111111111").lifecycle == ("正常", "风控")
@@ -369,7 +370,8 @@ class TestInlineEdit:
         set_life(admin, key, "正常")
         before = ledger.stat().st_mtime_ns
         assert set_life(admin, key, "正常").get_json() == {
-            "ok": True, "message": "没有改动。", "tags": [{"name": "正常", "color": GREEN}],
+            "ok": True, "tone": "info", "title": "没有改动", "sub": "acct-one@example.com", "text": "",
+            "tags": [{"name": "正常", "color": GREEN}],
         }
         assert ledger.stat().st_mtime_ns == before
 
@@ -378,13 +380,17 @@ class TestInlineEdit:
         set_life(admin, key, "正常")
         result = set_life(admin, key).get_json()
         assert result["ok"] is True and result["tags"] == []
+        assert result["text"] == "现在没有标签。"
         assert by_account("111111111111").lifecycle == () and life_cell(ledger) is None
 
     def test_an_unknown_tag_is_refused(self, admin, ledger):
         before = ledger.stat().st_mtime_ns
         response = set_life(admin, by_account("111111111111").key, "正常", "外星人")
         assert response.status_code == 400
-        assert response.get_json() == {"ok": False, "message": "标签清单里没有「外星人」，刷新页面再选。"}
+        assert response.get_json() == {
+            "ok": False, "tone": "error", "title": "生命周期没有保存", "sub": "acct-one@example.com",
+            "text": "标签清单里没有「外星人」，刷新页面再选。",
+        }
         assert ledger.stat().st_mtime_ns == before
 
     def test_a_tag_already_on_the_account_may_stay(self, admin, ledger):
@@ -398,13 +404,16 @@ class TestInlineEdit:
     def test_but_it_cannot_spread_to_another_account(self, admin, ledger):
         rewrite_ledger(ledger, **emails(LIFECYCLE=["老标签", None]))
         response = set_life(admin, by_account("222222222222").key, "老标签")
-        assert response.status_code == 400 and "「老标签」" in response.get_json()["message"]
+        assert response.status_code == 400 and "「老标签」" in response.get_json()["text"]
         assert by_account("222222222222").lifecycle == ()
 
     def test_a_vanished_account_is_a_conflict(self, admin, ledger):
         response = set_life(admin, "999999999999#9", "正常")
         assert response.status_code == 409
-        assert response.get_json() == {"ok": False, "message": "这个账号已经不在台账里了，页面可能已过期，刷新后再试。"}
+        assert response.get_json() == {
+            "ok": False, "tone": "error", "title": "生命周期没有保存", "sub": "",
+            "text": "这个账号已经不在台账里了，页面可能已过期，刷新后再试。",
+        }
 
     def test_an_unreadable_ledger_is_a_server_error(self, admin, ledger, monkeypatch):
         csrf = token(admin)                                           # 台账还在的时候先拿到令牌
@@ -413,7 +422,7 @@ class TestInlineEdit:
                               headers=FETCH)
         assert response.status_code == 500
         result = response.get_json()
-        assert result["ok"] is False and "找不到账号台账文件" in result["message"]
+        assert result["ok"] is False and "找不到账号台账文件" in result["text"]
 
     def test_the_other_columns_are_left_alone(self, admin, ledger):
         before = by_account("111111111111")
@@ -430,12 +439,14 @@ class TestInlineEdit:
     def test_without_javascript_it_is_a_normal_post(self, admin, ledger):
         response = set_life(admin, by_account("111111111111").key, "结算", fetch=False)
         assert response.status_code == 302 and response.headers["Location"].endswith("/accounts/")
-        assert toasts(page(admin)) == [("ok", "账号 111111111111 的生命周期：空 → 结算。")]
+        assert toasts(page(admin)) == [("ok", "已更新生命周期 acct-one@example.com 现在是：结算。")]
 
     def test_without_javascript_an_error_is_a_toast(self, admin, ledger):
         response = set_life(admin, by_account("111111111111").key, "外星人", fetch=False)
         assert response.status_code == 302
-        assert toasts(page(admin)) == [("error", "标签清单里没有「外星人」，刷新页面再选。")]
+        assert toasts(page(admin)) == [
+            ("error", "生命周期没有保存 acct-one@example.com 标签清单里没有「外星人」，刷新页面再选。"),
+        ]
 
     def test_needs_csrf(self, admin, ledger):
         before = ledger.stat().st_mtime_ns
@@ -460,7 +471,7 @@ class TestTagList:
         assert response.status_code == 302 and response.headers["Location"].endswith("/accounts/?tags=1")
         html = admin.get(response.headers["Location"]).get_data(as_text=True)
         assert reopened_dialogs(html) == ["dlg-life"]
-        assert toasts(html) == [("ok", "新增生命周期标签「观察」（琥珀色）。")]
+        assert toasts(html) == [("ok", "已添加标签「观察」")]
         assert listed_tags(html) == {"正常": 0, "结算": 0, "风控": 0, "观察": 0}
 
     def test_the_new_tag_is_ready_to_use(self, admin, ledger):
@@ -505,16 +516,16 @@ class TestTagList:
         assert response.status_code == 302 and response.headers["Location"].endswith("/accounts/?tags=1")
         html = admin.get(response.headers["Location"]).get_data(as_text=True)
         assert reopened_dialogs(html) == ["dlg-life"]
-        assert toasts(html) == [("ok", "删除生命周期标签「结算」（2 个账号上的一起去掉）。")]
+        assert toasts(html) == [("ok", "已删除标签「结算」 2 个账号上的一起去掉了。")]
         assert listed_tags(html) == {"正常": 1, "风控": 0}
         assert (by_account("111111111111").lifecycle, by_account("222222222222").lifecycle) == (("正常",), ())
 
-    def test_removing_an_unknown_tag_is_a_warning(self, admin, ledger):
+    def test_removing_an_unknown_tag_is_just_a_note(self, admin, ledger):
         before = ledger.stat().st_mtime_ns
         response = post(admin, "/accounts/lifecycle/remove", name="外星人")
         assert response.status_code == 302 and response.headers["Location"].endswith("/accounts/?tags=1")
         assert toasts(admin.get(response.headers["Location"]).get_data(as_text=True)) == [
-            ("warn", "标签清单里已经没有「外星人」了。"),
+            ("info", "没有改动 标签清单里已经没有「外星人」了。"),
         ]
         assert ledger.stat().st_mtime_ns == before
 

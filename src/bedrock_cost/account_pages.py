@@ -132,7 +132,7 @@ def summary(number: str):
     _, _, row.issue, detail = dashboard._parts(row.problem or row.error) if row.error else ("", "", "", "")
     if row.error:
         toasts.append(dashboard.Toast(
-            "error", "查不到 Cost Explorer", f"{account.label} · {account.account}",
+            "error", "查不到 Cost Explorer", dashboard.who(account),
             row.issue + ("，下面显示的是上一次查到的数" if row.stale_as_of else ""), detail))
 
     trend = dashboard.single_cost_trend(account, today, refresh=refresh)
