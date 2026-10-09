@@ -1,0 +1,342 @@
+{# 账号页的「用量」页签（原来的模型用量页）。
+   一排筛选 → 四张指标卡（点哪张主图画哪个指标）→ 主图（四区合计和四个区是五个视图）
+   → 模型占比 / 模型 × 区域 / 一周作息 → 精简的明细表。 #}
+{% extends "account_base.html" %}
+{% from "_macros.html" import range_picker %}
+{% block loading_label %}正在拉 CloudWatch 指标{% endblock %}
+
+{% block tab_content %}
+
+{# 一排筛选，作用于下面全部的数字、图和表。时间是一个下拉（快捷项 + 自定义起止），
+   粒度和标签改动即查询。 #}
+<form class="filters filters-auto" id="metric-filters" method="get" action="{{ url_for('account.usage', number=account.account) }}">
+  <input type="hidden" name="metric" value="{{ metric_key }}">
+  <div class="filters-row">
+    <div class="field">
+      <span class="field-label">时间（{{ tz_name }}）</span>
+      {{ range_picker(range_label, range_presets, local_start, local_end, start_min, local_now, 'datetime-local',
+                      '最早只能选到启用日期' if start_min else '') }}
+    </div>
+
+    <div class="field">
+      <label for="period">粒度</label>
+      <select id="period" name="period">
+        {% for key, spec in periods.items() %}
+          <option value="{{ key }}" {% if window.period_key == key %}selected{% endif %}>每 {{ spec[1] }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="field">
+      <label for="tags">标签</label>
+      <select id="tags" name="tags">
+        {% for key, label in tag_filters.items() %}
+          <option value="{{ key }}" {% if tag_filter == key %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="filters-end">
+      <a class="btn" href="{{ url_for('account.usage', number=account.account, metric=metric_key, tags=tag_filter,
+                                      period=window.period_key, start=local_start, end=local_end, refresh=1) }}"
+         title="跳过缓存，重新查 CloudWatch"
+         data-loading="正在重新拉 CloudWatch 指标" data-loading-note="跳过缓存">强制刷新</a>
+    </div>
+  </div>
+  <noscript><button class="btn btn-primary" type="submit">查询</button></noscript>
+</form>
+
+{% if fatal %}
+  <div class="alert alert-error"><div><strong>无法生成报表：</strong>{{ fatal }}</div></div>
+{% else %}
+
+  {# 四张指标卡：同时看四个指标，各带和上一段同样长的时间比的变化、一条小走势。
+     点哪张，下面的主图就画哪个指标（带着其余参数跳过去） #}
+  <nav class="metric-cards" aria-label="指标">
+    {% for card in metric_cards %}
+      <a class="metric-card" href="{{ card.url }}" {% if card.current %}aria-current="true"{% endif %}
+         data-loading="正在拉 CloudWatch 指标">
+        <span class="metric-label">{{ card.label }}
+          {%- if card.current %}<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7"/></svg>{% endif %}</span>
+        <span class="metric-value">{% if card.total is none %}—{% else %}{{ card.total | compact }}<small>{{ card.unit }}</small>{% endif %}</span>
+        <span class="metric-delta">
+          {%- if card.total is none %}读不到 CloudWatch
+          {%- elif card.delta is none %}{{ compare_label }}没有数据
+          {%- else %}<b>{{ '↑' if card.delta > 0 else ('↓' if card.delta < 0 else '') }}{{ '%.0f' | format(card.delta | abs) }}%</b> {{ compare_label }}{% endif -%}
+        </span>
+        {{ card.spark | safe }}
+      </a>
+    {% endfor %}
+  </nav>
+
+  <!-- ------------------------------------------------ 主图：四区合计和四个区是同一张图的五个视图，
+       页签切换不重新加载。大数字、峰值、图例都跟着视图走。 -->
+  <section class="viz-card chart-card" aria-label="{{ report.metric_label }}走势">
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">{{ report.metric_label }} · <span id="view-name">{{ views[0].label }}</span></h2>
+        <p class="viz-sub">{{ window.start.astimezone().strftime('%m-%d %H:%M') }} ~ {{ window.end.astimezone().strftime('%m-%d %H:%M') }}
+          · 每 {{ window.period_label }} 一个点 · 按模型分色
+          {%- if report.is_filtered %} · <span class="tone-warn">{{ report.tag_filter_label }}</span>{% endif %}</p>
+      </div>
+      <div class="seg region-tabs" role="tablist" aria-label="区域">
+        {% for view in views %}
+          <button class="seg-item" type="button" role="tab" id="tab-{{ view.key }}"
+                  aria-controls="view-{{ view.key }}" aria-selected="{{ 'true' if loop.first else 'false' }}"
+                  {% if not loop.first %}tabindex="-1"{% endif %}
+                  data-view="{{ view.key }}" data-label="{{ view.label }}"
+                  {% if view.empty and not loop.first %}disabled title="{{ view.label }}这段时间没有调用"
+                  {% elif view.region %}title="{{ regions[view.region] }}"{% endif %}>
+            {{ view.tab_label }}
+            <span class="seg-val">{% if loop.first %}{{ view.total | compact }}{% elif view.empty %}—{% else %}{{ view.share | round | int }}%{% endif %}</span>
+          </button>
+        {% endfor %}
+      </div>
+    </div>
+
+    {% if all_failed %}
+      <p class="chart-caption">四个区都读不到 CloudWatch（原因见右上角），这段时间的调用量看不到——不是没有调用。</p>
+    {% endif %}
+    <div class="chart-views" {% if all_failed %}hidden{% endif %}>
+      {% for view in views %}
+        <div class="chart-view" id="view-{{ view.key }}" role="tabpanel" aria-labelledby="tab-{{ view.key }}"
+             data-view="{{ view.key }}" {% if not loop.first %}hidden{% endif %}>
+          <div class="view-stats">
+            <p class="viz-big">{{ view.total | compact }}<small>{{ report.unit }}</small></p>
+            <p class="viz-meta">
+              每 {{ window.period_label }}平均 <strong>{{ view.average | compact }}</strong>
+              {%- if view.peak_label %} · 最高 <strong>{{ view.peak_value | compact }}</strong>（{{ view.peak_label }}）{% endif %}
+              {%- if loop.first and report.split_total > 0 %} · 有标签（走推理配置）<strong>{{ '%.0f' | format(report.tagged_share) }}%</strong>{% endif %}
+            </p>
+          </div>
+          {% if view.series | length >= 2 %}
+            {# 图例：两条及以上必有。同一个模型在五个视图里是同一个颜色 #}
+            <div class="legend">
+              {% for series in view.series %}
+                <span class="legend-item">
+                  <i class="swatch" style="background: {{ series_color(series.slot) }}"></i>
+                  <span class="legend-name">{{ series.name }}</span>
+                  <span class="legend-value">{{ series.total | compact }}</span>
+                </span>
+              {% endfor %}
+              {% if loop.first and report.folded_count %}
+                <span class="legend-note">另有 {{ report.folded_count }} 项已折叠进「其他」</span>
+              {% endif %}
+            </div>
+          {% endif %}
+          <div class="chart-wrap chart-fluid" data-line-src="line-data-{{ view.key }}">{{ view.chart.svg | safe }}</div>
+          {% if view.chart.tooltip %}<script id="line-data-{{ view.key }}" type="application/json">{{ view.chart.tooltip | tojson }}</script>{% endif %}
+        </div>
+      {% endfor %}
+    </div>
+
+    {% if all_failed %}
+    {% elif not report.series %}
+      <p class="chart-caption">
+        {%- if report.is_filtered and report.split_total > 0 -%}
+          这段时间四个区都没有「{{ report.tag_filter_label[1:] }}」的调用，但另一类有
+          {{ report.split_total | compact }} {{ report.unit }}——把上面的「标签」切回「全部」看看。
+        {%- else -%}
+          这段时间四个区都没有调用。这类流量常常是突发的，试试上面的「7 天」或「30 天」。
+        {%- endif -%}
+      </p>
+    {% else %}
+      <p class="chart-caption">鼠标划过图看每个时间点各模型的数；也可以 Tab 进图里用左右方向键逐点看。</p>
+    {% endif %}
+  </section>
+
+  <!-- ------------------------------------------------ 三张小卡：模型占比、模型 × 区域、一周作息 -->
+  <section class="bento bento-3">
+    <article class="viz-card">
+      <div class="viz-head">
+        <div>
+          <h2 class="viz-title">模型占比</h2>
+          <p class="viz-sub">{{ report.metric_label }} · 四区合计{% if report.is_filtered %} · {{ report.tag_filter_label }}{% endif %}</p>
+        </div>
+      </div>
+      <div class="viz-chart">{{ model_share | safe }}</div>
+      <div class="viz-legend">
+        {% for series in report.series %}
+          <div class="viz-legend-item">
+            <span class="viz-legend-name"><i class="swatch" style="background: {{ series_color(series.slot) }}"></i>{{ series.name }}</span>
+            <span class="viz-legend-value">{{ series.total | compact }}</span>
+          </div>
+        {% else %}
+          <p class="viz-sub">这段时间没有调用</p>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="viz-card">
+      <div class="viz-head">
+        <div>
+          <h2 class="viz-title">模型 × 区域</h2>
+          <p class="viz-sub">{{ report.metric_label }} · 哪个模型跑在哪个区，颜色越深越多</p>
+        </div>
+      </div>
+      {% if report.series %}
+        <table class="heat-table">
+          <thead>
+            <tr>
+              <th class="heat-name" scope="col"><span class="sr-only">模型</span></th>
+              {% for panel in heat_panels %}<th scope="col" title="{{ regions[panel.region] }}">{{ panel.region | replace('us-', '') }}</th>{% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for series in report.series %}
+              {% set row_index = loop.index0 %}
+              <tr>
+                <th scope="row" title="{{ series.name }}">{{ series.name | short_model }}</th>
+                {% for panel in heat_panels %}
+                  {% set cell = panel.series[row_index].total if panel.series | length > row_index else 0 %}
+                  {# --i：进场时按斜对角一格格浮现 #}
+                  <td class="heat-cell {% if cell <= 0 %}heat-zero{% endif %}" style="{{ heat_style(cell, heat_top) }}; --i: {{ row_index + loop.index0 }}"
+                      title="{{ series.name }} · {{ panel.region }}：{{ '{:,.0f}'.format(cell) }} {{ report.unit }}">
+                    {%- if cell > 0 %}{{ cell | compact }}{% else %}—{% endif -%}
+                  </td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <div class="heat-legend" aria-hidden="true"><span>少</span>{% for color in heat_ramp %}<i style="background: {{ color }}"></i>{% endfor %}<span>多</span></div>
+      {% else %}
+        <p class="viz-sub">这段时间没有调用</p>
+      {% endif %}
+    </article>
+
+    <article class="viz-card">
+      <div class="viz-head">
+        <div>
+          <h2 class="viz-title">一周作息</h2>
+          <p class="viz-sub">{{ report.metric_label }} · 每个星期几、每个钟点平均每小时多少</p>
+        </div>
+      </div>
+      {% if week %}
+        <div class="week-grid" role="img" aria-label="一周里各钟点的平均{{ report.metric_label }}">
+          <span></span>
+          {% for hour in range(24) %}<span class="wk-hour">{% if hour % 6 == 0 %}{{ hour }}{% endif %}</span>{% endfor %}
+          {% for row in week %}
+            {% set weekday = loop.index0 %}
+            <span class="wk-label">周{{ '一二三四五六日'[weekday] }}</span>
+            {% for value in row %}
+              {% if value is none %}
+                <span class="week-cell" style="--i: {{ weekday + loop.index0 }}"
+                      title="周{{ '一二三四五六日'[weekday] }} {{ '%02d' | format(loop.index0) }}:00 · 这段时间没覆盖到"></span>
+              {% else %}
+                <span class="week-cell" style="{{ heat_style(value, week_top) }}; --i: {{ weekday + loop.index0 }}"
+                      title="周{{ '一二三四五六日'[weekday] }} {{ '%02d' | format(loop.index0) }}:00 · 平均 {{ '{:,.0f}'.format(value) }} {{ report.unit }}"></span>
+              {% endif %}
+            {% endfor %}
+          {% endfor %}
+        </div>
+        <div class="heat-legend" aria-hidden="true"><span>少</span>{% for color in heat_ramp %}<i style="background: {{ color }}"></i>{% endfor %}<span>多</span></div>
+        {% if week_note %}<p class="viz-sub">{{ week_note }}</p>{% endif %}
+      {% else %}
+        <p class="viz-sub">按天的粒度看不出钟点，把上面的粒度换成「每 1 小时」或更细。</p>
+      {% endif %}
+    </article>
+  </section>
+
+  <!-- ------------------------------------------------ 明细表：每个模型一行，不再按时间铺开上百列 -->
+  <section class="card">
+    <div class="card-head">
+      <div class="card-title">
+        <h2>{{ report.metric_label }}明细</h2>
+        <span class="card-note">{{ report.tag_filter_label }} · {{ report.series | length }} 个模型 · 单位 {{ report.unit }}</span>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table class="wide-table">
+        <thead>
+          <tr>
+            <th class="sticky-col">模型</th>
+            <th class="num">四区合计</th>
+            <th class="num">占比</th>
+            {% for panel in report.panels %}
+              <th class="num region-col">{{ regions[panel.region] }}<br><code>{{ panel.region }}</code></th>
+            {% endfor %}
+            <th class="num">峰值（每 {{ window.period_label }}）</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for series in report.series %}
+            {% set row_index = loop.index0 %}
+            <tr>
+              <td class="sticky-col"><i class="swatch" style="background: {{ series_color(series.slot) }}"></i>{{ series.name }}</td>
+              <td class="num strong">{{ series.total | compact }}</td>
+              <td class="num">
+                {%- if report.total > 0 %}{{ (series.total / report.total * 100) | pct }}{% else %}—{% endif -%}
+              </td>
+              {% for panel in report.panels %}
+                {% set cell = panel.series[row_index].total if panel.series | length > row_index else 0 %}
+                <td class="num {% if cell <= 0 %}zero{% endif %}">
+                  {%- if cell > 0 %}{{ cell | compact }}{% else %}—{% endif -%}
+                </td>
+              {% endfor %}
+              <td class="num">{{ series.peak | compact }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="3" class="empty">所选区间没有调用数据。</td></tr>
+          {% endfor %}
+        </tbody>
+        {% if report.series %}
+          <tfoot>
+            <tr>
+              <td class="sticky-col">合计</td>
+              <td class="num strong">{{ report.total | compact }}</td>
+              <td class="num">{{ 100.0 | pct if report.total > 0 else '—' }}</td>
+              {% for panel in report.panels %}
+                <td class="num">{%- if panel.total > 0 %}{{ panel.total | compact }}{% else %}—{% endif -%}</td>
+              {% endfor %}
+              <td class="num">{{ report.peak[1] | compact }}</td>
+            </tr>
+          </tfoot>
+        {% endif %}
+      </table>
+    </div>
+  </section>
+{% endif %}
+
+<footer class="meta">
+  <span>CloudWatch</span>
+  <span>时间为本机时区 {{ tz_name }}</span>
+  <span>缓存 {{ cache_label }}</span>
+  <span>生成于 {{ generated_at }}</span>
+  <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
+</footer>
+
+{% if not fatal and report.series %}
+  <script>
+  (function () {
+    // 区域页签：五个视图预先画好，切页签只是换一个显示；悬浮在 app.js 里
+    const tabs = [...document.querySelectorAll('.region-tabs [role="tab"]')];
+    const viewName = document.getElementById('view-name');
+    function select(tab, focus) {
+      for (const other of tabs) {
+        const on = other === tab;
+        other.setAttribute('aria-selected', String(on));
+        other.tabIndex = on ? 0 : -1;
+        document.getElementById(other.getAttribute('aria-controls')).hidden = !on;
+      }
+      viewName.textContent = tab.dataset.label;
+      if (focus) tab.focus();
+    }
+    for (const tab of tabs) {
+      tab.addEventListener('click', () => select(tab, false));
+      tab.addEventListener('keydown', e => {
+        const usable = tabs.filter(t => !t.disabled);
+        let i = usable.indexOf(tab);
+        if (e.key === 'ArrowRight') i = (i + 1) % usable.length;
+        else if (e.key === 'ArrowLeft') i = (i - 1 + usable.length) % usable.length;
+        else if (e.key === 'Home') i = 0;
+        else if (e.key === 'End') i = usable.length - 1;
+        else return;
+        e.preventDefault();
+        select(usable[i], true);
+      });
+    }
+  })();
+  </script>
+{% endif %}
+{% endblock %}

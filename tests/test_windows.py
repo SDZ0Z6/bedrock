@@ -40,34 +40,34 @@ class TestPeriods:
 class TestFitPeriod:
     def test_short_window_keeps_fine_granularity(self):
         start = NOW - timedelta(hours=2)
-        assert fit_period(start, NOW, "1m") == ("1m", [])
+        assert fit_period(start, NOW, "1m", now=NOW) == ("1m", [])
 
     def test_beyond_one_minute_retention_bumps_up(self):
         """1 分钟数据只留 15 天，超了必须换档而不是查出空。"""
         start = NOW - timedelta(days=20)
-        period, notes = fit_period(start, NOW, "1m")
+        period, notes = fit_period(start, NOW, "1m", now=NOW)
         assert period != "1m"
         assert any("保留" in n for n in notes)
 
     def test_too_many_points_bumps_up(self):
         start = NOW - timedelta(days=10)  # 1 分钟 = 14400 点，远超上限
-        period, notes = fit_period(start, NOW, "1m")
+        period, notes = fit_period(start, NOW, "1m", now=NOW)
         assert (NOW - start).total_seconds() / PERIODS[period][0] <= MAX_POINTS
         assert notes
 
     def test_never_exceeds_max_points_whatever_the_ask(self):
         for days in (1, 7, 30, 90, 400):
             start = NOW - timedelta(days=days)
-            period, _ = fit_period(start, NOW, "1m")
+            period, _ = fit_period(start, NOW, "1m", now=NOW)
             assert (NOW - start).total_seconds() / PERIODS[period][0] <= MAX_POINTS + 1
 
     def test_unknown_period_falls_back(self):
-        period, _ = fit_period(NOW - timedelta(hours=1), NOW, "nonsense")
+        period, _ = fit_period(NOW - timedelta(hours=1), NOW, "nonsense", now=NOW)
         assert period in PERIODS
 
     def test_coarsest_period_reports_rather_than_loops(self):
         start = NOW - timedelta(days=900)  # 超过 1 天粒度的保留期
-        period, notes = fit_period(start, NOW, "1d")
+        period, notes = fit_period(start, NOW, "1d", now=NOW)
         assert period == "1d"
         assert any("查不到" in n for n in notes)
 

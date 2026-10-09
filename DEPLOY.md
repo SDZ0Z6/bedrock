@@ -878,7 +878,8 @@ chown bedrock:bedrock /opt/bedrock/cred.xlsx && chmod 640 /opt/bedrock/cred.xlsx
 要备的只有两个文件，都不在 git 里（`alert-state.json` 不用备：丢了最多重新建一次
 用量基线、把已经到达的额度档位再报一遍；`last-known-costs.json` 也不用备：丢了最多是下次
 查询失败时没有上一次的数可顶；`mail-state.json` 也不用备：丢了最多是每个邮箱重新建一次
-基线）。告警邮箱的密码在 `cred.xlsx` 里，跟着它一起备：
+基线；`alert-events.jsonl` 也不用备：丢了只是运营看板的「最近告警」从空开始记）。告警邮箱的
+密码在 `cred.xlsx` 里，跟着它一起备：
 
 ```bash
 scp -i C:\path\to\your-key.pem root@<ECS_IP>:/opt/bedrock/.env ./backup-env-$(date +%F)

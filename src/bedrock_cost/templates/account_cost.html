@@ -1,0 +1,218 @@
+{# 账号页的「成本」页签（原来的成本和使用情况页）：这个账号在一段时间里按服务或标签
+   拆开的消费，金额是按台账比率折算后的。 #}
+{% extends "account_base.html" %}
+{% from "_macros.html" import range_picker %}
+{% block loading_label %}正在查各维度消费{% endblock %}
+
+{% block tab_content %}
+
+{# 一排筛选，作用于下面全部数字、图和表。时间是一个下拉（快捷项 + 自定义起止）；
+   维度和粒度改动即查询。 #}
+<form class="filters filters-auto" id="usage-filters" method="get" action="{{ url_for('account.cost', number=account.account) }}">
+  <div class="filters-row">
+    <div class="field">
+      <span class="field-label">时间</span>
+      {{ range_picker(range_label, range_presets, start.isoformat(), end.isoformat(), date_min, today.isoformat(), 'date',
+                      '最早只能选到启用日期' if account.start_date else '') }}
+    </div>
+    <div class="field">
+      <label for="dim">维度</label>
+      <select id="dim" name="dim">
+        {% for key, label in dimensions.items() %}
+          <option value="{{ key }}" {% if dimension == key %}selected{% endif %}>按{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="granularity">粒度</label>
+      <select id="granularity" name="granularity">
+        {% for key, label in granularities.items() %}
+          <option value="{{ key }}" {% if granularity == key %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="filters-end">
+      <a class="btn" href="{{ url_for('account.cost', number=account.account, start=start.isoformat(), end=end.isoformat(),
+                                      dim=dimension, granularity=granularity, refresh=1) }}"
+         title="跳过缓存，重新查 Cost Explorer" data-loading="正在重新查各维度消费" data-loading-note="跳过缓存">强制刷新</a>
+    </div>
+  </div>
+  <noscript><button class="btn btn-primary" type="submit">查询</button></noscript>
+</form>
+
+{% if fatal %}
+  <div class="alert alert-error"><div><strong>无法生成报表：</strong>{{ fatal }}</div></div>
+{% else %}
+
+  <section class="summary summary-3">
+    <div class="tile">
+      <span class="tile-label">折算后合计</span>
+      <span class="tile-value">{{ report.total_marked | money }}</span>
+      <span class="tile-sub">按台账比率逐格折算，和概览、摘要的口径一致</span>
+    </div>
+    <div class="tile tile-split">
+      <span class="tile-label">AWS 原价</span>
+      <span class="tile-value">{{ report.total_raw | money }}</span>
+      <span class="tile-sub">Cost Explorer 原样返回，和 AWS 控制台一致</span>
+    </div>
+    <div class="tile">
+      <span class="tile-label">{{ '月均' if granularity == 'monthly' else '日均' }}（折算后）</span>
+      <span class="tile-value">{{ bucket_average | money }}</span>
+      <span class="tile-sub">{{ report.dates | length }}{{ ' 个月' if granularity == 'monthly' else ' 天' }}</span>
+    </div>
+  </section>
+
+  <section class="viz-card chart-card">
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">按{{ report.dimension_label }}的成本</h2>
+        <p class="viz-sub">{{ start.isoformat() }} ~ {{ end.isoformat() }} · {{ granularities[granularity] }} · 折算后
+          {%- if report.any_cached %} · 部分数据来自缓存{% endif %}</p>
+      </div>
+    </div>
+    {% if report.series | length >= 2 %}
+      <div class="legend">
+        {% for series in report.series %}
+          <span class="legend-item">
+            <i class="swatch" style="background: {{ series_color(series.slot) }}"></i>
+            <span class="legend-name">{{ series.name }}</span>
+            <span class="legend-value">{{ series.total_marked | money }}</span>
+          </span>
+        {% endfor %}
+        {% if report.folded_count %}<span class="legend-note">另有 {{ report.folded_count }} 项已折叠进「其他」</span>{% endif %}
+      </div>
+    {% endif %}
+    {# 不用横向滚动时（画布没超过卡片宽）跟着卡片缩放；桶太多时画布变宽、横向滚动 #}
+    <div class="chart-wrap {% if chart.width <= 1080 %}chart-fluid{% endif %}">{{ chart.svg | safe }}</div>
+    {% if report.series | length == 1 %}<p class="chart-caption">只有一项：{{ report.series[0].name }}</p>{% endif %}
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div class="card-title">
+        <h2>成本明细</h2>
+        <span class="card-note">按{{ report.dimension_label }} · {{ report.series | length }} 项 · 日期列是折算后金额</span>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table class="wide-table">
+        <thead>
+          <tr>
+            <th class="sticky-col">{{ report.dimension_label }}</th>
+            <th class="num">AWS 原价</th>
+            <th class="num">折算后</th>
+            <th class="num">占比</th>
+            {% for label in report.labels %}<th class="num date-col">{{ label }}</th>{% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for series in report.series %}
+            <tr>
+              <td class="sticky-col"><i class="swatch" style="background: {{ series_color(series.slot) }}"></i>{{ series.name }}</td>
+              <td class="num tone-muted">{{ series.total_raw | money }}</td>
+              <td class="num strong">{{ series.total_marked | money }}</td>
+              <td class="num">
+                {%- if report.total_marked > 0 %}{{ (series.total_marked / report.total_marked * 100) | pct }}{% else %}—{% endif -%}
+              </td>
+              {% for value in series.marked %}
+                <td class="num {% if value <= 0 %}zero{% endif %}">{%- if value > 0 %}{{ value | money }}{% else %}—{% endif -%}</td>
+              {% endfor %}
+            </tr>
+          {% else %}
+            <tr><td colspan="4" class="empty">所选区间没有消费数据。</td></tr>
+          {% endfor %}
+        </tbody>
+        {% if report.series %}
+          <tfoot>
+            <tr>
+              <td class="sticky-col">合计</td>
+              <td class="num">{{ report.total_raw | money }}</td>
+              <td class="num strong">{{ report.total_marked | money }}</td>
+              <td class="num">{{ 100.0 | pct if report.total_marked > 0 else '—' }}</td>
+              {% for value in report.column_totals %}
+                <td class="num">{%- if value > 0 %}{{ value | money }}{% else %}—{% endif -%}</td>
+              {% endfor %}
+            </tr>
+          </tfoot>
+        {% endif %}
+      </table>
+    </div>
+  </section>
+{% endif %}
+
+<footer class="meta">
+  <span>Cost Explorer，已按台账比率折算</span>
+  <span>缓存 {{ cache_label }}</span>
+  <span>生成于 {{ generated_at }}</span>
+  <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
+</footer>
+
+{% if not fatal %}
+  <script id="chart-data" type="application/json">{{ chart.tooltip | tojson }}</script>
+  <script>
+  (function () {
+    // 面积图的悬浮：一列一个命中区，提示里列出这一天各项的金额（折算后）和原价合计。
+    // 名字来自 Cost Explorer 的服务名或标签值，用 textContent 插入
+    const holder = document.getElementById('chart-data');
+    if (!holder) return;
+    const data = JSON.parse(holder.textContent);
+    const tip = document.createElement('div');
+    tip.className = 'chart-tip';
+    tip.hidden = true;
+    document.body.append(tip);
+    const money = v => '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    function show(target) {
+      const item = data[Number(target.dataset.idx)];
+      if (!item) return;
+      tip.replaceChildren();
+      const head = document.createElement('div');
+      head.className = 'tip-head';
+      head.textContent = item.date;
+      const total = document.createElement('div');
+      total.className = 'tip-total';
+      total.textContent = '合计 ' + money(item.total);
+      tip.append(head, total);
+      if (item.rows.length) {
+        const table = document.createElement('table');
+        table.className = 'tip-table';
+        let raw = 0;
+        for (const row of item.rows) {
+          raw += row.raw;
+          const tr = table.insertRow();
+          const name = tr.insertCell();
+          const key = document.createElement('i');
+          key.className = 'line-key';
+          key.style.background = row.color;
+          name.append(key, document.createTextNode(row.name));
+          const value = tr.insertCell();
+          value.className = 'tip-num';
+          value.textContent = money(row.marked);
+        }
+        const foot = document.createElement('div');
+        foot.className = 'tip-foot';
+        foot.textContent = 'AWS 原价 ' + money(raw);
+        tip.append(table, foot);
+      }
+      tip.hidden = false;
+      const box = target.getBoundingClientRect();
+      let left = box.left + box.width / 2 - tip.offsetWidth / 2;
+      left = Math.max(8, Math.min(left, window.innerWidth - tip.offsetWidth - 8));
+      let top = box.top - tip.offsetHeight - 10;
+      if (top < 8) top = box.bottom + 10;
+      tip.style.left = left + 'px';
+      tip.style.top = top + 'px';
+    }
+    const hide = () => { tip.hidden = true; };
+    for (const hit of document.querySelectorAll('.chart-hit')) {
+      hit.addEventListener('mouseenter', () => show(hit));
+      hit.addEventListener('focus', () => show(hit));
+      hit.addEventListener('mouseleave', hide);
+      hit.addEventListener('blur', hide);
+    }
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') hide(); });
+    window.addEventListener('scroll', hide, { passive: true });
+  })();
+  </script>
+{% endif %}
+{% endblock %}

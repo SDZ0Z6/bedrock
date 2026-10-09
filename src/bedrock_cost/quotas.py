@@ -49,8 +49,8 @@ import boto3
 from botocore.config import Config as BotoConfig
 
 from . import config
+from .aws_errors import QueryError, as_query_error, describe
 from .cloudwatch_metrics import REGIONS
-from .cost_explorer import friendly_error, redact
 from .excel_source import Account
 
 SERVICE_CODE = "bedrock"
@@ -208,8 +208,13 @@ class QuotaReport:
     # True = 至少有一个账号读到了 ARN。多账号时可能是混合的：一个账号读得到、
     # 另一个被 SCP 拒，那就一张表里两种行并存。
     arn_driven: bool = False
+    # 下面两句是给页面直接显示的一行字（最多举两个账号）；逐条的原因在 arn_errors / errors 里
     arn_error: str | None = None      # 读不到应用推理配置的原因（带账号）
     error: str | None = None          # 读不到 Service Quotas 的原因（带账号）
+    # 每个失败的 (账号, 区域) 一条，str() 是「账号 @ 区域：原因（错误码）」，detail 里是 AWS
+    # 原话——SCP 拒绝时原话带着策略 ARN（也拆到了 policy 里），是能直接拿去改的线索
+    errors: list[QueryError] = field(default_factory=list)       # Service Quotas
+    arn_errors: list[QueryError] = field(default_factory=list)   # 应用推理配置
 
     def apply_filters(self, model: str = '', region: str = '') -> None:
         """按模型 / 区域裁 rows。
@@ -323,7 +328,7 @@ def _client(account: Account, service: str, region: str):
 # --------------------------------------------------------------- 取配额
 def fetch_region_quotas(
     account: Account, region: str
-) -> tuple[dict[str, QuotaPair], str | None]:
+) -> tuple[dict[str, QuotaPair], QueryError | None]:
     """某个区域的 Claude token 配额：配额显示名 -> QuotaPair。"""
     key = (account.ak[-6:], account.account, region, "quotas")
     hit = _cached(key)
@@ -361,7 +366,7 @@ def fetch_region_quotas(
                     pair.tpm_code = quota.get("QuotaCode", "")
                     pair.tpm_adjustable = adjustable
     except Exception as exc:
-        return {}, friendly_error(exc, account)
+        return {}, describe(exc, account, region)
 
     _store(key, found)
     return dict(found), None
@@ -369,10 +374,11 @@ def fetch_region_quotas(
 
 def fetch_app_profiles(
     account: Account, region: str
-) -> tuple[list[AppProfile], str | None]:
+) -> tuple[list[AppProfile], QueryError | None]:
     """某个区域的应用推理配置。读不到就把原因带回去，让上层决定降级。
 
-    错误原文要留着：SCP 拒绝的消息里带策略 ID，是能直接拿去改的线索。
+    错误原文要留着：SCP 拒绝的消息里带策略 ID，是能直接拿去改的线索。它在 QueryError 的
+    detail（策略 ARN 另外拆在 policy）里，页面上那一句只说被谁拒了哪个动作。
     """
     key = (account.ak[-6:], account.account, region, "app-profiles")
     hit = _cached(key)
@@ -409,7 +415,7 @@ def fetch_app_profiles(
             if not token:
                 break
     except Exception as exc:
-        return [], redact(f"{type(exc).__name__}: {exc}", account)
+        return [], describe(exc, account, region)
 
     _store(key, profiles)
     return list(profiles), None
@@ -667,8 +673,19 @@ def build_quota_report(
     denied: list[str] = []
     for account in accounts:
         bucket = fetched[account.key]
-        for region_name, text in bucket["quota_errors"][:1]:
-            quota_errors.append(f"{account.account} @ {region_name}：{text}")
+        # 逐条留给页面的报错弹窗分组；下面的一行字只举每个账号的第一个区——四个区通常是同一个原因
+        quota_problems = [
+            as_query_error(error, account=account.account, region=region_name)
+            for region_name, error in bucket["quota_errors"]
+        ]
+        arn_problems = [
+            as_query_error(error, account=account.account, region=region_name)
+            for region_name, error in bucket["arn_errors"]
+        ]
+        report.errors += quota_problems
+        report.arn_errors += arn_problems
+        if quota_problems:
+            quota_errors.append(str(quota_problems[0]))
         # 每个账号各自判断能不能按 ARN 列。多账号时可能是混合的，一张表里
         # 两种行并存——QuotaRow 两种都支持，不用拆成两张表。
         if any(bucket["profiles"].values()):
@@ -677,14 +694,15 @@ def build_quota_report(
                 account, bucket["quotas"], bucket["profiles"]
             )
             report.arn_driven = True
-            if bucket["arn_errors"]:
-                failed = "、".join(r for r, _ in bucket["arn_errors"])
+            if arn_problems:
+                failed = "、".join(problem.region for problem in arn_problems)
                 arn_errors.append(f"{account.account} 的 {failed} 读不到应用推理配置")
         else:
             rows += _model_rows(account, bucket["quotas"])
-            if bucket["arn_errors"]:
+            if arn_problems:
                 denied.append(account.account)
-                arn_errors.append(f"{account.account}：{bucket['arn_errors'][0][1]}")
+                # 只放一句原因，不再贴 AWS 原话：原话（连同 SCP 的策略 ARN）在 arn_errors 里
+                arn_errors.append(f"{account.account}：{arn_problems[0].message}")
 
     if quota_errors:
         report.error = "；".join(quota_errors[:2])
@@ -703,3 +721,20 @@ def build_quota_report(
 
     report.apply_filters(model=model, region=region)
     return report
+
+
+def peek_quota_report(accounts: list[Account]) -> QuotaReport | None:
+    """只用缓存里已经有的配额拼一份报表；哪个账号哪个区还没查过（或者已经过期）就返回 None。
+
+    账号页摘要的「配额」卡用它：第一次查配额要 40~50 秒（Service Quotas 按账号限流），
+    不能拖慢摘要。在「配额」页签查过一次之后，摘要上就有了。查失败的区不进缓存，
+    所以上一次有区失败时这里也是 None，摘要上就不显示（配额页签会说清楚为什么）。
+    """
+    if not accounts:
+        return None
+    for account in accounts:
+        for region in QUOTA_REGIONS:
+            for kind in ("quotas", "app-profiles"):
+                if _cached((account.ak[-6:], account.account, region, kind)) is None:
+                    return None
+    return build_quota_report(accounts)

@@ -1,23 +1,26 @@
-"""账号管理页：增 / 改 / 停用。
+"""账号管理页：增 / 改 / 停用，以及表格、筛选条、提示这些页面本身的东西。
 
 这一页是唯一会写 cred.xlsx 的地方，所以用例的重点不在「功能能用」，而在
 「写坏了会怎样」：
     - AK/SK 只能进不能出，编辑路径上必须一个字节都不改；
     - 校验没过、或者行号对不上时，文件必须原样不动；
     - 软删只翻 ENABLED，行号不许移动（account.key 和各处缓存键都带行号）。
+
+告警邮箱在 test_accounts_mail，删除在 test_accounts_delete，弹窗分页在 test_accounts_pages，
+生命周期标签在 test_lifecycle，头像在 test_avatars——都用这里的 admin、post、_edit 这几个帮手。
 """
 
 from __future__ import annotations
 
 import re
-
-import openpyxl
 from datetime import date, timedelta
 
+import openpyxl
 import pytest
 
-from bedrock_cost import excel_source
+from bedrock_cost import excel_source, mail_inbox
 from bedrock_cost.excel_source import LedgerConflict, load_accounts
+from bedrock_cost.filters import ratio
 
 from .conftest import (
     LEDGER_HEADER,
@@ -33,10 +36,16 @@ CSRF_PATTERN = re.compile(r'name="csrf" value="([^"]+)"')
 # <dialog id="…" … data-reopen> —— 属性形式，不会误命中脚本里的 dialog[data-reopen]
 REOPEN_PATTERN = re.compile(r'id="(dlg-[\w-]+)"[^>]*\sdata-reopen>')
 
+# 两个账号的账号邮箱。conftest 的台账是改版前的老样子（没有 EMAIL 列）；admin 用的台账补上
+# 这一列，和现在页面上新增、修改出来的台账一样——新增、修改都要求填账号邮箱。
+# 故意不带上游的名字（ALPHA / BETA）：有几条用例要断言「卡片上不出现上游」
+EMAILS = {"111111111111": "acct-one@example.com", "222222222222": "acct-two@example.com"}
+
 # 一份合法的新账号表单，用例按需覆盖其中几项
 NEW_FORM = {
     "partner": "GAMMA",
     "account": "333333333333",
+    "email": "acct-three@example.com",
     "budget": "150000",
     "tag_ratio": "1",
     "untag_ratio": "1.2",
@@ -46,9 +55,22 @@ NEW_FORM = {
 }
 
 
+def rewrite_ledger(path, rows=None, **columns) -> None:
+    """把临时台账重写一遍：conftest 的两行（或给定的 rows），右边再补几列。
+
+    columns 是 {表头: [第一行的值, 第二行的值]}，比如 EMAIL=[…, …]、LIFECYCLE=["正常", None]。
+    """
+    base = [list(row) for row in (rows if rows is not None else LEDGER_ROWS)]
+    header = [*LEDGER_HEADER, *columns]
+    body = [[*row, *(values[index] for values in columns.values())] for index, row in enumerate(base)]
+    write_ledger(path, header=header, rows=body)
+    excel_source.clear_cache()
+
+
 @pytest.fixture
 def admin(logged_in, ledger):
-    """登录后的 client，台账指向临时文件。"""
+    """登录后的 client，台账指向临时文件，两个账号都填好了账号邮箱。"""
+    rewrite_ledger(ledger, EMAIL=[EMAILS["111111111111"], EMAILS["222222222222"]])
     return logged_in
 
 
@@ -62,6 +84,10 @@ def token(client) -> str:
 
 def post(client, path: str, **fields):
     return client.post(path, data={"csrf": token(client), **fields})
+
+
+def page(client) -> str:
+    return client.get("/accounts/").get_data(as_text=True)
 
 
 def by_account(account_id: str, include_disabled: bool = True):
@@ -81,7 +107,102 @@ def raw_rows(path):
         workbook.close()
 
 
+def text(fragment: str) -> str:
+    """去掉标签、压掉空白之后的字。"""
+    return " ".join(re.sub(r"<[^>]+>", " ", fragment).split())
+
+
+def toasts(html: str) -> list[tuple[str, str]]:
+    """右上角弹出来的提示（flash）：[(类别, 文字)]。不含页面脚本克隆用的 <template>。"""
+    stack = html[html.index('id="toasts"') : html.index("<template data-toast-template")]
+    return [
+        (tone, text(body))
+        for tone, body in re.findall(r'<div class="toast toast-(\w+)"[^>]*>(.*?)<button class="toast-x"', stack, re.S)
+    ]
+
+
+def warn_notes(html: str) -> list[str]:
+    """页面上的警示条（<p class="note note-warn">）的文字。"""
+    return [text(body) for body in re.findall(r'<p class="note note-warn">(.*?)</p>', html, re.S)]
+
+
+_TAG_ATTR = re.compile(r'\s([\w-]+)(?:="([^"]*)")?')
+
+
+def inputs(fragment: str, name: str) -> list[dict]:
+    """所有 name="…" 的 <input> 上的属性，按出现顺序，不管属性的先后：{属性: 值}，
+    没有值的（required、checked、disabled）记成 True。"""
+    return [
+        {match.group(1): True if match.group(2) is None else match.group(2) for match in _TAG_ATTR.finditer(" " + attrs)}
+        for attrs in re.findall(rf'<input\b([^>]*\sname="{re.escape(name)}"[^>]*)>', fragment)
+    ]
+
+
+def input_attrs(fragment: str, name: str) -> dict:
+    """第一个 name="…" 的 <input> 上的属性；找不到就是空 dict。"""
+    found = inputs(fragment, name)
+    return found[0] if found else {}
+
+
+def chat_results(fragment: str) -> list[str]:
+    """「发测试消息」之后贴在每个群旁边的结果（.chat-result 里的字），按群的顺序。
+    只认类名，不管外面怎么包、前面有没有 ✓ / ✗。"""
+    return [
+        text(body)
+        for body in re.findall(r'class="chat-result\b[^"]*"[^>]*>(.*?)</(?:span|p|div|small|em|output)>', fragment, re.S)
+    ]
+
+
+def column_heads(html: str) -> list[str]:
+    head = html[html.index("<thead>") : html.index("</thead>")]
+    return [text(cell) for cell in re.findall(r"<th\b[^>]*>(.*?)</th>", head, re.S)]
+
+
+_ROW = re.compile(r"<tr\b([^>]*)>(.*?)</tr>", re.S)
+_CELL = re.compile(r"<td\b[^>]*>.*?</td>", re.S)
+_ATTR = re.compile(r'\s([\w-]+)="([^"]*)"')
+
+
+def table_rows(html: str) -> list[tuple[dict, list[str]]]:
+    """表格里每个账号一行：[(<tr> 上的属性, [每一格的 HTML，含 <td> 本身])]，按台账顺序。"""
+    body = html[html.index("<tbody>") : html.index("</tbody>")]
+    return [(dict(_ATTR.findall(" " + attrs)), _CELL.findall(cells)) for attrs, cells in _ROW.findall(body)]
+
+
+def _edit(admin, target, **fields):
+    """提交修改弹窗：不传的字段按账号现值填——和弹窗打开时预先填好的一模一样
+    （生命周期勾着现有的、群组 ID 一行一个、邮箱平台默认选中第一个；密码框永远是空的）。"""
+    base = dict(
+        key=target.key, partner=target.partner, account=target.account, email=target.email,
+        budget=ratio(target.budget), tag_ratio=ratio(target.tag_ratio), untag_ratio=ratio(target.untag_ratio),
+        tag_spec=target.tag_spec,
+        start_date=target.start_date.isoformat() if target.start_date else "",
+        lifecycle=list(target.lifecycle),
+        avatar_emoji=target.avatar_emoji,
+        avatar_color="" if target.avatar_color is None else str(target.avatar_color),
+        tg_chat_ids=list(target.tg_chat_ids) or [""],
+        mail_provider=target.mail_provider or mail_inbox.DEFAULT_PROVIDER,
+        mail_address=target.mail_address,
+        mail_server=target.mail_server,
+    )
+    base.update(fields)
+    return post(admin, "/accounts/update", **base)
+
+
+def _dialog(html: str, marker: str) -> str:
+    """截出某个弹窗的 HTML。"""
+    part = html[html.index(marker) :]
+    return part[: part.index("</dialog>")]
+
+
 # ------------------------------------------------------------------ 访问控制
+WRITE_PATHS = (
+    "/accounts/create", "/accounts/update", "/accounts/toggle", "/accounts/delete",
+    "/accounts/tg-toggle", "/accounts/mail-toggle", "/accounts/tg-test", "/accounts/mail-test",
+    "/accounts/lifecycle", "/accounts/lifecycle/add", "/accounts/lifecycle/remove",
+)
+
+
 def test_未登录不能进账号管理页(client, ledger):
     response = client.get("/accounts/")
     assert response.status_code == 302
@@ -89,11 +210,13 @@ def test_未登录不能进账号管理页(client, ledger):
 
 
 def test_未登录不能提交任何写操作(client, ledger):
-    for path in ("/accounts/create", "/accounts/update", "/accounts/toggle"):
-        response = client.post(path, data=NEW_FORM)
+    before = ledger.stat().st_mtime_ns
+    for path in WRITE_PATHS:
+        response = client.post(path, data={**NEW_FORM, "name": "观察", "color": "amber"})
         assert response.status_code == 302, path
         assert "/login" in response.headers["Location"], path
     assert len(load_accounts(force=True, include_disabled=True)) == len(LEDGER_ROWS)
+    assert ledger.stat().st_mtime_ns == before
 
 
 def test_没有CSRF令牌的提交不写文件(admin, ledger):
@@ -112,10 +235,10 @@ def test_错误的CSRF令牌同样被拒(admin, ledger):
 
 # ------------------------------------------------------------------ 页面本身
 def test_页面列出全部账号且不泄露凭证(admin):
-    html = admin.get("/accounts/").get_data(as_text=True)
-    for partner, account, *_ in LEDGER_ROWS:
-        assert partner in html
-        assert str(account) in html
+    html = page(admin)
+    for row in LEDGER_ROWS:
+        assert ledger_value(row, "PARTNER") in html
+        assert str(ledger_value(row, "ACCOUNT")) in html
     # SK 任何形式都不能出现；AK 只能是掩码
     for row in LEDGER_ROWS:
         assert ledger_value(row, "SK") not in html
@@ -124,13 +247,16 @@ def test_页面列出全部账号且不泄露凭证(admin):
 
 
 def test_新增入口在页头而不是页面里(admin):
-    html = admin.get("/accounts/").get_data(as_text=True)
+    html = page(admin)
     head, _, body = html.partition('<div class="page-actions">')
-    assert 'data-open="dlg-create"' in body.partition("</div>")[0]
+    actions = body.partition("</div>")[0]
+    # 页头两个按钮：管理生命周期标签、新增账号
+    assert re.findall(r'data-open="(dlg-[\w-]+)"', actions) == ["dlg-life", "dlg-create"]
+    assert text(actions) == "生命周期标签 新增账号"
 
 
 def test_每个账号各有一个修改弹窗(admin):
-    html = admin.get("/accounts/").get_data(as_text=True)
+    html = page(admin)
     assert html.count('id="dlg-edit-') == len(LEDGER_ROWS)
     assert html.count('data-open="dlg-edit-') == len(LEDGER_ROWS)
     # 弹窗里是完整的一套可编辑字段，凭证不在其中
@@ -142,25 +268,28 @@ def test_每个账号各有一个修改弹窗(admin):
 
 
 def test_启用中的账号点停用要先过确认弹窗(admin):
-    html = admin.get("/accounts/").get_data(as_text=True)
+    html = page(admin)
     # 两个账号都启用中，各有一个确认弹窗；按钮只负责打开它，不直接提交
     assert html.count('id="dlg-off-') == len(LEDGER_ROWS)
     assert html.count('data-open="dlg-off-') == len(LEDGER_ROWS)
     assert "确定停用" in html
     # 确认弹窗里才是真正的 POST 表单
-    assert html.count(f'action="/accounts/toggle"') == len(LEDGER_ROWS)
+    assert html.count('action="/accounts/toggle"') == len(LEDGER_ROWS)
 
 
 def test_停用的账号在页面上仍然可见并可一键恢复(admin, ledger):
     target = by_account("111111111111")
     post(admin, "/accounts/toggle", key=target.key, enabled="0")
-    html = admin.get("/accounts/").get_data(as_text=True)
-    assert "111111111111" in html
-    assert "row-off" in html
-    # 恢复是安全可逆的，不再拦一道确认：它是 <td> 里的一个直接提交表单
-    assert "恢复" in html
+    html = page(admin)
+    (attrs, cells), _ = table_rows(html)
+    assert attrs["data-number"] == "111111111111"
+    assert attrs["class"] == "row-off" and attrs["data-state"] == "off"
+    assert text(cells[3]) == "停用"
+    # 恢复是安全可逆的，不再拦一道确认：它是操作格里的一个直接提交表单
+    actions = cells[-1]
+    assert 'action="/accounts/toggle"' in actions and 'name="enabled" value="1"' in actions
+    assert 'aria-label="恢复 111111111111"' in actions
     assert html.count('id="dlg-off-') == len(LEDGER_ROWS) - 1
-    assert 'value="1"' in html
 
 
 def reopened_dialogs(html: str) -> list[str]:
@@ -177,19 +306,15 @@ def test_新增校验失败会重新弹出新增窗口(admin, ledger):
 
 def test_修改校验失败会重新弹出那一行的窗口(admin, ledger):
     target = by_account("111111111111")  # 台账里第一行
-    response = post(
-        admin, "/accounts/update",
-        key=target.key, partner="ALPHA", account="111111111111",
-        budget="abc", tag_ratio="1", untag_ratio="1", tag_spec="",
-    )
+    response = _edit(admin, target, budget="abc")
     html = response.get_data(as_text=True)
     # 只弹这一个，而且必须是这个账号的窗口，不能是别人的
     assert reopened_dialogs(html) == ["dlg-edit-1"]
-    assert 'value="abc"' in html
+    assert 'value="abc"' in _dialog(html, 'id="dlg-edit-1"')
 
 
 def test_没出错时不会自动弹窗(admin):
-    assert reopened_dialogs(admin.get("/accounts/").get_data(as_text=True)) == []
+    assert reopened_dialogs(page(admin)) == []
 
 
 # ------------------------------------------------------------------ 新增
@@ -200,6 +325,8 @@ def test_新增账号写进台账(admin, ledger):
     created = by_account("333333333333")
     assert created is not None
     assert created.partner == "GAMMA"
+    assert created.email == "acct-three@example.com"
+    assert created.label == "acct-three"
     assert created.budget == 150000
     assert created.untag_ratio == 1.2
     assert created.enabled is True
@@ -226,6 +353,8 @@ def test_新增时预算接受千分位和货币符号(admin, ledger):
         ("account", "", "账号不能为空"),
         ("account", "123", "12 位数字"),
         ("account", "12345678901x", "12 位数字"),
+        ("email", "", "账号邮箱不能为空"),
+        ("email", "not-an-email", "账号邮箱格式不对"),
         ("partner", "", "上游不能为空"),
         ("budget", "abc", "额度要填数字"),
         ("budget", "-1", "额度不能是负数"),
@@ -264,8 +393,10 @@ def test_停用的账号ID也不能被重新占用(admin, ledger):
 def test_校验失败时把填过的值回填(admin, ledger):
     response = post(admin, "/accounts/create", **{**NEW_FORM, "budget": "abc"})
     html = response.get_data(as_text=True)
-    assert 'value="abc"' in html
-    assert 'value="GAMMA"' in html
+    dialog = _dialog(html, 'id="dlg-create"')
+    assert 'value="abc"' in dialog
+    assert 'value="GAMMA"' in dialog
+    assert 'value="acct-three@example.com"' in dialog
     # 但凭证不回填——不能让它出现在响应里
     assert NEW_FORM["sk"] not in html
     assert NEW_FORM["ak"] not in html
@@ -274,15 +405,15 @@ def test_校验失败时把填过的值回填(admin, ledger):
 # ------------------------------------------------------------------ 编辑
 def test_编辑改掉非凭证字段(admin, ledger):
     target = by_account("111111111111")
-    response = post(
-        admin, "/accounts/update",
-        key=target.key, partner="ALPHA-NEW", account="111111111111",
+    response = _edit(
+        admin, target, partner="ALPHA-NEW", email="acct-one-new@example.com",
         budget="777", tag_ratio="1.5", untag_ratio="2", tag_spec="cost-center=x",
     )
     assert response.status_code == 302
 
     changed = by_account("111111111111")
     assert changed.partner == "ALPHA-NEW"
+    assert changed.email == "acct-one-new@example.com"
     assert changed.budget == 777
     assert changed.tag_ratio == 1.5
     assert changed.untag_ratio == 2
@@ -294,11 +425,7 @@ def test_编辑不碰凭证(admin, ledger):
     target = by_account("111111111111")
     ak_before, sk_before = target.ak, target.sk
 
-    post(
-        admin, "/accounts/update",
-        key=target.key, partner="ALPHA", account="111111111111",
-        budget="777", tag_ratio="1", untag_ratio="1.05", tag_spec="map-migrated=migALPHA",
-    )
+    _edit(admin, target, budget="777")
     after = by_account("111111111111")
     assert after.ak == ak_before
     assert after.sk == sk_before
@@ -309,28 +436,19 @@ def test_编辑表单里塞AK和SK也不会生效(admin, ledger):
     target = by_account("111111111111")
     ak_before, sk_before = target.ak, target.sk
 
-    post(
-        admin, "/accounts/update",
-        key=target.key, partner="ALPHA", account="111111111111",
-        budget="777", tag_ratio="1", untag_ratio="1.05", tag_spec="map-migrated=migALPHA",
-        ak="AKIAHACKED0000000000", sk="hacked" * 8,
-    )
+    _edit(admin, target, budget="777", ak="AKIAHACKED0000000000", sk="hacked" * 8)
     after = by_account("111111111111")
     assert after.ak == ak_before
     assert after.sk == sk_before
 
 
 def test_编辑没有实际改动时不写文件(admin, ledger):
-    target = by_account("111111111111")
+    """弹窗原样保存（_edit 不改任何字段 = 弹窗打开时预先填好的那一套）：文件不动，也不备份。
+
+    台账里没有 LIFECYCLE / AVATAR 这些列：表单里它们是空的，和「没有这一列」是一回事。"""
     before = ledger.stat().st_mtime_ns
 
-    response = post(
-        admin, "/accounts/update",
-        key=target.key, partner=target.partner, account=target.account,
-        budget="500000", tag_ratio="1", untag_ratio="1.05", tag_spec=target.tag_spec,
-        # 弹窗里这个字段是带初值的，不原样带上就等于把它清空，那确实算一次改动
-        start_date=target.start_date.isoformat(),
-    )
+    response = _edit(admin, by_account("111111111111"))
     assert response.status_code == 302
     assert ledger.stat().st_mtime_ns == before
     assert not (ledger.parent / excel_source.BACKUP_DIR_NAME).exists()
@@ -338,11 +456,7 @@ def test_编辑没有实际改动时不写文件(admin, ledger):
 
 def test_编辑不能把账号改成别人的ID(admin, ledger):
     target = by_account("111111111111")
-    response = post(
-        admin, "/accounts/update",
-        key=target.key, partner="ALPHA", account="222222222222",
-        budget="1", tag_ratio="1", untag_ratio="1", tag_spec="",
-    )
+    response = _edit(admin, target, account="222222222222")
     assert response.status_code == 400
     assert "已经在台账里了" in response.get_data(as_text=True)
     assert by_account("111111111111") is not None
@@ -351,10 +465,11 @@ def test_编辑不能把账号改成别人的ID(admin, ledger):
 def test_编辑已经不存在的账号会被挡下(admin, ledger):
     response = post(
         admin, "/accounts/update",
-        key="999999999999#9", partner="X", account="999999999999",
+        key="999999999999#9", partner="X", account="999999999999", email="x@example.com",
         budget="1", tag_ratio="1", untag_ratio="1", tag_spec="",
     )
     assert response.status_code == 302  # 重定向回列表并提示
+    assert ("error", "这个账号已经不在台账里了，页面可能已过期。已重新加载。") in toasts(page(admin))
 
 
 def test_台账被换过之后旧的行号不会改错行(ledger):
@@ -366,7 +481,7 @@ def test_台账被换过之后旧的行号不会改错行(ledger):
     excel_source.clear_cache()
 
     data, errors = excel_source.validate(
-        {"partner": "X", "account": "111111111111", "budget": "1",
+        {"partner": "X", "account": "111111111111", "email": "acct-one@example.com", "budget": "1",
          "tag_ratio": "1", "untag_ratio": "1", "tag_spec": ""},
         [], creating=False,
     )
@@ -376,6 +491,112 @@ def test_台账被换过之后旧的行号不会改错行(ledger):
 
     # 文件没被动过
     assert [row[0] for row in raw_rows(ledger)[1:]] == ["BETA", "ALPHA"]
+
+
+# ------------------------------------------------------------------ 账号邮箱
+class TestAccountEmail:
+    """账号邮箱（root 邮箱）：号码一眼认不出是谁，页面和 TG 卡片上都和号码一起写。
+
+    新增、修改都必填，格式要对，两个账号不能填同一个——不分大小写，停用的账号也算。"""
+
+    @pytest.mark.parametrize(
+        "email",
+        [
+            "not-an-email",
+            "name@example",                       # 域名没有点
+            "two words@example.com",
+            "a@example.com,b@example.com",        # 一格里塞了两个
+            "@example.com",
+            "a@@example.com",
+            "x" * 243 + "@example.com",          # 255 个字符，超过 254
+        ],
+    )
+    def test_the_format_is_checked(self, admin, ledger, email):
+        before = ledger.stat().st_mtime_ns
+        response = post(admin, "/accounts/create", **{**NEW_FORM, "email": email})
+        assert response.status_code == 400
+        assert "账号邮箱格式不对，应该形如 name@example.com。" in response.get_data(as_text=True)
+        assert ledger.stat().st_mtime_ns == before
+
+    def test_surrounding_spaces_are_dropped(self, admin, ledger):
+        post(admin, "/accounts/create", **{**NEW_FORM, "email": "  acct-three@example.com  "})
+        assert by_account("333333333333").email == "acct-three@example.com"
+
+    def test_two_accounts_cannot_share_one(self, admin, ledger):
+        response = post(admin, "/accounts/create", **{**NEW_FORM, "email": EMAILS["111111111111"]})
+        assert response.status_code == 400
+        assert ("邮箱 acct-one@example.com 已经是账号 111111111111 的了，不能两个账号填同一个。"
+                in response.get_data(as_text=True))
+        assert by_account("333333333333") is None
+
+    def test_the_comparison_ignores_case(self, admin, ledger):
+        response = post(admin, "/accounts/create", **{**NEW_FORM, "email": "ACCT-One@Example.COM"})
+        assert response.status_code == 400
+        assert "已经是账号 111111111111 的了" in response.get_data(as_text=True)
+
+    def test_a_disabled_account_keeps_its_email(self, admin, ledger):
+        """和账号 ID 一样：停用不等于邮箱可以被别人占用，否则恢复的时候就撞车了。"""
+        post(admin, "/accounts/toggle", key=by_account("111111111111").key, enabled="0")
+        response = post(admin, "/accounts/create", **{**NEW_FORM, "email": EMAILS["111111111111"]})
+        assert response.status_code == 400
+        assert "已经是账号 111111111111 的了" in response.get_data(as_text=True)
+
+    def test_an_edit_keeps_its_own_email(self, admin, ledger):
+        """查重不能把自己算进去：原样保存自己的邮箱不是「重复」。"""
+        response = _edit(admin, by_account("111111111111"), budget="777")
+        assert response.status_code == 302
+        assert by_account("111111111111").budget == 777
+
+    def test_an_edit_cannot_take_another_accounts_email(self, admin, ledger):
+        response = _edit(admin, by_account("111111111111"), email="Acct-Two@example.com")
+        assert response.status_code == 400
+        assert "已经是账号 222222222222 的了" in response.get_data(as_text=True)
+        assert by_account("111111111111").email == EMAILS["111111111111"]
+
+    def test_an_old_account_must_be_given_one_on_its_next_edit(self, admin, ledger):
+        """老台账没有这一列：照样能读，但下次修改时要补上，不补存不进去。"""
+        rewrite_ledger(ledger)
+        target = by_account("111111111111")
+        assert target.email == ""
+        response = _edit(admin, target, budget="777")
+        assert response.status_code == 400
+        assert "账号邮箱不能为空，填这个 AWS 账号的 root 邮箱。" in response.get_data(as_text=True)
+        assert by_account("111111111111").budget == 500000
+
+        assert _edit(admin, target, email="acct-one@example.com").status_code == 302
+        assert by_account("111111111111").email == "acct-one@example.com"
+        log = (ledger.parent / excel_source.AUDIT_NAME).read_text(encoding="utf-8")
+        assert "EMAIL 空 → acct-one@example.com" in log
+
+    def test_the_table_shows_it_under_the_number(self, admin, ledger):
+        (_, cells), _ = table_rows(page(admin))
+        ident = cells[0]
+        assert text(ident) == "A 111111111111 acct-one@example.com"   # 头像字母、号码、邮箱
+        assert '<span class="acct-cell-mail" title="acct-one@example.com">acct-one@example.com</span>' in ident
+
+    def test_an_old_account_says_it_is_missing(self, admin, ledger):
+        rewrite_ledger(ledger)
+        (_, cells), _ = table_rows(page(admin))
+        assert "未填账号邮箱" in text(cells[0])
+        assert "acct-cell-mail" not in cells[0]
+
+    def test_the_dialogs_name_it(self, admin, ledger):
+        html = page(admin)
+        assert '<span class="modal-sub">111111111111 · acct-one@example.com</span>' in _dialog(html, 'id="dlg-edit-1"')
+        assert "<strong>111111111111</strong>（acct-one@example.com）吗" in _dialog(html, 'id="dlg-off-1"')
+        assert "<strong>111111111111</strong>（acct-one@example.com）吗" in _dialog(html, 'id="dlg-del-1"')
+
+    def test_the_field_is_a_required_email_input(self, admin, ledger):
+        html = page(admin)
+        for marker in ('id="dlg-create"', 'id="dlg-edit-1"'):
+            field = input_attrs(_dialog(html, marker), "email")
+            assert field["type"] == "email" and field["required"] is True
+        assert input_attrs(_dialog(html, 'id="dlg-edit-1"'), "email")["value"] == "acct-one@example.com"
+        assert input_attrs(_dialog(html, 'id="dlg-create"'), "email")["value"] == ""
+
+    def test_a_failed_edit_fills_the_typed_email_back(self, admin, ledger):
+        html = _edit(admin, by_account("111111111111"), email="typed@example.com", budget="abc").get_data(as_text=True)
+        assert 'value="typed@example.com"' in _dialog(html, 'id="dlg-edit-1"')
 
 
 # ------------------------------------------------------------------ 软删
@@ -426,7 +647,7 @@ def test_重复停用不会反复写文件(admin, ledger):
     assert ledger.stat().st_mtime_ns == mtime
 
 
-def test_停用的账号不进概览和下钻页(admin, ledger, fake_costs):
+def test_停用的账号不进概览也不是老网址的默认账号(admin, ledger, fake_costs):
     target = by_account("111111111111")
     # 跟着跳转走一遍，把「已停用」的 flash 消费掉，免得它出现在下面的页面里
     post(admin, "/accounts/toggle", key=target.key, enabled="0")
@@ -436,8 +657,10 @@ def test_停用的账号不进概览和下钻页(admin, ledger, fake_costs):
     assert "222222222222" in overview
     assert "111111111111" not in overview
 
-    drilldown = admin.get("/cost-usage").get_data(as_text=True)
-    assert "111111111111" not in drilldown
+    # 原来的下钻页现在是账号页的页签：老网址跳到第一个启用中的账号，不是停用的这个
+    drilldown = admin.get("/cost-usage")
+    assert drilldown.status_code == 302
+    assert "/account/222222222222/cost" in drilldown.headers["Location"]
 
 
 # ------------------------------------------------------------------ 老台账兼容
@@ -465,6 +688,15 @@ def test_没有TAG列的台账也能新增(admin, ledger):
     assert by_account("333333333333").tag_value == "migGAMMA"
 
 
+def test_没有EMAIL列的老台账新增时补上这一列(admin, ledger):
+    rewrite_ledger(ledger)
+    post(admin, "/accounts/create", **NEW_FORM)
+    header, *rows = raw_rows(ledger)
+    assert "EMAIL" in header
+    assert rows[-1][header.index("EMAIL")] == "acct-three@example.com"
+    assert by_account("111111111111").email == ""          # 老账号还是空着，下次修改时再补
+
+
 # ------------------------------------------------------------------ 备份与审计
 def test_每次写入前都留一份备份(admin, ledger):
     post(admin, "/accounts/create", **NEW_FORM)
@@ -479,12 +711,7 @@ def test_备份只保留最近若干份(admin, ledger, monkeypatch):
     monkeypatch.setattr(excel_source, "BACKUP_KEEP", 3)
     target = by_account("111111111111")
     for index in range(6):
-        post(
-            admin, "/accounts/update",
-            key=target.key, partner=f"ALPHA-{index}", account="111111111111",
-            budget="500000", tag_ratio="1", untag_ratio="1.05",
-            tag_spec="map-migrated=migALPHA",
-        )
+        _edit(admin, target, partner=f"ALPHA-{index}")
     backups = list((ledger.parent / excel_source.BACKUP_DIR_NAME).glob("*.xlsx"))
     assert len(backups) == 3
 
@@ -506,11 +733,7 @@ def test_审计日志记录操作但不含凭证(admin, ledger):
 def test_写入后台账仍然是可读的xlsx(admin, ledger):
     post(admin, "/accounts/create", **NEW_FORM)
     target = by_account("111111111111")
-    post(
-        admin, "/accounts/update",
-        key=target.key, partner="ALPHA-X", account="111111111111",
-        budget="9", tag_ratio="1", untag_ratio="1", tag_spec="",
-    )
+    _edit(admin, target, partner="ALPHA-X", budget="9", tag_ratio="1", untag_ratio="1", tag_spec="")
     post(admin, "/accounts/toggle", key=target.key, enabled="0")
 
     rows = raw_rows(ledger)
@@ -529,61 +752,38 @@ class TestStartDate:
     """启用日期是概览页累计消费的起点，所以它既要能改，也要改不坏。"""
 
     def test_column_and_form_field_exist(self, admin, ledger):
-        html = admin.get("/accounts/").get_data(as_text=True)
-        assert ">启用日期</th>" in html
+        html = page(admin)
+        assert "启用日期" in column_heads(html)
         assert 'name="start_date"' in html
-        assert "<code>2026-08-01</code>" in html
+        (_, cells), _ = table_rows(html)
+        assert '<span class="tab-num">2026-08-01</span>' in cells[4]
 
     def test_unset_is_called_out(self, admin, ledger):
         """没填不是「空着好看」——概览页会拿 CE 最早可查日兜底，要让人知道去填。"""
         header, rows = ledger_without("START_DATE")
         write_ledger(ledger, header=header, rows=rows)
         excel_source.clear_cache()
-        html = admin.get("/accounts/").get_data(as_text=True)
-        assert "未设置" in html
+        (_, cells), _ = table_rows(page(admin))
+        assert text(cells[4]) == "未设置"
 
     def test_can_be_changed(self, admin, ledger):
-        target = by_account("111111111111")
-        response = post(
-            admin, "/accounts/update",
-            key=target.key, partner=target.partner, account=target.account,
-            budget="500000", tag_ratio="1", untag_ratio="1.05", tag_spec=target.tag_spec,
-            start_date="2026-05-06",
-        )
+        response = _edit(admin, by_account("111111111111"), start_date="2026-05-06")
         assert response.status_code == 302
         assert by_account("111111111111").start_date == date(2026, 5, 6)
 
     def test_can_be_cleared(self, admin, ledger):
-        target = by_account("111111111111")
-        post(
-            admin, "/accounts/update",
-            key=target.key, partner=target.partner, account=target.account,
-            budget="500000", tag_ratio="1", untag_ratio="1.05", tag_spec=target.tag_spec,
-            start_date="",
-        )
+        _edit(admin, by_account("111111111111"), start_date="")
         assert by_account("111111111111").start_date is None
 
     def test_rejects_an_unparseable_date(self, admin, ledger):
-        target = by_account("111111111111")
-        response = post(
-            admin, "/accounts/update",
-            key=target.key, partner=target.partner, account=target.account,
-            budget="500000", tag_ratio="1", untag_ratio="1.05", tag_spec=target.tag_spec,
-            start_date="下周一",
-        )
+        response = _edit(admin, by_account("111111111111"), start_date="下周一")
         assert "认不出来" in response.get_data(as_text=True)
         assert by_account("111111111111").start_date == date(2026, 8, 1)  # 没被改坏
 
     def test_rejects_a_future_date(self, admin, ledger):
         """未来日期会让累计区间退化成今天一天，拦在写入之前。"""
-        target = by_account("111111111111")
         later = (date.today() + timedelta(days=1)).isoformat()
-        response = post(
-            admin, "/accounts/update",
-            key=target.key, partner=target.partner, account=target.account,
-            budget="500000", tag_ratio="1", untag_ratio="1.05", tag_spec=target.tag_spec,
-            start_date=later,
-        )
+        response = _edit(admin, by_account("111111111111"), start_date=later)
         assert "不能晚于今天" in response.get_data(as_text=True)
         assert by_account("111111111111").start_date == date(2026, 8, 1)
 
@@ -615,14 +815,7 @@ class TestTelegramSettings:
     NO_TOKEN_NOTICE = "表格里开着的 TG 告警在配置好之前一条都不会发"
 
     def edit(self, admin, target, **fields):
-        base = dict(
-            key=target.key, partner=target.partner, account=target.account,
-            budget=f"{target.budget:g}", tag_ratio="1", untag_ratio=f"{target.untag_ratio:g}",
-            tag_spec=target.tag_spec,
-            start_date=target.start_date.isoformat() if target.start_date else "",
-        )
-        base.update(fields)
-        return post(admin, "/accounts/update", **base)
+        return _edit(admin, target, **fields)
 
     def switch_on(self, admin):
         """页面上开告警的唯一路径：弹窗里填好群，再在表格里点开关。"""
@@ -633,12 +826,11 @@ class TestTelegramSettings:
     def test_off_by_default(self, admin, ledger):
         """告警是往外发消息，必须主动开：老台账没这两列，一律算关。"""
         assert by_account("111111111111").tg_enabled is False
-        html = admin.get("/accounts/").get_data(as_text=True)
-        assert ">TG 告警</th>" in html
+        assert "TG 告警" in column_heads(page(admin))
 
     def test_dialogs_have_chat_ids_but_no_switch(self, admin, ledger):
         """开关只在表格里放一处，修改和新增弹窗里都不再放一次。"""
-        html = admin.get("/accounts/").get_data(as_text=True)
+        html = page(admin)
         for marker in ('id="dlg-edit-1"', 'id="dlg-create"'):
             dialog = _dialog(html, marker)
             assert 'name="tg_chat_ids"' in dialog
@@ -654,7 +846,7 @@ class TestTelegramSettings:
         """最要紧的一条：弹窗里没有开关，表单里「没有这个字段」不能被当成关——
         否则改一下额度，告警就被悄悄关掉了。"""
         self.switch_on(admin)
-        self.edit(admin, by_account("111111111111"), budget="777", tg_chat_ids=self.CHAT)
+        self.edit(admin, by_account("111111111111"), budget="777")
         after = by_account("111111111111")
         assert after.budget == 777
         assert after.tg_enabled is True
@@ -721,20 +913,23 @@ class TestTelegramSettings:
         assert by_account("111111111111").tg_active is False
 
     def test_page_warns_once_when_the_token_is_missing(self, admin, ledger, monkeypatch):
-        """开关旁边不放字了：没配 Token 就在页面上说一次，不是每行挂一个「未生效」。"""
+        """开关旁边不放字了：没配 Token 就在页面上用一条警示说一次，不是每行挂一个「未生效」。"""
         from bedrock_cost import config
 
         self.switch_on(admin)
         monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "")
-        html = admin.get("/accounts/").get_data(as_text=True)
+        html = page(admin)
         assert html.count(self.NO_TOKEN_NOTICE) == 1
+        (notice,) = [note for note in warn_notes(html) if self.NO_TOKEN_NOTICE in note]   # 是一条 .note-warn
+        assert "TELEGRAM_BOT_TOKEN" in notice
+        assert "alert-warn" not in html                  # 警示条不再是 .alert-warn
         assert "未生效" not in html
 
     def test_no_token_notice_when_nothing_would_be_sent(self, admin, ledger, monkeypatch):
         from bedrock_cost import config
 
         monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "")
-        assert self.NO_TOKEN_NOTICE not in admin.get("/accounts/").get_data(as_text=True)
+        assert self.NO_TOKEN_NOTICE not in page(admin)
 
 
 class TestTelegramTestButton:
@@ -794,7 +989,7 @@ class TestTelegramTestButton:
         assert "bot 还没有被拉进这个群" in html
 
     def test_names_the_account_but_not_the_partner(self, admin, ledger, outbox, monkeypatch):
-        """和正式消息一样：群里只看得到账号 ID，看不到上游——图片下面的字和卡片上的字都是。"""
+        """和正式消息一样：群里看得到账号 ID 和账号邮箱，看不到上游——图片下面的字和卡片上的字都是。"""
         from bedrock_cost import alerts
 
         seen = []
@@ -802,11 +997,31 @@ class TestTelegramTestButton:
         target = by_account("111111111111")
         post(
             admin, "/accounts/tg-test",
-            key=target.key, partner=target.partner, account=target.account, tg_chat_ids=self.CHAT,
+            key=target.key, partner=target.partner, account=target.account, email=target.email,
+            tg_chat_ids=self.CHAT,
         )
-        text = seen[0].text()                            # caption + 卡片上画的每一个字
-        assert target.account in text
-        assert target.partner not in text
+        text_ = seen[0].text()                           # caption + 卡片上画的每一个字
+        assert target.account in text_ and target.email in text_
+        assert target.partner not in text_
+
+    def test_passes_the_typed_email_along(self, admin, ledger, monkeypatch):
+        """账号邮箱用弹窗里此刻填着的（可能还没保存），和账号 ID 一起交给 alerts.send_test。"""
+        from bedrock_cost import alerts, config
+
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "123:FAKE")
+        calls = []
+        monkeypatch.setattr(alerts, "send_test", lambda chat, account_id, email: calls.append((chat, account_id, email)) or "")
+        target = by_account("111111111111")
+        post(admin, "/accounts/tg-test", key=target.key, account=target.account,
+             email=" typed@example.com ", tg_chat_ids=self.CHAT)
+        assert calls == [(self.CHAT, "111111111111", "typed@example.com")]
+
+    def test_the_caption_reads_number_then_email(self, admin, ledger, outbox):
+        target = by_account("111111111111")
+        post(admin, "/accounts/tg-test", key=target.key, account=target.account, email=target.email,
+             tg_chat_ids=self.CHAT)
+        (chat, caption), = outbox
+        assert "测试消息</b> · <code>111111111111</code> · acct-one@example.com" in caption
 
     def test_says_so_when_the_card_had_to_fall_back_to_text(self, admin, ledger, outbox, monkeypatch):
         """卡片画不出来（比如字体文件丢了）会改发文字：发是发出去了，但页面上要说清楚。"""
@@ -819,7 +1034,8 @@ class TestTelegramTestButton:
         target = by_account("111111111111")
         html = post(admin, "/accounts/tg-test", key=target.key, tg_chat_ids=self.CHAT).get_data(as_text=True)
         assert outbox and "测试消息" in outbox[0][1]      # 文字照样发了
-        assert "✓ 已发送（卡片画不出来，改发了文字" in html
+        (result,) = chat_results(_dialog(html, 'id="dlg-edit-1"'))
+        assert "已发送（卡片画不出来，改发了文字" in result
 
     def test_asks_for_a_chat_id_first(self, admin, ledger, outbox):
         target = by_account("111111111111")
@@ -828,8 +1044,10 @@ class TestTelegramTestButton:
         assert outbox == []
 
     def test_works_from_the_new_account_dialog(self, admin, ledger, outbox):
-        html = post(admin, "/accounts/tg-test", account="333333333333", tg_chat_ids=self.CHAT).get_data(as_text=True)
+        html = post(admin, "/accounts/tg-test", account="333333333333", email="acct-three@example.com",
+                    tg_chat_ids=self.CHAT).get_data(as_text=True)
         assert outbox and "全部发送成功" in html
+        assert "<code>333333333333</code> · acct-three@example.com" in outbox[0][1]
         assert 'id="dlg-create" data-reopen' in html
 
     def test_needs_csrf(self, admin, ledger, outbox):
@@ -845,24 +1063,6 @@ class TestTelegramTestButton:
 
 
 # ------------------------------------------------------------------ 多个群 / 表格里的开关 / 图标按钮
-def _edit(admin, target, **fields):
-    """提交修改弹窗：不传的字段按账号现值填。"""
-    base = dict(
-        key=target.key, partner=target.partner, account=target.account,
-        budget=f"{target.budget:g}", tag_ratio="1", untag_ratio=f"{target.untag_ratio:g}",
-        tag_spec=target.tag_spec,
-        start_date=target.start_date.isoformat() if target.start_date else "",
-    )
-    base.update(fields)
-    return post(admin, "/accounts/update", **base)
-
-
-def _dialog(html: str, marker: str) -> str:
-    """截出某个弹窗的 HTML。"""
-    part = html[html.index(marker) :]
-    return part[: part.index("</dialog>")]
-
-
 class TestMultipleChats:
     A, B, C = "-1001111111111", "-1002222222222", "-1003333333333"
 
@@ -911,12 +1111,12 @@ class TestMultipleChats:
 
     def test_edit_dialog_shows_one_row_per_chat(self, admin, ledger):
         _edit(admin, by_account("111111111111"), tg_chat_ids=[self.A, self.B])
-        dialog = _dialog(admin.get("/accounts/").get_data(as_text=True), 'id="dlg-edit-1"')
+        dialog = _dialog(page(admin), 'id="dlg-edit-1"')
         assert dialog.count('name="tg_chat_ids"') == 2
         assert "data-add-chat" in dialog and "data-remove-chat" in dialog
 
     def test_empty_account_still_gets_one_box(self, admin, ledger):
-        dialog = _dialog(admin.get("/accounts/").get_data(as_text=True), 'id="dlg-edit-1"')
+        dialog = _dialog(page(admin), 'id="dlg-edit-1"')
         assert dialog.count('name="tg_chat_ids"') == 1
 
     def test_test_button_reports_each_chat(self, admin, ledger, monkeypatch):
@@ -940,9 +1140,10 @@ class TestMultipleChats:
         ).get_data(as_text=True)
         assert sent == [self.A]                                  # 格式不对的根本没发
         assert "3 个群里 1 个成功、2 个失败" in html
-        assert "✓ 已发送" in html
-        assert "✗ bot 不在这个群里" in html
-        assert "✗ 格式不对" in html
+        ok, refused, malformed = chat_results(_dialog(html, 'id="dlg-edit-1"'))   # 按行的顺序，各贴各的
+        assert "已发送" in ok
+        assert "bot 不在这个群里" in refused
+        assert "格式不对" in malformed
 
 
 class TestTableToggle:
@@ -957,8 +1158,7 @@ class TestTableToggle:
     @staticmethod
     def cells(admin) -> list[str]:
         """每一行的 TG 告警格，按台账顺序（第一个是 111111111111）。"""
-        html = admin.get("/accounts/").get_data(as_text=True)
-        return re.findall(r'<td class="col-tg">(.*?)</td>', html, re.S)
+        return re.findall(r'<td class="col-tg">(.*?)</td>', page(admin), re.S)
 
     def test_switches_on_and_off(self, admin, ledger):
         key = self.with_chat(admin)
@@ -976,7 +1176,7 @@ class TestTableToggle:
         response = post(admin, "/accounts/tg-toggle", key=by_account("111111111111").key, tg_enabled="1")
         assert response.status_code == 302
         assert by_account("111111111111").tg_enabled is False
-        assert "先点「修改」填上再开" in admin.get("/accounts/").get_data(as_text=True)  # 提示条
+        assert ("error", "这个账号还没有填群组 ID，先点「修改」填上再开。") in toasts(page(admin))
 
     def test_renders_as_a_switch(self, admin, ledger, monkeypatch):
         from bedrock_cost import config
@@ -1031,25 +1231,187 @@ class TestTableToggle:
 
 
 class TestIconButtons:
-    """修改 / 停用 / 恢复换成了图标按钮：没有文字，靠 title 和 aria-label 说清是什么。"""
+    """修改 / 停用 / 恢复 / 删除都是图标按钮：没有文字，靠 title 和 aria-label 说清是什么。"""
 
     def test_edit_and_disable_are_icons(self, admin, ledger):
-        html = admin.get("/accounts/").get_data(as_text=True)
+        html = page(admin)
         assert ">修改</button>" not in html and ">停用</button>" not in html
-        assert 'aria-label="修改 ALPHA / 111111111111"' in html
+        assert 'aria-label="修改 111111111111"' in html
         assert 'aria-label="停用 111111111111"' in html
 
     def test_restore_is_an_icon(self, admin, ledger):
         post(admin, "/accounts/toggle", key=by_account("111111111111").key, enabled="0")
-        html = admin.get("/accounts/").get_data(as_text=True)
+        html = page(admin)
         assert ">恢复</button>" not in html
         assert 'aria-label="恢复 111111111111"' in html
 
     def test_icons_still_open_their_dialogs(self, admin, ledger):
         """换的只是外观：弹窗照旧由 data-open 打开，停用照旧先确认。"""
-        html = admin.get("/accounts/").get_data(as_text=True)
+        html = page(admin)
         assert html.count('data-open="dlg-edit-') == len(LEDGER_ROWS)
         assert html.count('data-open="dlg-off-') == len(LEDGER_ROWS)
+
+    def test_they_sit_together_in_the_last_cell(self, admin, ledger):
+        (_, cells), _ = table_rows(page(admin))
+        actions = cells[-1]
+        assert '<div class="row-btns">' in actions
+        assert re.findall(r'data-open="(dlg-\w+)-1"', actions) == ["dlg-edit", "dlg-off", "dlg-del"]
+        assert text(actions) == ""                             # 只有图标，没有字
+
+
+# ------------------------------------------------------------------ 表格、筛选条
+class TestTable:
+    """表格：账号（头像 + 号码 + 邮箱）、上游、生命周期、状态、启用日期、额度、比率、两个开关、操作。
+
+    改版去掉了 AK 列（掩码挪进了状态格的悬停提示）和 TAG 列（挪进了比率格的悬停提示）。
+    筛选全在浏览器里做，服务端要给的是每一行上的 data-* 和筛选条本身。"""
+
+    CHAT = "-1001234567890"
+
+    def test_columns(self, admin, ledger):
+        heads = column_heads(page(admin))
+        assert heads == ["账号", "上游", "生命周期", "状态", "启用日期", "额度", "比率", "TG 告警", "邮件告警", "操作"]
+        assert "AK" not in heads and "TAG" not in heads
+
+    def test_every_row_has_a_cell_per_column(self, admin, ledger):
+        html = page(admin)
+        rows = table_rows(html)
+        assert len(rows) == len(LEDGER_ROWS)
+        assert all(len(cells) == len(column_heads(html)) for _, cells in rows)
+
+    def test_the_table_is_sortable(self, admin, ledger):
+        html = page(admin)
+        assert '<table class="wide-table accounts-table" id="acct-table" data-sortable>' in html
+        head = html[html.index("<thead>") : html.index("</thead>")]
+        sortable = [text(name) for cls, name in re.findall(r'<th class="([^"]*)"[^>]*>(.*?)</th>', head, re.S)
+                    if "sortable" in cls.split()]
+        assert sortable == ["账号", "上游", "状态", "启用日期", "额度"]
+
+    def test_rows_carry_what_the_filters_need(self, admin, ledger):
+        _edit(admin, by_account("111111111111"), tg_chat_ids=self.CHAT, lifecycle=["正常", "风控"])
+        post(admin, "/accounts/tg-toggle", key=by_account("111111111111").key, tg_enabled="1")
+        post(admin, "/accounts/toggle", key=by_account("222222222222").key, enabled="0")
+        (one, _), (two, _) = table_rows(page(admin))
+        assert one["data-key"] == by_account("111111111111").key
+        assert one["data-search"].split() == ["111111111111", "acct-one@example.com", "alpha"]   # 小写，搜的时候也转小写
+        assert (one["data-partner"], one["data-state"], one["data-alert"], one["data-life"]) == ("ALPHA", "on", "tg", "正常|风控")
+        assert one["data-edit"] == "dlg-edit-1" and one["data-number"] == "111111111111"
+        assert (two["data-state"], two["data-alert"], two["data-life"], two["class"]) == ("off", "", "", "row-off")
+
+    def test_the_account_cell_links_to_the_account_page(self, admin, ledger):
+        (_, cells), _ = table_rows(page(admin))
+        ident = cells[0]
+        assert 'data-sort="111111111111"' in ident
+        assert re.search(r'<span class="avatar [^"]*\bavatar-sm\b[^"]*"[^>]*><span>A</span></span>', ident)
+        assert '<a class="acct-cell-id" href="/account/111111111111/"' in ident
+
+    def test_the_state_cell_keeps_the_masked_ak_in_its_title(self, admin, ledger):
+        (_, cells), _ = table_rows(page(admin))
+        state = cells[3]
+        assert text(state) == "启用"
+        assert 'title="AK AKIAFAKE…0000（只读，要换请停用后新建）"' in state
+        assert "缺凭证" not in state
+
+    def test_missing_credentials_are_flagged_in_the_state_cell(self, admin, ledger):
+        rows = [list(row) for row in LEDGER_ROWS]
+        rows[1][LEDGER_HEADER.index("AK")] = rows[1][LEDGER_HEADER.index("SK")] = None
+        rewrite_ledger(ledger, rows=rows, EMAIL=[EMAILS["111111111111"], EMAILS["222222222222"]])
+        _, (_, cells) = table_rows(page(admin))
+        assert text(cells[3]) == "启用 缺凭证"
+        assert "title=\"AK " not in cells[3]
+
+    def test_the_ratio_cell_keeps_the_tag_in_its_title(self, admin, ledger):
+        (_, cells), _ = table_rows(page(admin))
+        ratio_cell = cells[6]
+        assert text(ratio_cell) == "1 / 1.05"
+        assert "TAG 比率 1 · UNTAG 比率 1.05" in ratio_cell and "标签：map-migrated=migALPHA" in ratio_cell
+
+    def test_budget_and_partner(self, admin, ledger):
+        (_, cells), _ = table_rows(page(admin))
+        assert text(cells[1]) == "ALPHA"
+        assert text(cells[5]) == "$500,000.00"
+
+    def test_the_lifecycle_cell(self, admin, ledger):
+        _edit(admin, by_account("111111111111"), lifecycle=["正常", "风控"])
+        (_, first), (_, second) = table_rows(page(admin))
+        assert text(first[2]) == "正常 风控"
+        assert first[2].count('class="life-tag"') == 2
+        assert text(second[2]) == "未标记"
+        for cells, number in ((first, "111111111111"), (second, "222222222222")):
+            assert "data-life-edit" in cells[2]                  # 铅笔：打开整页共用的那个小弹层
+            assert f'aria-label="改 {number} 的生命周期"' in cells[2]
+
+    def test_toolbar(self, admin, ledger):
+        html = page(admin)
+        tools = html[html.index('id="acct-tools"') : html.index('class="table-tools tools-life"')]
+        assert re.findall(r'data-filter="(\w+)"', tools) == ["q", "partner", "state", "alert"]
+        assert 'type="search"' in tools
+        assert re.findall(r'<option value="([^"]*)"', tools) == [
+            "", "ALPHA", "BETA",            # 上游：台账里有的，排好序
+            "", "on", "off",                # 状态
+            "", "tg", "mail", "none",       # 告警
+        ]
+        assert "共 2 个" in tools
+        assert re.search(r"data-clear-filters[^>]*\shidden", tools)          # 没筛选时「清除筛选」先藏着
+
+    def test_lifecycle_chips(self, admin, ledger):
+        _edit(admin, by_account("111111111111"), lifecycle=["正常"])
+        html = page(admin)
+        chips = html[html.index('class="table-tools tools-life"') : html.index('<div class="table-scroll">')]
+        assert re.findall(r'<button class="fchip" type="button" data-value="([^"]*)"', chips) == [
+            "", "正常", "结算", "风控", "__none__",
+        ]
+        assert 'data-value="" aria-pressed="true"' in chips                     # 默认是「全部」
+        assert dict(re.findall(r'data-life-count="([^"]+)">(\d+)<', chips)) == {
+            "正常": "1", "结算": "0", "风控": "0", "__none__": "1",
+        }
+        assert "未标记" in text(chips) and "全部 2" in text(chips)
+
+    def test_an_empty_ledger_has_no_table(self, admin, ledger):
+        write_ledger(ledger, rows=[])
+        excel_source.clear_cache()
+        html = page(admin)
+        assert "台账里还没有账号" in html
+        assert 'id="acct-table"' not in html and 'id="acct-tools"' not in html
+
+    def test_an_unreadable_ledger_says_why(self, admin, ledger, monkeypatch):
+        from bedrock_cost import config
+
+        monkeypatch.setattr(config, "EXCEL_PATH", ledger.parent / "missing.xlsx")
+        html = page(admin)
+        assert "读不到台账" in html and "找不到账号台账文件" in html
+        assert 'data-open="dlg-create"' not in html                              # 页头的按钮也不给
+
+
+class TestToasts:
+    """操作结果（flash）在右上角弹出来（#toasts .toast）；校验没过的错误不弹，写在重新打开的弹窗里。"""
+
+    def test_a_result_pops_up(self, admin, ledger):
+        post(admin, "/accounts/create", **NEW_FORM)
+        assert toasts(page(admin)) == [("ok", "新增账号 333333333333（GAMMA），额度 150000（未设启用日期）。")]
+
+    def test_it_is_shown_once(self, admin, ledger):
+        post(admin, "/accounts/create", **NEW_FORM)
+        page(admin)
+        assert toasts(page(admin)) == []
+
+    def test_nothing_changed_is_a_warning(self, admin, ledger):
+        _edit(admin, by_account("111111111111"))
+        assert toasts(page(admin)) == [("warn", "没有任何字段发生变化，台账未改动。")]
+
+    def test_validation_errors_stay_in_the_dialog(self, admin, ledger):
+        html = post(admin, "/accounts/create", **{**NEW_FORM, "budget": "abc"}).get_data(as_text=True)
+        assert toasts(html) == []
+        assert "额度要填数字" in _dialog(html, 'id="dlg-create"')
+
+    def test_an_expired_form_says_so(self, admin, ledger):
+        admin.post("/accounts/create", data=NEW_FORM)                  # 没带 csrf
+        assert ("error", "表单已过期（会话可能已重启），请刷新页面后重试。") in toasts(page(admin))
+
+    def test_there_is_a_template_per_tone_for_the_page_script(self, admin, ledger):
+        """表格里用 fetch 改生命周期，结果也从右上角说：页面脚本照着这几个模板克隆。"""
+        html = page(admin)
+        assert re.findall(r'<template data-toast-template="(\w+)">', html) == ["ok", "info", "warn", "error"]
 
 
 class TestAccountNotices:
@@ -1071,15 +1433,13 @@ class TestAccountNotices:
         _edit(admin, by_account("111111111111"), tg_chat_ids=self.CHAT)
         post(admin, "/accounts/tg-toggle", key=by_account("111111111111").key, tg_enabled="1")
 
-    def page(self, admin) -> str:
-        return admin.get("/accounts/").get_data(as_text=True)
-
     def test_a_new_account_with_a_chat_is_announced(self, admin, ledger, cards_sent):
         post(admin, "/accounts/create", **NEW_FORM, tg_chat_ids=self.CHAT)
         assert [(chat, card.kind) for chat, card in cards_sent] == [(self.CHAT, "created")]
-        text = cards_sent[0][1].text()
-        assert "新账号启用" in text and "333333333333" in text and "$150,000.00" in text
-        assert "已通知这个账号的 1 个 TG 群" in self.page(admin)
+        text_ = cards_sent[0][1].text()
+        assert "新账号启用" in text_ and "333333333333" in text_ and "$150,000.00" in text_
+        assert "acct-three@example.com" in text_                                   # 号码一眼认不出是谁
+        assert "已通知这个账号的 1 个 TG 群" in page(admin)
 
     def test_a_new_account_without_a_chat_sends_nothing(self, admin, ledger, cards_sent):
         post(admin, "/accounts/create", **NEW_FORM)
@@ -1134,23 +1494,23 @@ class TestAccountNotices:
         monkeypatch.setattr(alerts, "_send", down)
         post(admin, "/accounts/toggle", key=by_account("111111111111").key, enabled="0")
         assert by_account("111111111111").enabled is False            # 照样停用了
-        page = self.page(admin)
-        assert "停用账号 111111111111" in page
-        assert "TG 通知没有全部发出去" in page and "连不上 Telegram" in page
+        shown = toasts(page(admin))
+        assert [tone for tone, _ in shown] == ["ok", "warn"]          # 改动成功，通知另起一条警告
+        assert "停用账号 111111111111" in shown[0][1]
+        assert "TG 通知没有全部发出去" in shown[1][1] and "连不上 Telegram" in shown[1][1]
 
     def test_missing_token_is_reported(self, admin, ledger):
         """测试里默认没有 Token：通知发不了，要说出来，而不是悄悄不发。"""
         post(admin, "/accounts/create", **NEW_FORM, tg_chat_ids=self.CHAT)
-        assert "TG 通知没有全部发出去：服务器没有配置 TELEGRAM_BOT_TOKEN" in self.page(admin)
+        assert "TG 通知没有全部发出去：服务器没有配置 TELEGRAM_BOT_TOKEN" in page(admin)
         assert by_account("333333333333") is not None                 # 账号照样建好了
 
-    def test_the_page_says_what_will_be_sent(self, admin, ledger):
-        """新增弹窗说清楚「填了群就开告警、会发卡片」；停用确认窗在账号开着 TG 时多一条。"""
-        page = self.page(admin)
-        assert "账号建好就会打开 TG 告警" in _dialog(page, 'id="dlg-create"')
-        assert "「账号停用」卡片" not in _dialog(page, 'id="dlg-off-1"')
+    def test_the_disable_dialog_says_what_will_be_sent(self, admin, ledger):
+        """停用确认窗在账号开着 TG 时多一条：它的群会收到「账号停用」卡片。"""
+        html = page(admin)
+        assert "「账号停用」卡片" not in _dialog(html, 'id="dlg-off-1"')
         self.switch_on(admin)
-        assert "它的 1 个 TG 群会收到一张「账号停用」卡片" in _dialog(self.page(admin), 'id="dlg-off-1"')
+        assert "它的 1 个 TG 群会收到一张「账号停用」卡片" in _dialog(page(admin), 'id="dlg-off-1"')
 
     def test_notices_do_not_name_the_partner(self, admin, ledger, cards_sent, fake_costs):
         self.switch_on(admin)

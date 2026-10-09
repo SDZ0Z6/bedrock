@@ -171,7 +171,14 @@ class TestReport:
 
 
 class TestOverviewPage:
-    def test_shows_the_last_numbers_with_their_date(self, logged_in, ledger, monkeypatch):
+    def test_shows_the_last_numbers_with_their_date(self, logged_in, ledger, fake_costs, monkeypatch):
+        """概览是一张张卡片：查询失败但有上一次的数，卡片照常显示那个数（标黄、写明截至哪天），
+        合计照算；原因从右上角的弹窗说，不在页面中间插红条。"""
+        import html as htmllib
+        import re
+
+        from bedrock_cost import activity, dashboard
+
         def one_stale(accounts, ranges, refresh=False):
             first, second = accounts
             return {
@@ -180,10 +187,26 @@ class TestOverviewPage:
             }
 
         monkeypatch.setattr(cost_explorer, "fetch_all", one_stale)
+        # 概览别的几块不查 AWS：用量状态当没调用，近 30 天的成本走 fake_costs；页面层缓存换成空的
+        monkeypatch.setattr(activity, "account_activity", lambda account, now=None, refresh=False: activity.Activity(kind="idle"))
+        monkeypatch.setattr(activity, "_cache", {})
+        monkeypatch.setattr(dashboard, "_trend_cache", {})
+        monkeypatch.setattr(config, "CURRENCY_SYMBOL", "$")
         html = logged_in.get("/").get_data(as_text=True)
-        assert "截至 2026-09-28" in html
-        assert "这次查询失败：凭证缺少 ce:GetCostAndUsage 权限" in html
-        assert "显示的是截至 2026-09-28 的累计消费" in html
-        assert "含 1 个账号上一次查到的数" in html
-        assert "1 个显示上一次查到的数" in html
-        assert "row-error" not in html                       # 不再整行只写「查询失败」
+
+        def text(fragment: str) -> str:
+            return " ".join(htmllib.unescape(re.sub(r"<[^>]+>", " ", fragment)).split())
+
+        card = next(c for c in re.findall(r'<article class="acct-card".*?</article>', html, re.S)
+                    if 'href="/account/111111111111/"' in c)
+        assert "消费查询失败：凭证缺少 ce:GetCostAndUsage 权限（AccessDeniedException）。下面是截至 09-28 的数" in text(card)
+        assert "$1,561.74" in text(card) and "tone-warn" in card          # 1487.37 × 1.05，标黄
+        assert "使用率" in text(card)                                    # 有数就照常算使用率和余额
+
+        stack = html[html.index('id="toasts"') : html.index("<template data-toast-template")]
+        assert "查不到 Cost Explorer" in text(stack)
+        assert "有上一次数据的照常显示" in text(stack)
+
+        # 合计含这个旧数：表上显示着它，合计不含它的话就对不上了
+        assert f"余额 ${600_000 - (1487.37 * 1.05 + 50.0):,.2f}" in text(html)
+        assert 'class="alert' not in html                                  # 不再整行只写「查询失败」

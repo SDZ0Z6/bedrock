@@ -1,0 +1,167 @@
+{# 账号页的「摘要」页签：这个账号一眼看全——额度、近 30 天成本、告警、近 7 天调用、
+   配额最高的几个模型、台账里的资料。要细看就点各卡片右上角去对应的页签。 #}
+{% extends "account_base.html" %}
+{% block loading_label %}正在读这个账号{% endblock %}
+
+{% block tab_content %}
+
+<section class="bento" aria-label="额度、成本和告警">
+  <article class="viz-card">
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">额度使用</h2>
+        <p class="viz-sub">
+          {%- if account.start_date %}{{ account.start_date.isoformat() }} 起累计{% else %}Cost Explorer 最早可查日起累计{% endif %}
+          · 截至 {{ row.end_label }}</p>
+      </div>
+    </div>
+    {% if row.has_numbers %}
+      <div class="gauge">
+        {{ gauge | safe }}
+        <div class="gauge-center">
+          <span class="gauge-value {% if row.stale_as_of %}tone-warn{% endif %}" data-countup>{{ row.total_cost | money0 }}</span>
+          <span class="gauge-of">额度 {{ row.budget | money0 }}</span>
+        </div>
+      </div>
+      <div class="gauge-facts">
+        <span>使用率<strong class="tone-{{ row.level }}">{{ row.usage_pct | pct }}</strong></span>
+        <span>余额<strong class="{% if row.overspent %}tone-danger{% endif %}">{{ row.balance | money }}</strong></span>
+      </div>
+      {% if row.stale_as_of %}
+        <p class="note note-warn">今天查询失败，显示的是截至 {{ row.stale_as_of.strftime('%m-%d') }} 的累计消费</p>
+      {% endif %}
+    {% else %}
+      <p class="acct-nodata">没有查到消费数据 · 额度 {{ row.budget | money }}</p>
+    {% endif %}
+  </article>
+
+  <article class="viz-card span-2">
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">近 {{ trend.days }} 天成本</h2>
+        <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · Cost Explorer 晚 1~2 天出数，最近两天可能还不全</p>
+      </div>
+      <a class="viz-link" href="{{ url_for('account.cost', number=account.account) }}" data-loading="正在查各维度消费">成本页签</a>
+    </div>
+    <div>
+      <p class="viz-big">{{ trend.total | money0 }}</p>
+      <p class="viz-meta">日均 <strong>{{ trend.average | money }}</strong>
+        {%- if trend.peak_label %} · 最多的一天是 {{ trend.peak_label }}（{{ trend.peak_value | money }}）{% endif %}</p>
+    </div>
+    <div class="viz-chart" id="trend-chart" data-tip-src="trend-data">{{ trend.chart.svg | safe }}</div>
+    <script id="trend-data" type="application/json">{{ trend.chart.tooltip | tojson }}</script>
+  </article>
+
+  <article class="viz-card">
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">告警</h2>
+      </div>
+      <a class="viz-link" href="{{ url_for('accounts.index', edit=account.key) }}" data-loading="正在读台账">修改</a>
+    </div>
+    <dl class="kv-list">
+      <div class="kv-row">
+        <dt>TG 告警</dt>
+        <dd>{% if account.tg_active %}<span class="kv-on">已开</span>{% else %}<span class="kv-off">没开</span>{% endif %}
+          <small>{{ account.tg_chat_ids | length }} 个群</small></dd>
+      </div>
+      <div class="kv-row">
+        <dt>邮件告警</dt>
+        <dd>{% if account.mail_active %}<span class="kv-on">已开</span>{% else %}<span class="kv-off">没开</span>{% endif %}
+          {% if account.mail_configured %}<small>{{ account.mail_address or account.email }} · {{ account.mail_provider_label }}</small>{% endif %}</dd>
+      </div>
+      <div class="kv-row">
+        <dt>用量</dt>
+        <dd>{{ activity.label }}{% if activity.sub %}<small>{{ activity.sub }}</small>{% endif %}</dd>
+      </div>
+      {% if row.error %}
+        <div class="kv-row">
+          <dt>消费查询</dt>
+          <dd class="tone-danger">失败<small title="{{ row.error }}">{{ row.issue }}</small></dd>
+        </div>
+      {% endif %}
+    </dl>
+  </article>
+</section>
+
+<section class="bento" aria-label="调用和配额">
+  <article class="viz-card span-3 chart-card">
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">近 7 天调用</h2>
+        <p class="viz-sub">{{ calls.start }} ~ {{ calls.end }} · 四区合计 · 按模型分色</p>
+      </div>
+      <a class="viz-link" href="{{ url_for('account.usage', number=account.account) }}" data-loading="正在拉 CloudWatch 指标">用量页签</a>
+    </div>
+    <div class="chart-view">
+      <div class="view-stats">
+        <p class="viz-big">{{ calls.total | compact }}<small>次</small></p>
+        <p class="viz-meta">每小时平均 <strong>{{ calls.average | compact }}</strong>
+          {%- if calls.peak_label %} · 最高 <strong>{{ calls.peak_value | compact }}</strong>（{{ calls.peak_label }}）{% endif %}</p>
+      </div>
+      {% if calls.series | length >= 2 %}
+        <div class="legend">
+          {% for series in calls.series %}
+            <span class="legend-item">
+              <i class="swatch" style="background: {{ series_color(series.slot) }}"></i>
+              <span class="legend-name">{{ series.name }}</span>
+              <span class="legend-value">{{ series.total | compact }}</span>
+            </span>
+          {% endfor %}
+        </div>
+      {% endif %}
+      <div class="chart-wrap chart-fluid" data-line-src="calls-data">{{ calls.chart.svg | safe }}</div>
+      {% if calls.chart.tooltip %}<script id="calls-data" type="application/json">{{ calls.chart.tooltip | tojson }}</script>{% endif %}
+    </div>
+  </article>
+
+  <article class="viz-card">
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">配额</h2>
+        <p class="viz-sub">每个模型四个区里最高的 TPM</p>
+      </div>
+      <a class="viz-link" href="{{ url_for('account.quota', number=account.account) }}" data-loading="正在拉四个区的配额">配额页签</a>
+    </div>
+    {% if quota_top %}
+      <div class="quota-top">
+        {% for item in quota_top %}
+          <div class="quota-top-row">
+            <span>{{ item.name }}</span><strong class="tab-num">{{ item.tpm | compact }}</strong>
+            <small>TPD {{ item.tpd | compact }}{% if item.lagging %} · <span class="tone-warn">有的区没跟上</span>{% endif %}</small>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="viz-sub">配额要单独查（第一次约 45 秒），还没有缓存。点右上角去配额页签看。</p>
+    {% endif %}
+  </article>
+</section>
+
+<section class="viz-card" aria-label="台账里的资料">
+  <div class="viz-head">
+    <div>
+      <h2 class="viz-title">账号资料</h2>
+      <p class="viz-sub">{{ excel_name }} 里的这一行</p>
+    </div>
+    <a class="viz-link" href="{{ url_for('accounts.index', edit=account.key) }}" data-loading="正在读台账">修改</a>
+  </div>
+  <dl class="info-grid">
+    <div><dt>上游</dt><dd>{{ account.partner }}</dd></div>
+    <div><dt>账号邮箱</dt><dd>{{ account.email or '未填' }}</dd></div>
+    <div><dt>启用日期</dt><dd>{{ account.start_date.isoformat() if account.start_date else '未填' }}</dd></div>
+    <div><dt>额度</dt><dd>{{ account.budget | money }}</dd></div>
+    <div><dt>TAG 比率</dt><dd>{{ account.tag_ratio | ratio }}</dd></div>
+    <div><dt>UNTAG 比率</dt><dd>{{ account.untag_ratio | ratio }}</dd></div>
+    <div><dt>TAG 判定</dt><dd><code>{{ account.tag_label }}</code></dd></div>
+    <div><dt>AK</dt><dd>{% if account.ak %}<code>{{ account.ak_masked }}</code>{% else %}<span class="tone-danger">缺凭证</span>{% endif %}</dd></div>
+  </dl>
+</section>
+
+<footer class="meta">
+  <span>Cost Explorer + CloudWatch</span>
+  <span>缓存 {{ cache_label }}</span>
+  <span>生成于 {{ generated_at }}</span>
+  <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
+</footer>
+{% endblock %}

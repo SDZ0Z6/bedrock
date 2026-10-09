@@ -137,6 +137,10 @@ CURRENCY_SYMBOL = _text("CURRENCY_SYMBOL", "$")
 WARN_PCT = _number("WARN_PCT", 70)
 DANGER_PCT = _number("DANGER_PCT", 90)
 
+# 运营看板（/ops/）先下线：默认不注册这个页面，侧边栏也不出现入口。代码和数据层都留着，
+# 设成 1 就回来
+OPS_DASHBOARD = _flag("OPS_DASHBOARD", False)
+
 HOST = _text("HOST", "127.0.0.1")
 PORT = _number("PORT", 5000)
 DEBUG = _flag("DEBUG", False)
@@ -184,6 +188,12 @@ TELEGRAM_CARD_SIGNATURE = os.environ.get(
 ALERT_STATE_PATH = Path(_text("ALERT_STATE_PATH", "alert-state.json"))
 if not ALERT_STATE_PATH.is_absolute():
     ALERT_STATE_PATH = BASE_DIR / ALERT_STATE_PATH
+
+# 告警事件流：每条真的发出去了的告警（含邮件告警）记一行，运营看板的「最近告警」读它。
+# 只留最近两千来条（见 events）。和告警状态放一起，systemd 的 ReadWritePaths 已经覆盖
+ALERT_EVENTS_PATH = Path(_text("ALERT_EVENTS_PATH", "alert-events.jsonl"))
+if not ALERT_EVENTS_PATH.is_absolute():
+    ALERT_EVENTS_PATH = BASE_DIR / ALERT_EVENTS_PATH
 
 # 每个账号最近一次查询成功的累计消费。CE 查不到时，概览页和日报拿它顶上并标出
 # 「截至哪天」（见 last_known）。和告警状态放一起，systemd 的 ReadWritePaths 已经覆盖。

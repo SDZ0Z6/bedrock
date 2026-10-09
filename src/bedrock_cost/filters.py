@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from pathlib import Path
 
 from flask import Flask
@@ -16,9 +18,19 @@ LOADING_MEDIA = ("loading.webm", "loading.mp4")
 
 
 def money(value: float | None) -> str:
+    """负数写成 -$12.30，不是 $-12.30（和告警卡片一个写法）。"""
     if value is None:
         return "—"
-    return f"{config.CURRENCY_SYMBOL}{value:,.2f}"
+    sign = "-" if value < 0 else ""
+    return f"{sign}{config.CURRENCY_SYMBOL}{abs(value):,.2f}"
+
+
+def money0(value: float | None) -> str:
+    """大号数字用的整数金额：$72,102。分位留给表格和卡片里的小字。"""
+    if value is None:
+        return "—"
+    sign = "-" if value < 0 else ""
+    return f"{sign}{config.CURRENCY_SYMBOL}{abs(value):,.0f}"
 
 
 def pct(value: float | None) -> str:
@@ -40,6 +52,19 @@ def compact(value: float | None) -> str:
     return chart.compact_number(value)
 
 
+_MODEL = re.compile(r"(?i)claude[-\s]+(opus|sonnet|haiku|fable)[-\s]+(\d+)(?:[-.](\d)(?!\d))?")
+
+
+def short_model(name: str) -> str:
+    """窄地方（热力格的行名）用的模型短名：claude-sonnet-4-5-20250929-v1:0 → Sonnet 4.5。
+    认不出来的原样返回。"""
+    match = _MODEL.search(name or "")
+    if not match:
+        return name
+    family, major, minor = match.groups()
+    return f"{family.title()} {major}.{minor}" if minor else f"{family.title()} {major}"
+
+
 def loading_media(static_folder: str | None) -> str:
     """挑一个存在的等待动效素材，都没有就返回空串（模板里会跳过 video）。"""
     if not static_folder:
@@ -52,15 +77,22 @@ def loading_media(static_folder: str | None) -> str:
 
 
 def register_filters(app: Flask) -> None:
-    app.jinja_env.filters.update(money=money, pct=pct, ratio=ratio, compact=compact)
+    app.jinja_env.filters.update(money=money, money0=money0, pct=pct, ratio=ratio, compact=compact,
+                                 short_model=short_model)
     # 图表色板的唯一来源是 chart.py，模板里的图例和表格色块取同一套值，
     # 不在 CSS 里重复维护一遍
     app.jinja_env.globals["series_color"] = chart.color_for
+    # 热力格的配色同理，色阶只在 chart.py 里定义一份
+    app.jinja_env.globals["heat_style"] = chart.heat_style
+    app.jinja_env.globals["heat_ramp"] = chart.HEAT_RAMP
     # 表单里的隐藏域直接调它，不用每个视图都往模板塞一遍
     app.jinja_env.globals["csrf_token"] = csrf_token
 
     # 等待动效在 shell.html 里，每个页面都要用，所以走 context_processor
-    # 而不是让每个视图各传一遍
+    # 而不是让每个视图各传一遍。弹窗上的时间同理
     @app.context_processor
-    def _loading_media():
-        return {"loading_media": loading_media(app.static_folder)}
+    def _shell_context():
+        return {
+            "loading_media": loading_media(app.static_folder),
+            "toast_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }

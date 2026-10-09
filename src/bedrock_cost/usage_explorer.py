@@ -23,7 +23,8 @@ import boto3
 from botocore.config import Config as BotoConfig
 
 from . import config
-from .cost_explorer import build_filter, friendly_error, split_group_key
+from .aws_errors import QueryError, as_query_error, describe, missing_credentials
+from .cost_explorer import build_filter, split_group_key
 from .excel_source import Account
 
 # 维度 -> (页面显示名, CE 的 GroupBy 维度键或 None)
@@ -72,7 +73,8 @@ class UsageReport:
     dates: list[str] = field(default_factory=list)  # 每个桶的起始日期(ISO)
     labels: list[str] = field(default_factory=list)  # 轴上显示的短标签
     series: list[Series] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
+    # 每个查不了的账号一条；str() 是「上游 / 账号：原因（错误码）」，和原来的文案一样
+    errors: list[QueryError] = field(default_factory=list)
     currency: str = "USD"
     any_cached: bool = False
     folded_count: int = 0  # 被折叠进「其他」的序列数
@@ -218,6 +220,9 @@ def _cache_key(account: Account, start, end, dimension: str, granularity: str) -
         granularity,
         account.tag_key,
         account.tag_value,
+        # 折算后的金额是查询时按比率乘好再缓存的：台账里改了比率，缓存要跟着失效
+        account.tag_ratio,
+        account.untag_ratio,
         config.COST_METRIC,
         tuple(config.SERVICE_FILTER),
     )
@@ -312,10 +317,10 @@ def _query_account(
 def _fetch_account(
     account: Account, start: date, end: date, dimension: str, granularity: str,
     dates: list[str], refresh: bool,
-) -> tuple[dict[str, list[list[float]]], str, bool, str | None]:
+) -> tuple[dict[str, list[list[float]]], str, bool, QueryError | None]:
     """返回 (数据, 货币, 是否命中缓存, 错误)。"""
     if not account.has_credentials:
-        return {}, "USD", False, "台账中缺少 AK 或 SK，无法查询"
+        return {}, "USD", False, missing_credentials(account)
 
     key = _cache_key(account, start, end, dimension, granularity)
     now = time.time()
@@ -328,12 +333,33 @@ def _fetch_account(
     try:
         data, currency = _query_account(account, start, end, dimension, granularity, dates)
     except Exception as exc:
-        return {}, "USD", False, friendly_error(exc, account)
+        return {}, "USD", False, describe(exc, account)
 
     if config.CACHE_TTL > 0:
         with _cache_lock:
             _cache[key] = (now, data, currency)
     return data, currency, False, None
+
+
+def account_series(
+    account: Account, start: date, end: date, granularity: str = "daily", refresh: bool = False,
+) -> tuple[list[str], list[float], list[float], bool, QueryError | None]:
+    """一个账号每个时间桶的 (原价, 折算后)，不再往下拆。
+
+    返回 (桶的起始日期, 原价, 折算后, 是否命中缓存, 错误)。运营看板用它：看板要每个账号
+    各自的数，build_usage 会把第 8 个以后的账号并进「其他」。查不了时两个列表是空的。
+    """
+    dates, _ = build_buckets(start, end, granularity)
+    data, _, cached, error = _fetch_account(account, start, end, "account", granularity, dates, refresh)
+    if error:
+        return dates, [], [], False, as_query_error(error, account=account.account, partner=account.partner)
+    raw = [0.0] * len(dates)
+    marked = [0.0] * len(dates)
+    for cells in data.values():
+        for position, (amount, priced) in enumerate(cells):
+            raw[position] += amount
+            marked[position] += priced
+    return dates, raw, marked, cached, None
 
 
 # --------------------------------------------------------------- 组装
@@ -362,7 +388,9 @@ def build_usage(
             account, start, end, dimension, granularity, dates, refresh
         )
         if error:
-            report.errors.append(f"{account.partner} / {account.account}：{error}")
+            report.errors.append(
+                as_query_error(error, account=account.account, partner=account.partner)
+            )
             continue
         if cached:
             report.any_cached = True

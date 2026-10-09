@@ -1,0 +1,198 @@
+{# 账号页的「预估」页签（原来的预估成本页）：CloudWatch 的 token 量 × AWS 公开牌价，
+   用来补 Cost Explorer 那一两天的延迟。 #}
+{% extends "account_base.html" %}
+{% from "_macros.html" import range_picker %}
+{% block loading_label %}正在拉用量和单价{% endblock %}
+
+{% block tab_content %}
+
+<form class="filters filters-auto" id="estimate-filters" method="get" action="{{ url_for('account.estimate', number=account.account) }}">
+  <div class="filters-row">
+    <div class="field">
+      <span class="field-label">时间（UTC 日期）</span>
+      {{ range_picker(range_label, range_presets, start.isoformat(), end.isoformat(), date_min, today.isoformat(), 'date',
+                      '最早只能选到启用日期' if account.start_date else '') }}
+    </div>
+    <div class="filters-end">
+      <a class="btn" href="{{ url_for('account.estimate', number=account.account, start=start.isoformat(), end=end.isoformat(), refresh=1) }}"
+         title="跳过缓存，重新拉用量和单价" data-loading="正在重新拉用量和单价" data-loading-note="跳过缓存">强制刷新</a>
+    </div>
+  </div>
+  <noscript><button class="btn btn-primary" type="submit">查询</button></noscript>
+</form>
+
+{% if fatal %}
+  <div class="alert alert-error"><div><strong>无法生成报表：</strong>{{ fatal }}</div></div>
+{% else %}
+
+  <section class="summary summary-4">
+    <div class="tile">
+      <span class="tile-label">预估总花费</span>
+      <span class="tile-value">{{ report.total_cost | money }}</span>
+      <span class="tile-sub">{{ start.isoformat() }} ~ {{ end.isoformat() }}（UTC）</span>
+    </div>
+    <div class="tile">
+      <span class="tile-label">日均</span>
+      <span class="tile-value">{{ report.daily_average | money }}</span>
+      <span class="tile-sub">共 {{ report.dates | length }} 天</span>
+    </div>
+    <div class="tile">
+      <span class="tile-label">单日最高</span>
+      <span class="tile-value">{{ report.peak[1] | money }}</span>
+      <span class="tile-sub">{% if report.peak[0] >= 0 %}{{ report.dates[report.peak[0]] }}{% else %}—{% endif %}</span>
+    </div>
+    <div class="tile tile-split">
+      <span class="tile-label">缓存占花费</span>
+      {% set cache_cost = report.kind_cost('cache_read') + report.kind_cost('cache_write') %}
+      {% set cache_pct = (cache_cost / report.total_cost * 100) if report.total_cost else None %}
+      <span class="tile-value">{{ cache_pct | pct }}</span>
+      <span class="tile-sub">{{ cache_cost | money }}（读 + 写）</span>
+    </div>
+  </section>
+
+  <section class="viz-card chart-card">
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">每天的预估花费</h2>
+        <p class="viz-sub">按模型分色 · {{ report.series | length }} 条序列{% if report.any_cached %} · 部分数据来自缓存{% endif %}</p>
+      </div>
+    </div>
+    {% if report.series | length >= 2 %}
+      <div class="legend">
+        {% for series in report.series %}
+          <span class="legend-item">
+            <i class="swatch" style="background: {{ series_color(series.slot) }}"></i>
+            <span class="legend-name">{{ series.name }}</span>
+            <span class="legend-value">{{ series.total_marked | money }}</span>
+          </span>
+        {% endfor %}
+      </div>
+    {% endif %}
+    {# 不用横向滚动时（画布没超过卡片宽）跟着卡片缩放；桶太多时画布变宽、横向滚动 #}
+    <div class="chart-wrap {% if chart.width <= 1080 %}chart-fluid{% endif %}">{{ chart.svg | safe }}</div>
+    {% if report.series | length == 1 %}<p class="chart-caption">只有一条序列：{{ report.series[0].name }}</p>{% endif %}
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div class="card-title">
+        <h2>按模型明细</h2>
+        <span class="card-note">{{ report.rows | length }} 个模型 · 单价为 AWS 公开牌价（$/1M tokens）</span>
+      </div>
+    </div>
+    {% if not report.rows %}
+      <p class="empty">所选区间没有 Bedrock 用量。</p>
+    {% else %}
+    <div class="table-scroll">
+      <table class="wide-table estimate-table">
+        <thead>
+          <tr>
+            <th class="sticky-col">模型</th>
+            {% for kind in kinds %}<th class="num">{{ kind_labels[kind] }} Token</th>{% endfor %}
+            {% for kind in kinds %}<th class="num rate-col">{{ kind_labels[kind] }}价/M</th>{% endfor %}
+            <th class="num">估算成本</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in report.rows %}
+            <tr class="{% if not row.priced %}row-idle{% endif %}">
+              <td class="sticky-col">{{ row.label }}
+                <span class="tier-badge" title="跨区推理单价比本区便宜约 10%">{{ row.tier_label }}</span></td>
+              {% for kind in kinds %}
+                <td class="num {% if not row.count(kind) %}zero{% endif %}">{{ row.count(kind) | compact }}</td>
+              {% endfor %}
+              {% for kind in kinds %}
+                <td class="num rate-col">{%- if row.priced %}{{ row.rate_per_million(kind) | money }}{% else %}—{% endif -%}</td>
+              {% endfor %}
+              <td class="num">
+                {%- if row.priced %}<strong>{{ row.cost | money }}</strong>
+                {%- else %}<span class="tone-danger" title="AWS 价目表里没有这个模型，未计入总额">无单价</span>{% endif -%}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+        <tfoot>
+          <tr>
+            <th class="sticky-col">合计</th>
+            {% for kind in kinds %}<td class="num">{{ report.kind_total(kind) | compact }}</td>{% endfor %}
+            {# 单价是逐模型的，加总没有意义，这几格留空 #}
+            <td class="rate-col" colspan="{{ kinds | length }}"></td>
+            <td class="num"><strong>{{ report.total_cost | money }}</strong></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+    {% endif %}
+  </section>
+{% endif %}
+
+<footer class="meta">
+  <span>CloudWatch token × AWS 公开牌价（不含折扣、不加价）</span>
+  <span>缓存 {{ cache_label }}</span>
+  <span>生成于 {{ generated_at }}</span>
+  <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
+</footer>
+
+{% if not fatal %}
+  <script id="chart-data" type="application/json">{{ chart.tooltip | tojson }}</script>
+  <script>
+  (function () {
+    // 面积图的悬浮：一列一个命中区，提示里列出这一天各模型的预估花费。名字用 textContent 插入
+    const holder = document.getElementById('chart-data');
+    if (!holder) return;
+    const data = JSON.parse(holder.textContent);
+    const tip = document.createElement('div');
+    tip.className = 'chart-tip';
+    tip.hidden = true;
+    document.body.append(tip);
+    const money = v => '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    function show(target) {
+      const item = data[Number(target.dataset.idx)];
+      if (!item) return;
+      tip.replaceChildren();
+      const head = document.createElement('div');
+      head.className = 'tip-head';
+      head.textContent = item.date;
+      const total = document.createElement('div');
+      total.className = 'tip-total';
+      total.textContent = '预估 ' + money(item.total);
+      tip.append(head, total);
+      if (item.rows.length) {
+        const table = document.createElement('table');
+        table.className = 'tip-table';
+        for (const row of item.rows) {
+          const tr = table.insertRow();
+          const name = tr.insertCell();
+          const key = document.createElement('i');
+          key.className = 'line-key';
+          key.style.background = row.color;
+          name.append(key, document.createTextNode(row.name));
+          const value = tr.insertCell();
+          value.className = 'tip-num';
+          value.textContent = money(row.marked);
+        }
+        tip.append(table);
+      }
+      tip.hidden = false;
+      const box = target.getBoundingClientRect();
+      let left = box.left + box.width / 2 - tip.offsetWidth / 2;
+      left = Math.max(8, Math.min(left, window.innerWidth - tip.offsetWidth - 8));
+      let top = box.top - tip.offsetHeight - 10;
+      if (top < 8) top = box.bottom + 10;
+      tip.style.left = left + 'px';
+      tip.style.top = top + 'px';
+    }
+    const hide = () => { tip.hidden = true; };
+    for (const hit of document.querySelectorAll('.chart-hit')) {
+      hit.addEventListener('mouseenter', () => show(hit));
+      hit.addEventListener('focus', () => show(hit));
+      hit.addEventListener('mouseleave', hide);
+      hit.addEventListener('blur', hide);
+    }
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') hide(); });
+    window.addEventListener('scroll', hide, { passive: true });
+  })();
+  </script>
+{% endif %}
+{% endblock %}

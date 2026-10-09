@@ -26,6 +26,9 @@ JEFF = Account(
     partner="上游", account="120121147269", budget=1000, tag_ratio=1.0, untag_ratio=1.0,
     start_date=date(2026, 8, 1),
 )
+EMAIL = "jeff.ops@example.com"
+JEFF_MAIL = Account(**{**JEFF.__dict__, "email": EMAIL})   # 同一个账号，台账里填了账号邮箱
+LONG_EMAIL = "a.very.long.root.mailbox.name+bedrock-billing@some-really-long-company-domain.example.com"
 
 
 def picture(card: Card) -> Image.Image:
@@ -37,8 +40,8 @@ def row(account: Account, untag_raw: float = 0.0, error: str | None = None):
     return build_row(account, split, cumulative_range(account.start_date, TODAY))
 
 
-def every_card() -> dict[str, Card]:
-    """每一种卡片各一张，示例数字。"""
+def every_card(account: Account = JEFF) -> dict[str, Card]:
+    """每一种卡片各一张，示例数字。给一个填了邮箱的账号，就是每一种都带邮箱的版本。"""
     from bedrock_cost.cost_estimate import HourUsage
 
     hour = datetime(2026, 9, 28, 5, tzinfo=UTC)
@@ -49,16 +52,21 @@ def every_card() -> dict[str, Card]:
     mailbox = Account(
         partner="上游", account="120121147269", budget=1000, tag_ratio=1.0, untag_ratio=1.0,
         mail_enabled=True, mail_provider="aliyun-sg", mail_address="root@example.com", mail_password="x",
+        email=account.email,
     )
+    emails = {account.account: account.email} if account.email else None
     return {
-        "daily": alerts.daily_cards(TODAY, [row(JEFF, 41.27)])[0],
-        "started": alerts.started_card(JEFF, hour, 1234),
-        "stopped": alerts.stopped_card(JEFF, [datetime(2026, 9, 28, 6, tzinfo=UTC)], "2026-09-28T05:00:00+00:00"),
+        "daily": alerts.daily_cards(TODAY, [row(account, 41.27)], emails)[0],
+        "started": alerts.started_card(account, hour, 1234),
+        "stopped": alerts.stopped_card(account, [datetime(2026, 9, 28, 6, tzinfo=UTC)], "2026-09-28T05:00:00+00:00"),
         "stopped-usage": alerts.stopped_card(
-            JEFF, [datetime(2026, 9, 28, 6, tzinfo=UTC)], "2026-09-28T05:00:00+00:00", usage,
+            account, [datetime(2026, 9, 28, 6, tzinfo=UTC)], "2026-09-28T05:00:00+00:00", usage,
         ),
-        "quota": alerts.quota_card(JEFF, 50, 50.3, 503.2, CUMULATIVE_OK, JEFF.start_date, []),
-        "test": alerts.ping_card(JEFF.account),
+        "quota": alerts.quota_card(account, 50, 50.3, 503.2, CUMULATIVE_OK, account.start_date, []),
+        "test": alerts.ping_card(account.account, email=account.email),
+        "created": alerts.created_card(account),
+        "restored": alerts.restored_card(account),
+        "disabled": alerts.disabled_card(account, row(account, 503.2)),
         "mail-on": alerts.mail_on_card(mailbox),
         "mail-off": alerts.mail_off_card(mailbox),
     }
@@ -176,10 +184,125 @@ class TestDetailsTitle:
         assert picture(titled).height - picture(plain).height == cards.Details.TITLE_H * cards.OUTPUT_SCALE
         assert "上一次有调用的那一小时" in titled.text()
 
-    def test_mail_cards_mask_the_address(self):
+    def test_mail_cards_show_the_full_address(self):
+        """告警邮箱写全、不打码：群里靠它认是哪个邮箱在收信。"""
         for kind in ("mail-on", "mail-off"):
-            text = every_card()[kind].text()
-            assert "r***@example.com" in text and "root@example.com" not in text
+            card = every_card()[kind]
+            assert "root@example.com" in card.text() and "***" not in card.text()
+            assert "告警邮箱 root@example.com" in card.caption
+
+
+class Recorder(cards._Pen):
+    """只量不画的笔，记下每一段字画在哪：(x, 字, 宽, anchor)。用来查「有没有画出边界」。"""
+
+    def __init__(self):
+        super().__init__()
+        self.texts: list[tuple[float, str, float, str]] = []
+
+    def text(self, x, y, text, font, fill, anchor="lm"):
+        self.texts.append((x, text, cards._width(text, font), anchor))
+
+    def find(self, prefix: str) -> tuple[float, str, float, str]:
+        return next(entry for entry in self.texts if entry[1].startswith(prefix))
+
+
+class TestAccountEmail:
+    """号码一眼认不出是谁：卡片和 caption 上凡是写了账号 UID 的地方，都跟上账号邮箱（写全）。"""
+
+    KINDS = ["daily", "started", "stopped", "stopped-usage", "quota", "test",
+             "created", "restored", "disabled", "mail-on", "mail-off"]
+
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_every_card_and_caption_carry_the_email(self, kind):
+        card = every_card(JEFF_MAIL)[kind]
+        assert f"<code>120121147269</code> · {EMAIL}" in card.caption
+        if kind != "test":                         # 测试消息的卡片上本来就不放账号，只在 caption 里
+            drawn = [s for block in card.blocks for s in block.strings()]
+            assert EMAIL in drawn
+
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_without_an_email_nothing_changes(self, kind):
+        """老台账没有邮箱：和以前一模一样，没有空行、没有「None」、caption 里号码后面不跟东西。"""
+        card = every_card(JEFF)[kind]
+        assert "None" not in card.text()
+        assert "<code>120121147269</code> · " not in card.caption
+        for block in card.blocks:
+            if isinstance(block, (cards.Uid, cards.Details)) and block.uid:
+                assert "" not in block.strings()
+
+    def test_without_an_email_the_uid_block_draws_only_the_label_and_the_number(self):
+        pen = Recorder()
+        cards.Uid("120121147269").layout(pen, 0, 0, 528, cards.TONES["ok"])
+        assert [text for _, text, _, _ in pen.texts] == ["账号 UID", "120121147269"]
+
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_every_card_with_an_email_renders(self, kind):
+        width, height = picture(every_card(JEFF_MAIL)[kind]).size
+        assert width == 1200 and width + height <= 10000
+
+    @pytest.mark.parametrize("kind", ["started", "stopped", "quota", "created", "disabled", "mail-on"])
+    def test_the_email_does_not_make_the_card_taller(self, kind):
+        """邮箱和账号小块在同一行：卡片高度不变。"""
+        assert picture(every_card(JEFF_MAIL)[kind]).size == picture(every_card(JEFF)[kind]).size
+
+    def test_captions_escape_the_email(self):
+        account = Account(**{**JEFF.__dict__, "email": "ops&billing@example.com"})
+        card = alerts.started_card(account, datetime(2026, 9, 28, 5, tzinfo=UTC), 1)
+        assert "<code>120121147269</code> · ops&amp;billing@example.com" in card.caption
+        assert "120121147269 · ops&billing@example.com" in telegram.visible(card.caption)
+
+    @pytest.mark.parametrize("chip", [cards.CHIP, cards.CHIP_ON_PANEL])
+    def test_a_long_email_is_cut_not_drawn_past_the_edge(self, chip):
+        pen, width = Recorder(), 300
+        cards.Uid("120121147269", chip=chip, email=LONG_EMAIL).layout(pen, 10, 0, width, cards.TONES["ok"])
+        x, shown, drawn, _ = pen.find("a.very")
+        assert shown.endswith("…") and LONG_EMAIL.startswith(shown[:-1])
+        assert x + drawn <= 10 + width
+
+    def test_a_short_email_is_drawn_whole(self):
+        pen = Recorder()
+        cards.Uid("120121147269", email=EMAIL).layout(pen, 0, 0, 528, cards.TONES["ok"])
+        assert pen.find("jeff")[1] == EMAIL
+
+
+class TestDailyTableEmail:
+    """日报表格：UID 小块下面写账号邮箱，和「截至 09-28」那种小字一个排法。"""
+
+    def test_the_email_sits_under_the_uid(self):
+        card = alerts.daily_cards(TODAY, [row(JEFF, 41.27)], {JEFF.account: EMAIL})[0]
+        table = card.blocks[0]
+        uid = table.rows[0][0]
+        assert (uid.text, uid.note) == ("120121147269", EMAIL)
+        assert table.layout(cards._Pen(), 0, 0, 528, cards.TONES["ok"]) == cards.Table.HEAD + cards.Table.NOTED_ROW
+        assert f"<code>120121147269</code> · {EMAIL} 累计消费 $41.27" in card.caption
+
+    def test_accounts_without_an_email_keep_the_short_row(self):
+        other = Account(**{**JEFF.__dict__, "account": "222222222222"})
+        card = alerts.daily_cards(TODAY, [row(JEFF, 1), row(other, 2)], {other.account: "other@example.com"})[0]
+        plain, mailed = card.blocks[0].rows
+        assert plain[0].note == "" and mailed[0].note == "other@example.com"
+        height = card.blocks[0].layout(cards._Pen(), 0, 0, 528, cards.TONES["ok"])
+        assert height == cards.Table.HEAD + cards.Table.ROW + cards.Table.NOTED_ROW
+        assert "<code>120121147269</code> 累计消费" in card.caption
+
+    @pytest.mark.parametrize("budget", ["$500,000.00", "未设额度"])
+    def test_a_long_email_stops_short_of_the_first_column(self, budget):
+        columns = ["UID", "授信额度", "累计消费", "剩余额度"]
+        table = cards.Table(columns, [[cards.Cell("120121147269", note=LONG_EMAIL), cards.Cell(budget),
+                                       cards.Cell("$1.00"), cards.Cell("$2.00")]])
+        pen = Recorder()
+        table.layout(pen, 0, 0, 528, cards.TONES["ok"])
+        x, shown, drawn, _ = pen.find("a.very")
+        right, _, width, anchor = pen.find(budget)
+        assert anchor == "rm"                                    # 第一列右对齐，字的左边是 right - width
+        assert shown.endswith("…") and LONG_EMAIL.startswith(shown[:-1])
+        assert x + drawn <= right - width - 10
+
+    def test_a_failed_row_keeps_its_email(self):
+        card = alerts.daily_cards(TODAY, [row(JEFF, error="AccessDenied")], {JEFF.account: EMAIL})[0]
+        uid = card.blocks[0].rows[0][0]
+        assert (uid.note, uid.mark) == (EMAIL, "danger")
+        assert f"<code>120121147269</code> · {EMAIL} 查询失败" in card.caption
 
 
 class TestWrap:

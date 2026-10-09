@@ -27,7 +27,10 @@
 由 web 进程当场发，不走 systemd timer。
 
 **长什么样**：每条都是一张深色卡片图（cards.py 画）+ 图片下面一段文字（caption，
-账号 ID 和关键数字）。卡片画不出来就退回只发那段文字，见 _send。
+账号 ID、账号邮箱和关键数字）。卡片画不出来就退回只发那段文字，见 _send。
+
+**记流水**：至少发到了一个群的告警记一条进事件流（events.py，运营看板读它）。同一张卡片
+发给几个群只记一条，日报一次运行记一条；dry-run 不记。记不下来不影响这条告警算发成功。
 
 为什么额度阈值是 CE + CW 拼起来的：CE 有一到两天延迟，光用 CE 今天花的钱要后天
 才看得到；光用 CW 又有个坑——ListMetrics 只列近两周有数据的模型，三周前用过、
@@ -49,7 +52,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from . import cards, config, cost_explorer, mail_rules, telegram
+from . import cards, config, cost_explorer, events, telegram
 from .cards import (
     Card,
     Cell,
@@ -194,19 +197,44 @@ def _deliver(chat_id: str, card: Card, summary: RunSummary, send: Sender, log) -
 
 def _deliver_all(
     chat_ids: tuple[str, ...], card: Card, summary: RunSummary, send: Sender, log
-) -> bool:
-    """同一张卡片发给一个账号的全部群（只画一次）。**有一个群发成功就算发过了。**
+) -> int:
+    """同一张卡片发给一个账号的全部群（只画一次），返回发成功了几个群。
+    **有一个群发成功就算发过了。**
 
     不要求全部成功：一个群 ID 坏了（bot 被踢了）就不让状态前进的话，下一小时
     其他好好的群会再收到一遍，每小时一遍，直到有人修好那个 ID。坏掉的那个会记成
     问题、让命令非零退出，journalctl 和 systemctl --failed 里看得到。
 
-    全部失败（Telegram 整个连不上、Token 失效）才返回 False，下一小时重试。
+    全部失败（Telegram 整个连不上、Token 失效）才返回 0，下一小时重试。
     """
-    delivered = False
-    for chat_id in chat_ids:
-        delivered = _deliver(chat_id, card, summary, send, log) or delivered
-    return delivered
+    # 每个群都要发到：sum 把生成器走完，不会因为前面成功了就跳过后面的
+    return sum(_deliver(chat_id, card, summary, send, log) for chat_id in chat_ids)
+
+
+# 卡片的颜色 -> 事件流的 tone（看板按它上色）。停用、关邮件告警那种灰卡片只是通知
+_EVENT_TONES = {"danger": "error", "warn": "warn", "ok": "ok", "info": "info", "gray": "info"}
+
+
+def _gist(card: Card) -> str:
+    """一张卡片的一句话：caption 的第二行（第一行是标题和账号），去掉 HTML。"""
+    lines = telegram.visible(card.caption).splitlines()
+    return lines[1] if len(lines) > 1 else ""
+
+
+def _record(card: Card, groups: int, account_id: str = "", email: str = "") -> None:
+    """发出去了（至少一个群）的一张卡片记一条事件，运营看板读它。只在真发的时候调，dry-run 不调。
+
+    记不下来 events.record 自己记日志、不抛：告警已经发出去了，不能因为流水没记上就算失败。
+    """
+    events.record(
+        kind=card.kind,
+        title=card.title,
+        text=_gist(card),
+        tone=_EVENT_TONES.get(card.tone, "info"),
+        account=account_id,
+        email=email,
+        groups=groups,
+    )
 
 
 def _dry_run_sender(log, save_dir: Path | None = None) -> Sender:
@@ -257,9 +285,13 @@ def _local_hour(stamp: datetime) -> str:
     return stamp.astimezone().strftime("%m-%d %H:%M")
 
 
-def _uid(account_id: str) -> str:
-    # 只写账号 ID，不带上游（台账的 PARTNER 列）：所有 TG 消息都不出现上游
-    return f"<code>{_esc(account_id)}</code>"
+def _uid(account_id: str, email: str = "") -> str:
+    """caption 里的账号：「<code>号码</code> · 账号邮箱」，没填邮箱就只有号码。
+
+    号码一眼认不出是谁，邮箱写全、不打码。不带上游（台账的 PARTNER 列）：所有 TG 消息都不出现上游。
+    """
+    uid = f"<code>{_esc(account_id)}</code>"
+    return f"{uid} · {_esc(email)}" if email else uid
 
 
 def _caption(lines: list[str], overflow: str = "") -> str:
@@ -281,27 +313,33 @@ _RANGE_SHORT = {
 }
 
 
-def daily_cards(today: date, rows: list[ReportRow]) -> list[Card]:
-    """一个群的日报。账号多于 cards.MAX_TABLE_ROWS 个就分成几张发。"""
+def daily_cards(today: date, rows: list[ReportRow], emails: dict[str, str] | None = None) -> list[Card]:
+    """一个群的日报。账号多于 cards.MAX_TABLE_ROWS 个就分成几张发。
+
+    emails 是 {账号 ID: 账号邮箱}：ReportRow 上没有邮箱，由调用方从台账里查好传进来。
+    """
     size = cards.MAX_TABLE_ROWS
     chunks = [rows[start:start + size] for start in range(0, len(rows), size)] or [[]]
     return [
-        _daily_card(today, chunk, len(rows), index, len(chunks))
+        _daily_card(today, chunk, len(rows), index, len(chunks), emails or {})
         for index, chunk in enumerate(chunks, start=1)
     ]
 
 
-def _daily_card(today: date, rows: list[ReportRow], everyone: int, index: int, total: int) -> Card:
+def _daily_card(
+    today: date, rows: list[ReportRow], everyone: int, index: int, total: int, emails: dict[str, str]
+) -> Card:
     table: list[list[Cell]] = []
     notes: list[tuple[str, str]] = []
     lines: list[str] = []
     for row in rows:
         uid = row.account
+        email = emails.get(uid, "")
         budget = Cell(_money(row.budget)) if row.budget > 0 else Cell("未设额度", "muted")
         if not row.has_numbers:
-            table.append([Cell(uid, mark="danger"), budget, Cell("查询失败", "danger"), Cell("—", "muted")])
+            table.append([Cell(uid, mark="danger", note=email), budget, Cell("查询失败", "danger"), Cell("—", "muted")])
             notes.append(("danger", f"{uid} 查询失败：{row.error}"))
-            lines.append(f"{_uid(uid)} 查询失败")
+            lines.append(f"{_uid(uid, email)} 查询失败")
             continue
 
         mark, flags = "", []
@@ -325,10 +363,10 @@ def _daily_card(today: date, rows: list[ReportRow], everyone: int, index: int, t
             else Cell("—", "muted")
         )
         spent = Cell(_money(row.total_cost), "warn" if stale else "", note=f"截至 {stale}" if stale else "")
-        table.append([Cell(uid, mark=mark), budget, spent, balance])
+        table.append([Cell(uid, mark=mark, note=email), budget, spent, balance])
         remaining = f" · 剩余额度 {_money(row.balance)}" if row.budget > 0 else ""
         flagged = f"（{'，'.join(flags)}）" if flags else ""
-        lines.append(f"{_uid(uid)} 累计消费 {_money(row.total_cost)}{remaining}{flagged}")
+        lines.append(f"{_uid(uid, email)} 累计消费 {_money(row.total_cost)}{remaining}{flagged}")
 
     blocks: list = [Table(["UID", "授信额度", "累计消费", "剩余额度"], table)]
     if notes:
@@ -362,14 +400,14 @@ def started_card(account: Account, hour: datetime, count: float) -> Card:
         badge="ACTIVE",
         subtitle="BEDROCK · USAGE ALERT",
         blocks=[
-            Uid(account.account),
+            Uid(account.account, email=account.email),
             Tiles([
                 Tile("检测时段", when),
                 Tile("本小时调用次数", calls, tone="ok", big=True, edge=True),
             ]),
         ],
         footer="检测到该账号本小时开始产生调用。",
-        caption=f"🟢 <b>用量开始</b> · {_uid(account.account)}\n{when} 这一小时调用 {calls} 次",
+        caption=f"🟢 <b>用量开始</b> · {_uid(account.account, account.email)}\n{when} 这一小时调用 {calls} 次",
     )
 
 
@@ -386,10 +424,10 @@ def stopped_card(
         label, when, gist = "当前检测时段", first, "本小时没有任何调用"
         summary = f"{first} 这一小时没有任何调用"
     blocks: list = [
-        Uid(account.account),
+        Uid(account.account, email=account.email),
         Tiles([Tile(label, when, big=True, edge=True, note=gist, note_tone="danger")]),
     ]
-    lines = [f"🔴 <b>用量中断</b> · {_uid(account.account)}", summary]
+    lines = [f"🔴 <b>用量中断</b> · {_uid(account.account, account.email)}", summary]
     footer = "请检查账号调用情况及相关服务状态。"
     if last_active:
         known = usage is not None and usage.has_data
@@ -471,7 +509,7 @@ def quota_card(
     title = "额度已用完" if used_up else "额度预警"
     balance = account.budget - spent
     blocks: list = [
-        Uid(account.account),
+        Uid(account.account, email=account.email),
         Meter("额度使用率", f"{pct:.1f}%", pct / 100, f"已消费 {_money(spent)}", f"总额度 {_money(account.budget)}"),
         Divider(),
         Tiles([
@@ -505,7 +543,7 @@ def quota_card(
         subtitle="BEDROCK · CREDIT USAGE ALERT",
         blocks=blocks,
         caption=_caption([
-            f"{'🚨' if used_up else '⚠️'} <b>{title}</b> · {_uid(account.account)}",
+            f"{'🚨' if used_up else '⚠️'} <b>{title}</b> · {_uid(account.account, account.email)}",
             f"额度已用 {pct:.1f}%，{gist}",
             f"累计消费 {_money(spent)} / 总额度 {_money(account.budget)}，剩余 {_money(balance)}",
         ]),
@@ -521,9 +559,10 @@ def _budget(account: Account) -> str:
     return _money(account.budget) if account.budget > 0 else "未设额度"
 
 
-def ping_card(account_id: str = "", now: datetime | None = None) -> Card:
-    """测试消息。卡片照截图不放账号；account_id 只写在图片下面的文字里（命令行发的没有）。"""
-    head = "🧪 <b>测试消息</b>" + (f" · {_uid(account_id)}" if account_id else "")
+def ping_card(account_id: str = "", now: datetime | None = None, email: str = "") -> Card:
+    """测试消息。卡片照截图不放账号；account_id（和账号邮箱）只写在图片下面的文字里
+    （命令行发的没有）。"""
+    head = "🧪 <b>测试消息</b>" + (f" · {_uid(account_id, email)}" if account_id else "")
     return Card(
         kind="test",
         tone="info",
@@ -552,12 +591,16 @@ def ping_card(account_id: str = "", now: datetime | None = None) -> Card:
     )
 
 
-def send_test(chat_id: str, account_id: str = "") -> str:
+def send_test(chat_id: str, account_id: str = "", email: str = "") -> str:
     """账号管理页「发测试消息」和命令行 alerts test。失败抛 TelegramError。
 
     返回空串，或者「卡片画不出来、改发了文字」的说明——页面和命令行都会把它显示出来。
+    一次只发一个群，发成功了记一条事件（groups=1）。
     """
-    return _send(chat_id, ping_card(account_id))
+    card = ping_card(account_id, email=email)
+    note = _send(chat_id, card)
+    _record(card, 1, account_id, email)
+    return note
 
 
 # --------------------------------------------------------------- 账号变动
@@ -588,12 +631,16 @@ def created_card(account: Account, now: datetime | None = None) -> Card:
                     *_mail_row(account, "已开启"),
                 ],
                 uid=account.account,
+                email=account.email,
             ),
         ],
         footer="系统已开始监控该账号的用量及额度情况。",
         footer_icon="satellite",
         footer_rule=False,
-        caption=f"🟢 <b>新账号启用</b> · {_uid(account.account)}\n授信额度 {_budget(account)} · 启用时间 {when}",
+        caption=(
+            f"🟢 <b>新账号启用</b> · {_uid(account.account, account.email)}\n"
+            f"授信额度 {_budget(account)} · 启用时间 {when}"
+        ),
     )
 
 
@@ -617,12 +664,16 @@ def restored_card(account: Account, now: datetime | None = None) -> Card:
                     *_mail_row(account, "已恢复"),
                 ],
                 uid=account.account,
+                email=account.email,
             ),
         ],
         footer="系统已恢复监控该账号的用量及额度情况。",
         footer_icon="satellite",
         footer_rule=False,
-        caption=f"🟢 <b>账号恢复启用</b> · {_uid(account.account)}\n授信额度 {_budget(account)} · 恢复时间 {when}",
+        caption=(
+            f"🟢 <b>账号恢复启用</b> · {_uid(account.account, account.email)}\n"
+            f"授信额度 {_budget(account)} · 恢复时间 {when}"
+        ),
     )
 
 
@@ -653,19 +704,23 @@ def disabled_card(account: Account, spend: ReportRow, now: datetime | None = Non
         subtitle="BEDROCK · ACCOUNT NOTIFICATION",
         blocks=[
             Status("pause-circle", "账号已停用", "该账号已从活动监控中停用"),
-            Details(rows, uid=account.account),
+            Details(rows, uid=account.account, email=account.email),
         ],
         footer="系统已停止该账号的活动监控及相关告警。",
         footer_icon="satellite",
         footer_rule=False,
-        caption=f"⚫ <b>账号停用</b> · {_uid(account.account)}\n{gist}",
+        caption=f"⚫ <b>账号停用</b> · {_uid(account.account, account.email)}\n{gist}",
     )
 
 
 def mail_on_card(account: Account, now: datetime | None = None) -> Card:
-    """在账号管理页打开了邮件告警。邮箱地址打码：群里可能有用账号的人，root 邮箱不给看全。"""
+    """在账号管理页打开了邮件告警。
+
+    告警邮箱写全、不打码：号码认不出是谁，群里靠邮箱认是哪个账号在收信。打码的只有邮件原文
+    节选里引用的地址——那些可能是别人的（见 mail_rules.excerpt）。
+    """
     when = _moment(now)
-    mailbox = mail_rules.mask_email(account.mail_address) or "—"
+    mailbox = account.mail_address or "—"
     return Card(
         kind="mail-on",
         tone="ok",
@@ -683,19 +738,23 @@ def mail_on_card(account: Account, now: datetime | None = None) -> Card:
                     Row("开启时间", when),
                 ],
                 uid=account.account,
+                email=account.email,
             ),
         ],
         footer="每 5 分钟收一次信；只发开启之后新到的邮件，旧邮件不补发。",
         footer_icon="satellite",
         footer_rule=False,
-        caption=f"🟢 <b>邮件告警已开启</b> · {_uid(account.account)}\n告警邮箱 {_esc(mailbox)} · 开启时间 {when}",
+        caption=(
+            f"🟢 <b>邮件告警已开启</b> · {_uid(account.account, account.email)}\n"
+            f"告警邮箱 {_esc(mailbox)} · 开启时间 {when}"
+        ),
     )
 
 
 def mail_off_card(account: Account, now: datetime | None = None) -> Card:
-    """关掉了邮件告警：表格里点了关，或者修改弹窗里把告警邮箱清空了。"""
+    """关掉了邮件告警：表格里点了关，或者修改弹窗里把告警邮箱清空了。告警邮箱同样写全。"""
     when = _moment(now)
-    mailbox = mail_rules.mask_email(account.mail_address) or "—"
+    mailbox = account.mail_address or "—"
     return Card(
         kind="mail-off",
         tone="gray",
@@ -712,12 +771,16 @@ def mail_off_card(account: Account, now: datetime | None = None) -> Card:
                     Row("关闭时间", when),
                 ],
                 uid=account.account,
+                email=account.email,
             ),
         ],
         footer="重新打开之后，只发打开以后新到的邮件。",
         footer_icon="satellite",
         footer_rule=False,
-        caption=f"⚫ <b>邮件告警已关闭</b> · {_uid(account.account)}\n告警邮箱 {_esc(mailbox)} · 关闭时间 {when}",
+        caption=(
+            f"⚫ <b>邮件告警已关闭</b> · {_uid(account.account, account.email)}\n"
+            f"告警邮箱 {_esc(mailbox)} · 关闭时间 {when}"
+        ),
     )
 
 
@@ -761,7 +824,9 @@ def notify_account(
         card = mail_off_card(account, now)
     else:
         raise ValueError(f"不认识的账号变动：{event}")
-    _deliver_all(account.tg_chat_ids, card, summary, _send, log)
+    groups = _deliver_all(account.tg_chat_ids, card, summary, _send, log)
+    if groups:
+        _record(card, groups, account.account, account.email)
     return summary
 
 
@@ -794,11 +859,39 @@ def run_daily(
         if row.error:
             summary.problems.append(f"{account.account} 查不到 CE：{row.error}")
 
+    # 表里 UID 下面写账号邮箱。ReportRow 上没有邮箱，按账号 ID 从台账里查
+    emails = {account.account: account.email for account in targets if account.email}
     send = _dry_run_sender(log, save_dir) if dry_run else _send
+    reached: list[str] = []
     for chat_id, rows in by_chat.items():
-        for card in daily_cards(today, rows):
-            _deliver(chat_id, card, summary, send, log)
+        # 分成几张发的，哪一张发成功了都算这个群收到了日报
+        if sum(_deliver(chat_id, card, summary, send, log) for card in daily_cards(today, rows, emails)):
+            reached.append(chat_id)
+    if reached and not dry_run:
+        _record_daily(today, by_chat, reached)
     return summary
+
+
+def _record_daily(today: date, by_chat: dict[str, list[ReportRow]], reached: list[str]) -> None:
+    """日报一次运行记一条事件：发到了几个群、一共几个账号，有没有查询失败、超额、没发出去的群。"""
+    rows = {row.account: row for chat_id in reached for row in by_chat[chat_id]}   # 几个群里都有的只算一次
+    failed = sum(1 for row in rows.values() if row.error)
+    over = sum(1 for row in rows.values() if row.overspent)
+    missed = len(by_chat) - len(reached)
+    parts = [f"{today.isoformat()} 的日报发到 {len(reached)} 个群，共 {len(rows)} 个账号"]
+    if failed:
+        parts.append(f"{failed} 个查询失败")
+    if over:
+        parts.append(f"{over} 个已超出额度")
+    if missed:
+        parts.append(f"{missed} 个群没发出去")
+    events.record(
+        kind="daily",
+        title="Bedrock 日报",
+        text="，".join(parts),
+        tone="warn" if len(parts) > 1 else "ok",
+        groups=len(reached),
+    )
 
 
 # --------------------------------------------------------------- 小时任务
@@ -809,12 +902,15 @@ def _check_usage(
     summary: RunSummary,
     send: Sender,
     log,
+    *,
+    dry_run: bool,
 ) -> None:
     counts, failed = hourly_invocations(account, hours)
     if counts is None:
         # 读不到就不判定：缺一个区的零不能当成真的零，否则会误报「用量中断」
-        summary.problems.append(f"{account.account} 读不到 CloudWatch：{'；'.join(failed)}")
-        log(f"[跳过用量判定] {account.account}：{'；'.join(failed)}")
+        reason = "；".join(map(str, failed))   # 可能是 aws_errors.QueryError，str() 才是那一行字
+        summary.problems.append(f"{account.account} 读不到 CloudWatch：{reason}")
+        log(f"[跳过用量判定] {account.account}：{reason}")
         return
 
     if counts[-1] > 0:
@@ -841,10 +937,13 @@ def _check_usage(
     else:
         card = stopped_card(account, hours, state.last_active_hour, _last_usage(account, state.last_active_hour, log))
     # 发出去了才落状态：全部群都失败就保持原状，下一小时条件还成立会再发一次
-    if _deliver_all(account.tg_chat_ids, card, summary, send, log):
+    groups = _deliver_all(account.tg_chat_ids, card, summary, send, log)
+    if groups:
         state.active = now_active
         if now_active:
             state.last_active_hour = latest
+        if not dry_run:
+            _record(card, groups, account.account, account.email)
 
 
 def _last_usage(account: Account, last_active: str, log) -> HourUsage | None:
@@ -868,6 +967,8 @@ def _check_quota(
     summary: RunSummary,
     send: Sender,
     log,
+    *,
+    dry_run: bool,
 ) -> None:
     if account.budget <= 0:
         return  # 没填额度，使用率无从谈起
@@ -901,8 +1002,9 @@ def _check_quota(
     recent = estimate_split(account, max(since, ce_end + timedelta(days=1)), utc_today)
     if recent.errors:
         # 缺了最近两天就会低估，低估的数去判阈值没意义，这一轮先不判
-        summary.problems.append(f"{account.account} 读不到 CloudWatch：{'；'.join(recent.errors)}")
-        log(f"[跳过额度判定] {account.account}：CW {'；'.join(recent.errors)}")
+        reason = "；".join(map(str, recent.errors))   # 同上：可能是 QueryError
+        summary.problems.append(f"{account.account} 读不到 CloudWatch：{reason}")
+        log(f"[跳过额度判定] {account.account}：CW {reason}")
         return
 
     spent = ce_tag * account.tag_ratio + ce_untag * account.untag_ratio + recent.marked(account)
@@ -914,8 +1016,11 @@ def _check_quota(
     # 一次跨过好几档（比如刚开启告警时已经 85%）只发最高那一档，别连着刷三条
     top = max(crossed)
     card = quota_card(account, top, pct, spent, status, since, recent.unpriced)
-    if _deliver_all(account.tg_chat_ids, card, summary, send, log):
+    groups = _deliver_all(account.tg_chat_ids, card, summary, send, log)
+    if groups:
         state.fired = sorted(set(state.fired) | set(crossed))
+        if not dry_run:
+            _record(card, groups, account.account, account.email)
 
 
 def run_hourly(
@@ -939,8 +1044,8 @@ def run_hourly(
     send = _dry_run_sender(log, save_dir) if dry_run else _send
     for account in targets:
         state = states.setdefault(account.account, AccountState())
-        _check_usage(account, state, hours, summary, send, log)
-        _check_quota(account, state, now, summary, send, log)
+        _check_usage(account, state, hours, summary, send, log, dry_run=dry_run)
+        _check_quota(account, state, now, summary, send, log, dry_run=dry_run)
         if not dry_run:
             save_state(states)  # 每个账号处理完就落盘，中途挂了也不会重发前面的
 

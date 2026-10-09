@@ -8,11 +8,13 @@ xlsx，登录口令也换成固定值（不依赖开发机上的 .env）。
 
 from __future__ import annotations
 
+import urllib.error
 import urllib.request
 from datetime import date
 
 import openpyxl
 import pytest
+from botocore.httpsession import URLLib3Session
 
 from bedrock_cost import auth, config, cost_explorer, create_app, excel_source, usage_explorer
 from bedrock_cost.cost_explorer import CostSplit
@@ -84,10 +86,14 @@ def write_ledger(path, header=None, rows=None) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_network(request, monkeypatch):
-    """兜底：哪个用例忘了替换发送口，也不能真的往 Telegram（或别处）发请求。
+    """兜底：哪个用例忘了替换发送口，也不能真的往 Telegram、AWS（或别处）发请求。
 
     Telegram 客户端和公开价目表都走 urllib。要看请求长什么样的用例自己再替换一次
     urlopen（见 test_alerts 的 http），后替换的生效；标了 integration 的本来就要联网。
+
+    AWS 走 botocore：在它真正发 HTTP 的那一步拦下来。Stubber 在发之前就给了回包，不受影响；
+    忘了 fake 的用例拿到的是一个立刻抛出的错（不是连接错误——那种 botocore 会退避重试好几次，
+    一条用例能拖几十秒，整套测试拖到四十多分钟）。
 
     开发机的 .env 里可能配着真的 Bot Token：测试里一律当没配，要发的用例自己设一个假的。
     """
@@ -98,13 +104,68 @@ def _no_network(request, monkeypatch):
     def refuse(target, *args, **kwargs):
         raise AssertionError(f"测试想联网：{getattr(target, 'full_url', target)}")
 
+    def refuse_aws(session, aws_request):
+        raise AssertionError(f"测试想连 AWS：{aws_request.method} {aws_request.url}")
+
     monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    monkeypatch.setattr(URLLib3Session, "send", refuse_aws)
+
+
+@pytest.fixture(autouse=True)
+def _no_price_fetch(request, tmp_path, monkeypatch):
+    """价目表：不读开发机项目根下那份 bedrock-prices.json，也不去拉 AWS 的公开价目表。
+
+    不然用例结果取决于那份副本新不新：过了 24 小时就会去拉，撞上上面的 urlopen 拦截，
+    AssertionError 不在 load_prices 认的那几种错误里，页面直接 500。这里改成拉不到——和真的
+    断网一样走「价目表拉不到」那条路。要单价的用例自己再替换 load_prices 或 fetch_offer。
+    """
+    from bedrock_cost import pricing
+
+    def offline():
+        raise urllib.error.URLError("测试里不拉价目表")
+
+    pricing.clear_cache()
+    if not request.node.get_closest_marker("integration"):
+        monkeypatch.setattr(pricing, "_cache_path", lambda: tmp_path / "bedrock-prices.json")
+        monkeypatch.setattr(pricing, "fetch_offer", offline)
+    yield
+    pricing.clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_caches():
+    """各模块按账号和日期缓存查询结果（模块级的字典），不清的话上一个用例的数会漏进下一个。"""
+    from bedrock_cost import (
+        activity,
+        cloudwatch_metrics,
+        cost_estimate,
+        dashboard,
+        ops_report,
+        quotas,
+    )
+
+    clears = (
+        cost_explorer.clear_cache, usage_explorer.clear_cache, cloudwatch_metrics.clear_cache,
+        cost_estimate.clear_cache, quotas.clear_cache, activity.clear_cache, dashboard.clear_cache,
+        ops_report.clear_cache,
+    )
+    for clear in clears:
+        clear()
+    yield
+    for clear in clears:
+        clear()
 
 
 @pytest.fixture(autouse=True)
 def _scratch_last_known(tmp_path, monkeypatch):
     """「上一次查到的数」写到临时目录：任何走到真 fetch_split 的用例都不能动项目目录里的文件。"""
     monkeypatch.setattr(config, "LAST_KNOWN_COSTS_PATH", tmp_path / "last-known-costs.json")
+
+
+@pytest.fixture(autouse=True)
+def _scratch_events(tmp_path, monkeypatch):
+    """告警事件流写到临时目录：用假的 _send「发出去」的告警照样会记一条，不能记进项目目录里的文件。"""
+    monkeypatch.setattr(config, "ALERT_EVENTS_PATH", tmp_path / "alert-events.jsonl")
 
 
 @pytest.fixture(autouse=True)

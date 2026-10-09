@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from bedrock_cost import alerts, cards, config, cost_explorer, excel_source, telegram
+from bedrock_cost import alerts, cards, config, cost_explorer, events, excel_source, telegram
 from bedrock_cost.alerts import AccountState, load_state, run_daily, run_hourly, save_state
 from bedrock_cost.cost_estimate import HourUsage, SplitEstimate
 from bedrock_cost.cost_explorer import CostSplit
@@ -1090,3 +1090,234 @@ class TestStaleNumbers:
         rows = {row.label: (row.value, row.tone) for row in card.blocks[1].rows}
         assert rows["停用前累计消费"] == ("$503.20（截至 09-28）", "warn")
         assert rows["停用前剩余额度"] == ("$496.80（截至 09-28）", "warn")
+
+
+class _Problem:
+    """数据层的错误对象（像 aws_errors.QueryError）：不是 str，str() 才是以前那一行字。"""
+
+    def __init__(self, text: str):
+        self.text = text
+
+    def __str__(self) -> str:
+        return self.text
+
+
+class TestErrorObjects:
+    def test_cloudwatch_errors_are_reported_by_their_text(self, ledger, state_file, cw, ce, sent, monkeypatch):
+        """CW 读不到时把原因拼进问题里：原因是对象也不能让整个小时任务崩掉。"""
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)}, BUDGET={ALPHA: 1000.0})
+        monkeypatch.setattr(
+            alerts, "hourly_invocations", lambda account, hours, regions=None: (None, [_Problem("us-east-1：限流")])
+        )
+        cw["recent_errors"] = [_Problem("us-west-2：被拒"), _Problem("us-east-2：超时")]
+        summary = run_hourly(NOW, log=quiet)
+        assert summary.problems == [
+            f"{ALPHA} 读不到 CloudWatch：us-east-1：限流",
+            f"{ALPHA} 读不到 CloudWatch：us-west-2：被拒；us-east-2：超时",
+        ]
+        assert sent == []
+
+
+# ================================================================== 账号邮箱
+ALPHA_MAIL = "alpha.root@example.com"
+
+
+def alpha():
+    """台账里的 ALPHA（先用 tg_ledger 写好台账）。"""
+    return next(a for a in excel_source.load_accounts(force=True) if a.account == ALPHA)
+
+
+class TestAccountEmail:
+    """台账填了账号邮箱：日报表格、用量切换、额度、账号变动的卡片和 caption 都跟上它（写全）。"""
+
+    def test_daily_table_and_caption(self, ledger, fake_costs, sent):
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A), BETA: (True, CHAT_A)}, EMAIL={ALPHA: ALPHA_MAIL})
+        run_daily(date(2026, 8, 17), log=quiet)
+        card = sent.cards[0][1]
+        first, second = card.blocks[0].rows
+        assert (first[0].text, first[0].note) == (ALPHA, ALPHA_MAIL)
+        assert (second[0].text, second[0].note) == (BETA, "")          # 没填邮箱的照旧
+        assert f"<code>{ALPHA}</code> · {ALPHA_MAIL} 累计消费" in card.caption
+        assert f"<code>{BETA}</code> 累计消费" in card.caption
+        assert ALPHA_MAIL in sent[0][1]                                 # dry-run 打印的文字里也有
+
+    def test_usage_and_quota_cards(self, ledger, state_file, cw, ce, sent):
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)}, BUDGET={ALPHA: 1000.0}, EMAIL={ALPHA: ALPHA_MAIL})
+        ce["values"][ALPHA] = (0.0, 500.0)                              # 第一轮就跨过 50%
+        cw["invocations"][ALPHA] = [0]
+        run_hourly(NOW, log=quiet)
+        cw["invocations"][ALPHA] = [42]
+        run_hourly(NOW + timedelta(hours=1), log=quiet)
+        assert [card.kind for _, card in sent.cards] == ["quota", "started"]
+        for _, card in sent.cards:
+            uid = card.blocks[0]
+            assert isinstance(uid, cards.Uid) and (uid.uid, uid.email) == (ALPHA, ALPHA_MAIL)
+            assert card.caption.splitlines()[0].endswith(f"<code>{ALPHA}</code> · {ALPHA_MAIL}")
+
+    def test_account_notices(self, ledger, sent):
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)}, EMAIL={ALPHA: ALPHA_MAIL})
+        alerts.notify_account("created", alpha(), now=NOW, log=quiet)
+        card = sent.cards[0][1]
+        assert (card.blocks[1].uid, card.blocks[1].email) == (ALPHA, ALPHA_MAIL)
+        assert f"<code>{ALPHA}</code> · {ALPHA_MAIL}" in card.caption
+
+    def test_the_bot_test_caption(self, monkeypatch):
+        """账号管理页的测试消息：卡片上照旧不放账号，caption 里号码后面跟上邮箱。"""
+        shown = []
+        monkeypatch.setattr(telegram, "send_photo", lambda chat, png, caption: shown.append(caption))
+        alerts.send_test(CHAT_A, ALPHA, ALPHA_MAIL)
+        alerts.send_test(CHAT_A, ALPHA)
+        assert f"<code>{ALPHA}</code> · {ALPHA_MAIL}\n" in shown[0]
+        assert f"<code>{ALPHA}</code>\n" in shown[1]
+
+
+# ================================================================== 告警事件流
+class TestEvents:
+    """发出去了（至少一个群）才记一条，同一张卡片发给几个群也只记一条；dry-run、全部失败都不记。"""
+
+    # ---- 日报：一次运行一条
+    def test_daily_is_one_event_per_run(self, ledger, fake_costs, sent):
+        tg_ledger(ledger, {ALPHA: (True, (CHAT_A, CHAT_B)), BETA: (True, CHAT_B)})
+        run_daily(date(2026, 8, 17), log=quiet)
+        assert len(sent) == 2
+        (event,) = events.recent()
+        assert (event.kind, event.title, event.tone, event.groups) == ("daily", "Bedrock 日报", "ok", 2)
+        assert (event.account, event.email) == ("", "")
+        assert event.text == "2026-08-17 的日报发到 2 个群，共 2 个账号"     # ALPHA 在两个群里，只算一次
+
+    def test_daily_problems_make_it_a_warning(self, ledger, sent, monkeypatch):
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A), BETA: (True, CHAT_A)})
+        monkeypatch.setattr(
+            cost_explorer, "fetch_all",
+            lambda accounts, ranges, refresh=False: {
+                accounts[0].key: CostSplit(error="AccessDenied"),
+                accounts[1].key: CostSplit(untag_raw=200000.0),          # × 1.10，超出额度 100,000
+            },
+        )
+        run_daily(date(2026, 8, 17), log=quiet)
+        (event,) = events.recent()
+        assert event.tone == "warn"
+        assert event.text == "2026-08-17 的日报发到 1 个群，共 2 个账号，1 个查询失败，1 个已超出额度"
+
+    def test_daily_counts_only_the_groups_it_reached(self, ledger, fake_costs, sent, monkeypatch):
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A), BETA: (True, CHAT_B)})
+        monkeypatch.setattr(alerts, "_send", failing("群组 ID 不对", only=CHAT_B, then=sent.send))
+        run_daily(date(2026, 8, 17), log=quiet)
+        (event,) = events.recent()
+        assert (event.groups, event.tone) == (1, "warn")
+        assert event.text == "2026-08-17 的日报发到 1 个群，共 1 个账号，1 个群没发出去"
+
+    def test_daily_that_reached_nobody_is_not_recorded(self, ledger, fake_costs, monkeypatch):
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
+        monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "t")
+        monkeypatch.setattr(alerts, "_send", failing("连不上 Telegram"))
+        run_daily(date(2026, 8, 17), log=quiet)
+        assert events.recent() == []
+
+    def test_daily_dry_run_is_not_recorded(self, ledger, fake_costs, sent):
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
+        summary = run_daily(date(2026, 8, 17), dry_run=True, log=quiet)
+        assert summary.sent == 1
+        assert not config.ALERT_EVENTS_PATH.exists()
+
+    # ---- 小时任务：一张卡片一条
+    def test_usage_switches_are_recorded_once_for_all_groups(self, ledger, state_file, cw, ce, sent):
+        tg_ledger(ledger, {ALPHA: (True, (CHAT_A, CHAT_B))}, EMAIL={ALPHA: ALPHA_MAIL})
+        for hour, calls in enumerate([0, 42, 0]):     # 基线 → 用量开始 → 用量中断
+            cw["invocations"][ALPHA] = [calls]
+            run_hourly(NOW + timedelta(hours=hour), log=quiet)
+        assert len(sent) == 4                         # 两张卡片，各发两个群
+        stopped, started = events.recent()            # 新的在前
+        assert (started.kind, started.title, started.tone, started.groups) == ("started", "用量开始", "ok", 2)
+        assert (stopped.kind, stopped.title, stopped.tone, stopped.groups) == ("stopped", "用量中断", "error", 2)
+        assert started.text.endswith("这一小时调用 42 次")
+        assert stopped.text.endswith("这一小时没有任何调用")
+        for event in (started, stopped):
+            assert (event.account, event.email) == (ALPHA, ALPHA_MAIL)
+            assert "<" not in event.text              # 纯文本，不带 caption 的 HTML
+
+    def test_quota_is_recorded(self, ledger, state_file, cw, ce, sent):
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)}, BUDGET={ALPHA: 1000.0})
+        cw["invocations"][ALPHA] = [1]
+        ce["values"][ALPHA] = (0.0, 500.0)            # × 1.05 = 52.5%
+        run_hourly(NOW, log=quiet)
+        (event,) = events.recent()
+        assert (event.kind, event.title, event.tone, event.groups) == ("quota", "额度预警", "warn", 1)
+        assert (event.account, event.email) == (ALPHA, "")
+        assert event.text == "额度已用 52.5%，超过 50% 提醒线"
+
+    def test_a_partly_failed_send_counts_the_groups_reached(self, ledger, state_file, cw, ce, sent, monkeypatch):
+        tg_ledger(ledger, {ALPHA: (True, (CHAT_A, CHAT_B))})
+        monkeypatch.setattr(alerts, "_send", failing("bot 已经被移出这个群了", only=CHAT_B, then=sent.send))
+        cw["invocations"][ALPHA] = [0]
+        run_hourly(NOW, log=quiet)
+        cw["invocations"][ALPHA] = [42]
+        run_hourly(NOW + timedelta(hours=1), log=quiet)
+        (event,) = events.recent()
+        assert (event.kind, event.groups) == ("started", 1)
+
+    def test_nothing_is_recorded_when_every_group_fails(self, ledger, state_file, cw, ce, sent, monkeypatch):
+        tg_ledger(ledger, {ALPHA: (True, (CHAT_A, CHAT_B))})
+        cw["invocations"][ALPHA] = [0]
+        run_hourly(NOW, log=quiet)
+        monkeypatch.setattr(alerts, "_send", failing("连不上 Telegram"))
+        cw["invocations"][ALPHA] = [42]
+        run_hourly(NOW + timedelta(hours=1), log=quiet)
+        assert events.recent() == []
+
+    def test_hourly_dry_run_is_not_recorded(self, ledger, state_file, cw, ce, sent):
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)}, BUDGET={ALPHA: 1000.0})
+        cw["invocations"][ALPHA] = [1]
+        ce["values"][ALPHA] = (0.0, 500.0)
+        summary = run_hourly(NOW, dry_run=True, log=quiet)
+        assert summary.sent == 1                      # dry-run 照样「发」了那张额度卡片
+        assert not config.ALERT_EVENTS_PATH.exists()
+
+    # ---- 账号变动、测试消息
+    def test_account_notices_are_recorded(self, ledger, sent):
+        tg_ledger(ledger, {ALPHA: (True, (CHAT_A, CHAT_B))}, EMAIL={ALPHA: ALPHA_MAIL})
+        alerts.notify_account("created", alpha(), now=NOW, log=quiet)
+        (event,) = events.recent()
+        assert (event.kind, event.title, event.tone, event.groups) == ("created", "新账号启用", "ok", 2)
+        assert (event.account, event.email) == (ALPHA, ALPHA_MAIL)
+        assert event.text.startswith("授信额度 $500,000.00 · 启用时间 ")
+
+    def test_an_undelivered_notice_is_not_recorded(self, ledger):
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
+        summary = alerts.notify_account("created", alpha(), log=quiet)   # 没配 Token
+        assert not summary.ok and events.recent() == []
+
+    def test_the_bot_test_is_recorded(self, monkeypatch):
+        monkeypatch.setattr(telegram, "send_photo", lambda chat, png, caption: None)
+        assert alerts.send_test(CHAT_A, ALPHA, ALPHA_MAIL) == ""
+        (event,) = events.recent()
+        assert (event.kind, event.title, event.tone, event.groups) == ("test", "测试消息", "info", 1)
+        assert (event.account, event.email) == (ALPHA, ALPHA_MAIL)
+        assert event.text == "Telegram Bot 运行正常，测试消息已成功触发。"
+
+    def test_a_failed_bot_test_is_not_recorded(self, monkeypatch):
+        def down(chat, png, caption):
+            raise TelegramError("连不上 Telegram")
+
+        monkeypatch.setattr(telegram, "send_photo", down)
+        with pytest.raises(TelegramError):
+            alerts.send_test(CHAT_A, ALPHA)
+        assert events.recent() == []
+
+    # ---- 记不下来
+    def test_a_broken_event_log_never_fails_the_alert(
+        self, ledger, state_file, cw, ce, sent, monkeypatch, tmp_path, caplog
+    ):
+        """告警已经发出去了：流水写不进去只记一条日志，不算问题、状态照样前进（不然下一小时会重发）。"""
+        folder = tmp_path / "not-a-file"
+        folder.mkdir()
+        monkeypatch.setattr(config, "ALERT_EVENTS_PATH", folder)
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
+        cw["invocations"][ALPHA] = [0]
+        run_hourly(NOW, log=quiet)
+        cw["invocations"][ALPHA] = [42]
+        with caplog.at_level("WARNING", logger="bedrock_cost.events"):
+            summary = run_hourly(NOW + timedelta(hours=1), log=quiet)
+        assert summary.ok and summary.sent == 1
+        assert load_state()[ALPHA].active is True
+        assert "告警事件没有记下来" in caplog.text

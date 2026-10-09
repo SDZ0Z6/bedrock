@@ -1,11 +1,14 @@
 {# 登录后所有页面的外壳：左侧导航 + 右侧内容区 #}
 {% extends "base.html" %}
+{% from "_macros.html" import avatar %}
 {% block body_class %}app{% endblock %}
 
 {# 点导航时盖在旧页面上的等待文案。写的是**目标页**在等什么——点的时候
    当前页还不知道要去哪，所以文案挂在链接上，由下面的宏按 key 查表带出去。 #}
 {% set LOADING_HINTS = {
      'overview':       ('正在查 Cost Explorer', ''),
+     'account':        ('正在读这个账号', ''),
+     'ops':            ('正在汇总各账号的数', '第一次要查 Cost Explorer 和 CloudWatch，十几秒'),
      'cost_usage':     ('正在查各维度消费', ''),
      'model_usage':    ('正在拉 CloudWatch 指标', ''),
      'model_quota':    ('正在拉四个区的配额', '首次约 45 秒，Service Quotas 限流；之后走缓存'),
@@ -25,16 +28,47 @@
   </a>
 {%- endmacro %}
 
+{# 一条弹窗。tone 是 error / warn / ok / info（flash 的类别名和它一致）。
+   title 是粗体的一句话，sub 跟在它后面说是哪个账号哪个区；text 是一句人话的原因；
+   detail 是原始报错，和发生的时间一起收在「查看详情」后面。 #}
+{% macro toast(tone, title, sub='', text='', detail='', index=0) -%}
+  {%- set tone = tone if tone in ('error', 'warn', 'ok', 'info') else 'info' -%}
+  <div class="toast toast-{{ tone }}" role="{{ 'alert' if tone == 'error' else 'status' }}"
+       {% if tone in ('ok', 'info') %}data-auto{% endif %}>
+    <span class="toast-icon" aria-hidden="true"><svg viewBox="0 0 18 18">
+      <circle cx="9" cy="9" r="7.25"/>
+      {%- if tone == 'ok' %}<path d="m5.8 9.2 2.2 2.2 4.2-4.6"/>
+      {%- elif tone == 'info' %}<path d="M9 8.2v4.3M9 5.6v.2"/>
+      {%- else %}<path d="M9 5.2v4.6M9 12.4v.2"/>{% endif -%}
+    </svg></span>
+    <div class="toast-body">
+      <p class="toast-head"><span class="toast-title">{{ title }}</span>
+        {%- if sub %}<span class="toast-sub">{{ sub }}</span>{% endif %}</p>
+      {% if text %}<p class="toast-text">{{ text }}</p>{% endif %}
+      {% if detail %}
+        <div class="toast-actions">
+          <button type="button" data-toast-detail aria-expanded="false"
+                  aria-controls="toast-detail-{{ index }}">查看详情</button>
+        </div>
+        <div class="toast-detail" id="toast-detail-{{ index }}" hidden>
+          <p class="toast-time">{{ toast_time }}</p>
+          <pre>{{ detail }}</pre>
+        </div>
+      {% endif %}
+    </div>
+    <button class="toast-x" type="button" aria-label="关闭这条提示" title="关闭">×</button>
+  </div>
+{%- endmacro %}
+
 {% block body %}
 <div class="shell">
   <aside class="sidebar">
     <div class="side-head">
       <div class="side-brand">
-        {# 小尺寸用的是只截侧脸的那一版，整幅缩到 24px 会糊成彩点，
-           见 tools/make_logo_assets.py #}
-        <img class="mark" src="{{ url_for('static', filename='logo-mark.png') }}"
-             alt="" width="96" height="96" decoding="async">
-        <span class="side-brand-text">Bedrock<br>成本监控</span>
+        {# Claude 的像素小吉祥物（和等待动效、登录页插画里是同一只），见 tools/make_mascot_assets.py #}
+        <img class="mark" src="{{ url_for('static', filename='mascot.svg') }}"
+             alt="" width="30" height="24" decoding="async">
+        <span class="side-brand-text">Bedrock 成本监控</span>
       </div>
       <button class="side-toggle" type="button" aria-expanded="true" aria-label="收起侧边栏">
         <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -44,33 +78,27 @@
       </button>
     </div>
 
+    {# 四个入口：概览看全部账号的卡片；运营看板看收入、毛利、风险和用量；「账号」是某一个
+       账号的页面（摘要、成本、用量、配额、预估五个页签），点进去是上次看的那个账号；
+       账号管理改台账。 #}
     <nav class="side-nav">
       {{ nav_item('main.index', 'overview', '概览',
          '<rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1"/>
           <rect x="9" y="1.5" width="5.5" height="5.5" rx="1"/>
           <rect x="1.5" y="9" width="5.5" height="5.5" rx="1"/>
           <rect x="9" y="9" width="5.5" height="5.5" rx="1"/>') }}
-      {{ nav_item('main.cost_usage', 'cost_usage', '成本和使用情况',
-         '<rect x="1.5" y="8" width="3" height="6.5" rx="1"/>
-          <rect x="6.5" y="4.5" width="3" height="10" rx="1"/>
-          <rect x="11.5" y="1.5" width="3" height="13" rx="1"/>') }}
-      {{ nav_item('main.model_usage', 'model_usage', '模型用量',
-         '<path d="M1.5 11.5 5 7l3 2.5 3.5-6 2.5 3.5" fill="none"
-                stroke="currentColor" stroke-width="1.6"
-                stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M1.5 14.5h13" fill="none" stroke="currentColor"
-                stroke-width="1.6" stroke-linecap="round"/>') }}
-      {{ nav_item('main.model_quota', 'model_quota', '模型配额',
-         '<rect x="1.5" y="3" width="13" height="3" rx="1.5"/>
-          <rect x="1.5" y="8" width="8" height="3" rx="1.5"/>
-          <path d="M1.5 13.5h13" fill="none" stroke="currentColor" stroke-width="1.4"
-                stroke-linecap="round" stroke-dasharray="2 2"/>') }}
-      {{ nav_item('main.estimate', 'cost_estimate', '预估成本',
-         '<path d="M8 1.5v13" fill="none" stroke="currentColor" stroke-width="1.5"
-                stroke-linecap="round"/>
-          <path d="M11 4.5H6.5a2 2 0 0 0 0 4h3a2 2 0 0 1 0 4H5" fill="none"
-                stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                stroke-linejoin="round"/>') }}
+      {# 运营看板先下线：.env 里 OPS_DASHBOARD=1 才有这个入口（见 config.py） #}
+      {% if config.OPS_DASHBOARD %}
+      {{ nav_item('ops.index', 'ops', '运营看板',
+         '<path d="M2 13.5h12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M4.5 11V8M8 11V4.5M11.5 11V6.5" fill="none" stroke="currentColor" stroke-width="1.8"
+                stroke-linecap="round"/>') }}
+      {% endif %}
+      {{ nav_item('account.home', 'account', '账号',
+         '<rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="6" cy="7" r="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          <path d="M3.8 11.2c.4-1.2 1.2-1.8 2.2-1.8s1.8.6 2.2 1.8M9.8 6.5h3M9.8 9h2.2" fill="none"
+                stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>') }}
       {{ nav_item('accounts.index', 'accounts', '账号管理',
          '<circle cx="8" cy="5.5" r="2.75" fill="none" stroke="currentColor" stroke-width="1.5"/>
           <path d="M2.5 14c0-2.9 2.5-4.75 5.5-4.75s5.5 1.85 5.5 4.75" fill="none"
@@ -95,23 +123,42 @@
   </aside>
 
   <main class="content">
+    {% block page_header %}
     <header class="page-head">
-      <h1>{% block page_title %}{% endblock %}</h1>
+      <div>
+        <h1>{% block page_title %}{% endblock %}</h1>
+        <p class="page-sub">{% block page_sub %}{% endblock %}</p>
+      </div>
       <div class="page-actions">{% block page_actions %}{% endblock %}</div>
     </header>
+    {% endblock %}
 
-    {% with messages = get_flashed_messages(with_categories=true) %}
-      {% for category, message in messages %}
-        <div class="alert alert-{{ category }}">{{ message }}</div>
-      {% endfor %}
-    {% endwith %}
-
+    {# 口径说明：告诉人「这个数要这么读」，不是出错，所以留在页面上，样式压得很轻 #}
     {% for note in notes %}
-      <div class="alert alert-warn">{{ note }}</div>
+      <p class="note">{{ note }}</p>
     {% endfor %}
 
     {% block content %}{% endblock %}
   </main>
+
+  {# 右上角弹窗：报错（各页面的 toasts）和操作结果（flash）。放在 .content 之外，
+     否则加载时会被 .content.is-loading 一起压暗。报错一直留着直到手动关；
+     操作结果几秒后自己消失（data-auto）。没开 JS 时关不掉，但照样看得见。 #}
+  <div class="toast-stack" id="toasts">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        {{ toast(category, message) }}
+      {% endfor %}
+    {% endwith %}
+    {% for item in toasts or [] %}
+      {{ toast(item.tone, item.title, item.sub, item.text, item.detail, loop.index) }}
+    {% endfor %}
+  </div>
+  {# 页面脚本里用 fetch 做完的操作（比如表格里改生命周期）也从右上角说结果：
+     app.js 的 appToast 照着这几个模板克隆一条 #}
+  {% for tone in ('ok', 'info', 'warn', 'error') %}
+    <template data-toast-template="{{ tone }}">{{ toast(tone, '') }}</template>
+  {% endfor %}
 
   {# 等待动效。全站是服务端同步渲染，点链接 / 改筛选之后旧页面会一直留在屏幕
      上直到新页面回来，所以「加载中」就盖在旧页面上。放在 .content 之外，
@@ -214,15 +261,18 @@
     show(link.dataset.loading, link.dataset.loadingNote);
   }, true);
 
-  // 表单提交（账号管理的 POST 等）
+  // 表单提交（账号管理的 POST 等）。挂在冒泡阶段：表单自己的脚本先跑，它拦下来改用
+  // fetch（或者「点两下才删」的第一下）时 defaultPrevented 已经是真的，这里就不盖了
   document.addEventListener('submit', function (event) {
     if (event.defaultPrevented) return;
     show(event.target.dataset.loading, event.target.dataset.loadingNote);
-  }, true);
+  });
 
   // 筛选表单：改动即提交。form.submit() 不触发 submit 事件，所以手动盖。
   for (const form of document.querySelectorAll('form.filters-auto')) {
     for (const field of form.querySelectorAll('select, input')) {
+      // 时间范围下拉里的自定义起止要两个都填完，点「应用」才提交
+      if (field.closest('[data-range-picker]')) continue;
       field.addEventListener('change', function () {
         if (pending) return;
         show();
@@ -235,4 +285,7 @@
   window.addEventListener('pageshow', function (event) { if (event.persisted) hide(); });
 })();
 </script>
+
+{# 弹窗、账号选择器、柱状图提示这些几个页面共用的交互 #}
+<script src="{{ url_for('static', filename='app.js') }}"></script>
 {% endblock %}

@@ -1,45 +1,58 @@
-"""页面路由：概览 + 成本和使用情况。"""
+"""页面路由：概览，以及老网址的跳转。
+
+一个账号的成本、用量、配额、预估在账号页里（account_pages.py），运营看板在 ops.py。
+"""
 
 from __future__ import annotations
 
 from datetime import date, datetime
 
-from flask import Blueprint, flash, redirect, render_template, request, url_for
+from flask import Blueprint, flash, redirect, render_template, request, session, url_for
 
 from . import (
+    activity,
     chart,
     cloudwatch_metrics,
     config,
     cost_estimate,
     cost_explorer,
+    dashboard,
+    ops_report,
     quotas,
     usage_explorer,
 )
 from .auth import login_required
-from .dates import detect_preset, earliest_queryable, resolve_range
-from .excel_source import Account, ExcelSourceError, load_accounts
+from .dates import earliest_queryable
+from .excel_source import ExcelSourceError, load_accounts, load_lifecycle
 from .report import build_report
-from .windows import PERIODS, WINDOWS, detect_window, resolve_window
 
 bp = Blueprint("main", __name__)
 
-# 超过这个天数还按日画，柱子会挤成一团，提示用户切按月
-DENSE_DAY_LIMIT = 120
-
 
 def page_meta() -> dict:
-    """两个页面页脚共用的说明信息。"""
+    """各页面页脚共用的说明信息。"""
     return {
         "cost_metric": config.COST_METRIC,
         "service_scope": (
             "、".join(config.SERVICE_FILTER) if config.SERVICE_FILTER else "账号全部服务"
         ),
         "cache_ttl_minutes": round(config.CACHE_TTL / 60, 1),
+        # 页脚上的「缓存 15 分钟」：整分钟就写分钟，否则写秒，不写成 15.0
+        "cache_label": (f"{config.CACHE_TTL // 60} 分钟" if config.CACHE_TTL % 60 == 0
+                        else f"{config.CACHE_TTL} 秒"),
         "excel_name": config.EXCEL_PATH.name,
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "generated_at": datetime.now().strftime("%m-%d %H:%M"),
     }
 
 
+def tz_name() -> str:
+    """本机时区写成 UTC+08:00。Windows 上 tzname() 会给出「Malay Peninsula Standard
+    Time」这种长名字，放在标签里太占地方也不够明确。"""
+    offset = datetime.now().astimezone().strftime("%z")
+    return f"UTC{offset[:3]}:{offset[3:]}" if len(offset) == 5 else "本机时区"
+
+
+# --------------------------------------------------------------- 概览
 @bp.route("/")
 @login_required
 def index():
@@ -48,6 +61,7 @@ def index():
     today = date.today()
     refresh = request.args.get("refresh") == "1"
     notes: list[str] = []
+    toasts: list[dashboard.Toast] = []
 
     report = None
     fatal = None
@@ -58,11 +72,46 @@ def index():
     except Exception as exc:  # 兜底，避免整页 500
         fatal = f"{type(exc).__name__}: {exc}"
 
-    if report and report.incomplete_rows:
-        notes.append(
-            f"{len(report.incomplete_rows)} 个账号的累计区间不完整（未填启用日期，"
-            "或启用日期早于 Cost Explorer 的保留期），这些行的余额偏高，表格里已标出。"
+    context: dict = {}
+    if report:
+        accounts = load_accounts()
+        tags = load_lifecycle()
+        by_row = {(a.account, a.row): a for a in accounts}
+        states = activity.activities(accounts, refresh=refresh)
+        cards = []
+        for order, row in enumerate(report.rows):
+            account = by_row.get((row.account, row.row_number))
+            if account is not None:
+                cards.append(dashboard.CardRow(row, account, states[account.key], order, today))
+        cards.sort(key=lambda card: (dashboard.risk_rank(card), -(card.usage_pct or -1)))
+        report.rows = cards
+
+        slots = dashboard.account_slots(cards)
+        trend = dashboard.cost_trend(accounts, today, slots, refresh=refresh)
+        pct = report.total_usage_pct
+        context = dict(
+            lifecycle_counts=dashboard.lifecycle_counts(cards, tags),
+            state_counts=dashboard.state_counts(cards),
+            lifecycle_colors={tag.name: tag.hex for tag in tags},
+            gauge=chart.render_gauge(None if pct is None else pct / 100, report.total_level),
+            trend=trend,
+            share=dashboard.spend_share(cards, slots),
+            near_limit=dashboard.near_limit(cards),
+            activity_days=activity.LOOKBACK_DAYS,
         )
+        failed = [card for card in cards if card.error]
+        toasts += _ce_toasts(failed)
+        # 每天成本那张图另外查一遍 CE；累计已经失败的账号不重复报
+        known = {card.account for card in failed}
+        extra = [e for e in trend.errors if dashboard._parts(e)[0] not in known]
+        toasts += dashboard.account_toasts(extra, accounts, "查不到每天的成本")
+        cw_errors = [e for state in states.values() if state.kind == "unknown" for e in state.errors]
+        toasts += dashboard.account_toasts(cw_errors, accounts, "读不到 CloudWatch")
+        if report.incomplete_rows:
+            notes.append(
+                f"{len(report.incomplete_rows)} 个账号的累计区间不完整（未填启用日期，"
+                "或启用日期早于 Cost Explorer 的保留期），这些卡片的余额偏高，卡片上已标出。"
+            )
 
     return render_template(
         "index.html",
@@ -70,228 +119,79 @@ def index():
         report=report,
         fatal=fatal,
         notes=notes,
+        toasts=toasts,
         today=today,
         earliest=earliest_queryable(today),
         tag_key=config.TAG_KEY,
+        **context,
         **page_meta(),
     )
 
 
-def _select_accounts(
-    accounts: list[Account], requested: str, notes: list[str]
-) -> tuple[str, list[Account]]:
-    """校验账号参数，返回 (最终选中值, 参与查询的账号)。"""
-    selected = (requested or "all").strip()
-    known = {account.key for account in accounts}
-    if selected != "all" and selected not in known:
-        if selected:
-            notes.append("所选账号已不在台账中，已切回「全部账号」。")
-        selected = "all"
-    if selected == "all":
-        return selected, accounts
-    return selected, [a for a in accounts if a.key == selected]
+def _ce_toasts(failed) -> list[dashboard.Toast]:
+    """概览上 Cost Explorer 查询失败的账号：原因相同的合成一条。"""
+    groups: dict[str, list] = {}
+    for card in failed:
+        groups.setdefault(card.issue, []).append(card)
+    toasts = []
+    for reason, cards in groups.items():
+        stale = sum(1 for card in cards if card.stale_as_of)
+        text = reason + ("。卡片上已标出，有上一次数据的照常显示" if stale else "。卡片上已标出")
+        if len(cards) == 1:
+            title, sub = "查不到 Cost Explorer", f"{cards[0].label} · {cards[0].account}"
+        else:
+            title, sub = f"{len(cards)} 个账号查不到 Cost Explorer", ""
+        detail = "\n".join(f"{card.label} · {card.account}：{card.error_detail}" for card in cards)
+        toasts.append(dashboard.Toast("error", title, sub, text, detail))
+    return toasts
+
+
+# --------------------------------------------------------------- 老网址
+# 原来的四个查询页现在是账号页的四个页签。收藏夹里的老网址照样能用：跳到「最近看的
+# 那个账号」的对应页签，查询参数原样带过去（老网址上的 account=号码#行号 也认）。
+def _legacy(tab_endpoint: str):
+    from .account_pages import SESSION_KEY, remembered
+
+    try:
+        accounts = load_accounts(include_disabled=True)
+    except ExcelSourceError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("main.index"))
+    params = request.args.to_dict()
+    key = params.pop("account", "")
+    # 其余参数原样带过去，但不能撞上 url_for 自己的参数：账号页路由的 number，
+    # 还有 _anchor / _external 这类下划线开头的（不然手搓一个参数就能让这一跳 500）
+    params = {name: value for name, value in params.items() if name != "number" and not name.startswith("_")}
+    number = key.rpartition("#")[0] or key
+    account = next((a for a in accounts if a.account == number), None) or remembered(accounts)
+    if account is None:
+        return redirect(url_for("main.index"))
+    session[SESSION_KEY] = account.account
+    return redirect(url_for(tab_endpoint, number=account.account, **params))
 
 
 @bp.route("/cost-usage")
 @login_required
 def cost_usage():
-    today = date.today()
-    start, end, notes = resolve_range(request.args, today)
-    refresh = request.args.get("refresh") == "1"
-
-    dimension = (request.args.get("dim") or "service").strip()
-    if dimension not in usage_explorer.DIMENSIONS:
-        dimension = "service"
-    granularity = (request.args.get("granularity") or "daily").strip()
-    if granularity not in usage_explorer.GRANULARITIES:
-        granularity = "daily"
-
-    accounts: list[Account] = []
-    fatal = None
-    try:
-        accounts = load_accounts(force=refresh)
-    except ExcelSourceError as exc:
-        fatal = str(exc)
-    except Exception as exc:
-        fatal = f"{type(exc).__name__}: {exc}"
-
-    selected, chosen = _select_accounts(accounts, request.args.get("account", ""), notes)
-
-    span_days = (end - start).days + 1
-    if granularity == "daily" and span_days > DENSE_DAY_LIMIT:
-        notes.append(
-            f"当前区间有 {span_days} 天，按日的柱子会很密，可以把粒度切成「按月」。"
-        )
-
-    report = usage_explorer.UsageReport(
-        start=start, end=end, dimension=dimension, granularity=granularity
-    )
-    if not fatal:
-        try:
-            report = usage_explorer.build_usage(
-                chosen, start, end, dimension, granularity, refresh=refresh
-            )
-        except Exception as exc:
-            fatal = f"{type(exc).__name__}: {exc}"
-
-    rendered = chart.render_stacked_areas(report, config.CURRENCY_SYMBOL)
-    bucket_count = len(report.dates) or 1
-
-    return render_template(
-        "cost_usage.html",
-        active_page="cost_usage",
-        report=report,
-        chart=rendered,
-        fatal=fatal,
-        notes=notes,
-        start=start,
-        end=end,
-        today=today,
-        accounts=accounts,
-        selected_account=selected,
-        dimension=dimension,
-        granularity=granularity,
-        dimensions=usage_explorer.DIMENSIONS,
-        granularities=usage_explorer.GRANULARITIES,
-        bucket_average=report.total_marked / bucket_count,
-        active_preset=detect_preset(start, end, today),
-        **page_meta(),
-    )
+    return _legacy("account.cost")
 
 
-# --------------------------------------------------------------- 模型用量（CloudWatch）
 @bp.route("/model-usage")
 @login_required
 def model_usage():
-    window, notes = resolve_window(request.args)
-    refresh = request.args.get("refresh") == "1"
-
-    metric_key = (request.args.get("metric") or cloudwatch_metrics.DEFAULT_METRIC).strip()
-    if metric_key not in cloudwatch_metrics.METRICS:
-        metric_key = cloudwatch_metrics.DEFAULT_METRIC
-    tag_filter = (request.args.get("tags") or cloudwatch_metrics.DEFAULT_TAG_FILTER).strip()
-    if tag_filter not in cloudwatch_metrics.TAG_FILTERS:
-        tag_filter = cloudwatch_metrics.DEFAULT_TAG_FILTER
-
-    # 区域不再是筛选项：四个美国区各画一张小图（2×2），一次全查
-    picked_regions = list(cloudwatch_metrics.DEFAULT_REGIONS)
-
-    accounts: list[Account] = []
-    fatal = None
-    try:
-        accounts = load_accounts(force=refresh)
-    except ExcelSourceError as exc:
-        fatal = str(exc)
-    except Exception as exc:
-        fatal = f"{type(exc).__name__}: {exc}"
-
-    selected, chosen = _select_accounts(accounts, request.args.get("account", ""), notes)
-
-    report = cloudwatch_metrics.UsageMetricsReport(
-        window=window, metric_key=metric_key, tag_filter=tag_filter, regions=picked_regions
-    )
-    if not fatal:
-        try:
-            report = cloudwatch_metrics.build_metrics(
-                chosen, picked_regions, window, metric_key, tag_filter, refresh=refresh
-            )
-        except Exception as exc:
-            fatal = f"{type(exc).__name__}: {exc}"
-
-    if not fatal and not report.tags_resolved:
-        notes.append(
-            "读不到推理配置上的标签（缺 bedrock:ListTagsForResource 权限？），"
-            "所有流量都会被当成「无标签」，标签筛选此时不可信。"
-        )
-
-    panels = chart.render_small_multiples(report)
-
-    # Windows 上 tzname() 会给出「Malay Peninsula Standard Time」这种长名字，
-    # 放在标签里太占地方也不够明确，改用 UTC 偏移。
-    offset = datetime.now().astimezone().strftime("%z")
-    tz_name = f"UTC{offset[:3]}:{offset[3:]}" if len(offset) == 5 else "本机时区"
-
-    return render_template(
-        "model_usage.html",
-        active_page="model_usage",
-        report=report,
-        panels=panels,
-        fatal=fatal,
-        notes=notes,
-        window=window,
-        accounts=accounts,
-        selected_account=selected,
-        regions=cloudwatch_metrics.REGIONS,
-        metrics=cloudwatch_metrics.METRICS,
-        metric_key=metric_key,
-        tag_filters=cloudwatch_metrics.TAG_FILTERS,
-        tag_filter=tag_filter,
-        periods=PERIODS,
-        windows=WINDOWS,
-        active_window=detect_window(window),
-        local_start=window.start.astimezone().strftime("%Y-%m-%dT%H:%M"),
-        local_end=window.end.astimezone().strftime("%Y-%m-%dT%H:%M"),
-        tz_name=tz_name,
-        **page_meta(),
-    )
+    return _legacy("account.usage")
 
 
-# --------------------------------------------------------------- 预估成本
+@bp.route("/model-quota")
+@login_required
+def model_quota():
+    return _legacy("account.quota")
+
+
 @bp.route("/cost-estimate")
 @login_required
 def estimate():
-    """CloudWatch token 量 × AWS 牌价。用来补 Cost Explorer 那一两天的延迟。"""
-    today = date.today()
-    start, end, notes = resolve_range(request.args, today)
-    refresh = request.args.get("refresh") == "1"
-
-    accounts: list[Account] = []
-    fatal = None
-    try:
-        accounts = load_accounts(force=refresh)
-    except ExcelSourceError as exc:
-        fatal = str(exc)
-    except Exception as exc:
-        fatal = f"{type(exc).__name__}: {exc}"
-
-    selected, chosen = _select_accounts(accounts, request.args.get("account", ""), notes)
-
-    report = cost_estimate.EstimateReport(start=start, end=end)
-    if not fatal:
-        try:
-            report = cost_estimate.build_estimate(chosen, start, end, refresh=refresh)
-        except Exception as exc:
-            fatal = f"{type(exc).__name__}: {exc}"
-
-    if report.price_stale:
-        notes.append(
-            "拉不到最新的 AWS 价目表，用的是本地缓存副本"
-            f"（{report.price_error}）。单价可能已经过时。"
-        )
-    if report.unpriced:
-        notes.append(
-            "这些模型在 AWS 价目表里没有对应条目，**没有计入**估算总额："
-            + "、".join(report.unpriced)
-            + "。多半是刚发布的新模型，等 AWS 更新价目表即可。"
-        )
-
-    return render_template(
-        "cost_estimate.html",
-        active_page="cost_estimate",
-        report=report,
-        chart=chart.render_stacked_areas(report, config.CURRENCY_SYMBOL),
-        fatal=fatal,
-        notes=notes,
-        start=start,
-        end=end,
-        today=today,
-        accounts=accounts,
-        selected_account=selected,
-        kinds=cost_estimate.KIND_ORDER,
-        kind_labels=cost_estimate.KIND_LABELS,
-        active_preset=detect_preset(start, end, today),
-        **page_meta(),
-    )
+    return _legacy("account.estimate")
 
 
 @bp.route("/cache/clear")
@@ -302,72 +202,8 @@ def clear_cache():
     cost_estimate.clear_cache()
     cloudwatch_metrics.clear_cache()
     quotas.clear_cache()
+    activity.clear_cache()
+    dashboard.clear_cache()
+    ops_report.clear_cache()
     flash("已清空缓存，下一次查询会重新调用 Cost Explorer 和 CloudWatch。", "ok")
     return redirect(request.referrer or url_for("main.index"))
-
-
-# --------------------------------------------------------------- 模型配额
-@bp.route("/model-quota")
-@login_required
-def model_quota():
-    refresh = request.args.get("refresh") == "1"
-    notes: list[str] = []
-
-    accounts: list[Account] = []
-    fatal = None
-    try:
-        accounts = load_accounts(force=refresh)
-    except ExcelSourceError as exc:
-        fatal = str(exc)
-    except Exception as exc:
-        fatal = f"{type(exc).__name__}: {exc}"
-
-    # 「全部账号」在这一页是安全的：表格逐行列 ARN，不做任何跨账号汇总。
-    # （早先禁掉它是怕求和/求平均把一个快满的账号藏起来，那对逐行清单不成立。）
-    chosen: list[Account] = []
-    selected = (request.args.get("account") or "all").strip()
-    if accounts:
-        by_key = {a.key: a for a in accounts}
-        if selected != "all" and selected not in by_key:
-            notes.append("所选账号已不在台账中，已切回全部账号。")
-            selected = "all"
-        chosen = accounts if selected == "all" else [by_key[selected]]
-
-    model = (request.args.get("model") or "").strip()
-    region = (request.args.get("region") or "").strip()
-    if region and region not in quotas.QUOTA_REGIONS:
-        notes.append("区域参数无效，已取消区域筛选。")
-        region = ""
-
-    report = quotas.QuotaReport()
-    if not fatal:
-        try:
-            report = quotas.build_quota_report(chosen, refresh=refresh)
-        except Exception as exc:
-            fatal = f"{type(exc).__name__}: {exc}"
-
-    # 切换账号后原来选的模型可能就不在范围里了，这时空着一张表很莫名，
-    # 直接取消筛选并说一声，比让人自己发现要好
-    if model and model not in report.model_options:
-        notes.append(f"「{model}」不在当前账号范围内，已取消模型筛选。")
-        model = ""
-    report.apply_filters(model=model, region=region)
-
-    if report.error:
-        notes.append(f"读不到 Service Quotas：{report.error}")
-
-    return render_template(
-        "model_quota.html",
-        active_page="model_quota",
-        report=report,
-        fatal=fatal,
-        notes=notes,
-        accounts=accounts,
-        selected_account=selected,
-        selected_model=model,
-        selected_region=region,
-        quota_regions=quotas.QUOTA_REGIONS,
-        quota_service=quotas.SERVICE_CODE,
-        quota_cache_hours=round(quotas.QUOTA_CACHE_TTL / 3600),
-        **page_meta(),
-    )

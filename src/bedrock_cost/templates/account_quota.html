@@ -1,0 +1,151 @@
+{# 账号页的「配额」页签（原来的模型配额页）：这个账号每个应用推理配置在四个区的 TPM / TPD。
+   读不到的情况走右上角的弹窗；读不到推理配置时表格退回按「模型 × 区域」列，下面有一句说明。 #}
+{% extends "account_base.html" %}
+{% block loading_label %}正在拉四个区的配额{% endblock %}
+{% block loading_note %}首次约 45 秒，Service Quotas 限流；之后走缓存{% endblock %}
+
+{% block tab_content %}
+
+<form class="filters filters-auto" id="quota-filters" method="get" action="{{ url_for('account.quota', number=account.account) }}">
+  <div class="filters-row">
+    <div class="field">
+      <label for="model">模型</label>
+      <select id="model" name="model">
+        <option value="" {% if not selected_model %}selected{% endif %}>全部模型</option>
+        {# 选项取自未筛选的全量数据，所以筛掉一个模型之后别的还在列表里 #}
+        {% for name in report.model_options %}
+          <option value="{{ name }}" {% if selected_model == name %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="region">区域</label>
+      <select id="region" name="region">
+        <option value="" {% if not selected_region %}selected{% endif %}>全部区域</option>
+        {% for code in report.region_options %}
+          <option value="{{ code }}" {% if selected_region == code %}selected{% endif %}>{{ code }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="filters-end">
+      <a class="btn" href="{{ url_for('account.quota', number=account.account, model=selected_model or None, region=selected_region or None, refresh=1) }}"
+         title="跳过缓存，重新拉一次四个区的 Service Quotas 和推理配置"
+         data-loading="正在重新拉四个区的配额" data-loading-note="跳过缓存，约 45 秒">强制刷新</a>
+    </div>
+  </div>
+  <noscript><button class="btn btn-primary" type="submit">查询</button></noscript>
+</form>
+
+{% if fatal %}
+  <div class="alert alert-error"><div><strong>无法生成报表：</strong>{{ fatal }}</div></div>
+{% else %}
+
+  {% if report.arn_error and not report.arn_driven %}
+    <p class="note note-warn">读不到这个账号的应用推理配置（原因见右上角），表格退回按「模型 × 区域」列配额，
+      ARN 和模型 ID 两列显示「无权限」。配额数字本身不受影响。</p>
+  {% endif %}
+
+  <section class="card">
+    <div class="card-head">
+      <div class="card-title">
+        <h2>{% if report.arn_driven %}应用推理配置 · Token 配额{% else %}Claude Token 配额{% endif %}</h2>
+        <span class="card-note">
+          {% if report.arn_driven %}{{ report.profile_count }} 条 ARN · {% endif %}{{ report.model_count }} 个模型 ·
+          {% if report.region_filter %}只看 <code>{{ report.region_filter }}</code>{% else %}{{ report.regions | length }} 个区各查一次{% endif %}
+          {%- if report.is_filtered %} · <span class="tone-warn">已筛选，共 {{ report.rows | length }} / {{ report.all_rows | length }} 行</span>{% endif %}
+          {%- if report.lagging_models %} · <span class="tone-warn">{{ report.lagging_models | length }} 个模型的配额四区不一致（标黄的区没跟上提额）</span>{% endif %}
+        </span>
+      </div>
+    </div>
+
+    <div class="table-scroll">
+      <table class="wide-table quota-table" data-sortable>
+        <thead>
+          {# 表头可点排序：一次升、再一次降、第三次回到服务端排好的默认分组 #}
+          <tr>
+            <th class="sticky-col arn-col sortable" tabindex="0" aria-sort="none" data-sort-type="text">ARN ID</th>
+            <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="text">模型</th>
+            <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="text">模型 ID</th>
+            <th class="region-col sortable" tabindex="0" aria-sort="none" data-sort-type="text">区域</th>
+            <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">TPM</th>
+            <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">TPD</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in report.rows %}
+            <tr{% if not loop.first and row.display != loop.previtem.display %} class="group-start"{% endif %}>
+              <td class="sticky-col arn-col" data-sort="{{ row.profile_id }}">
+                {%- if row.has_arn %}<code>{{ row.profile_id }}</code>{% else %}<span class="tone-muted">无权限</span>{% endif -%}
+              </td>
+              <td data-sort="{{ row.display }}">
+                {{ row.display }}
+                {%- if row.is_long_context %}<span class="calc">独立配额，与同名模型不共享</span>{% endif %}
+                {%- if row.has_arn and not row.matched %}<span class="calc tone-warn">该区配额清单里没有对应条目</span>{% endif %}
+              </td>
+              <td class="model-id" data-sort="{{ row.model_id }}">
+                {%- if row.model_id %}<code>{{ row.model_id }}</code>{% else %}<span class="tone-muted">—</span>{% endif -%}
+              </td>
+              <td class="region-col" data-sort="{{ row.region }}"><code>{{ row.region }}</code></td>
+              <td class="num strong {% if row.below_best %}tone-warn{% endif %}"
+                  data-sort="{{ (row.tpm | int) if row.tpm is not none else '' }}">
+                {%- if row.tpm is none %}<span class="tone-muted">未列出</span>{% else %}{{ '{:,.0f}'.format(row.tpm) }}{% endif -%}
+              </td>
+              <td class="num strong {% if row.below_best %}tone-warn{% endif %}"
+                  data-sort="{{ (row.tpd | int) if row.tpd is not none else '' }}">
+                {%- if row.tpd is none %}<span class="tone-muted">未列出</span>{% else %}{{ '{:,.0f}'.format(row.tpd) }}{% endif -%}
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="6" class="empty">
+              {% if report.error %}读不到 Service Quotas，原因见右上角。
+              {% elif report.is_filtered %}当前筛选下没有匹配的行。
+              {% else %}没有读到任何 Claude token 配额。{% endif %}
+            </td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  {% if report.orphan_models %}
+    <section class="card">
+      <div class="card-head">
+        <div class="card-title">
+          <h2>有配额，但没有应用推理配置</h2>
+          <span class="card-note">{{ report.orphan_models | length }} 个模型 · 只能直连调用，流量不带标签</span>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table class="quota-table">
+          <thead><tr><th>模型</th><th class="num">TPM</th><th class="num">TPD</th></tr></thead>
+          <tbody>
+            {% for item in report.orphan_models %}
+              <tr>
+                <td>{{ item.name }}</td>
+                <td class="num strong">{%- if item.tpm is none %}<span class="tone-muted">未列出</span>{% else %}{{ '{:,.0f}'.format(item.tpm) }}{% endif -%}</td>
+                <td class="num strong">{%- if item.tpd is none %}<span class="tone-muted">未列出</span>{% else %}{{ '{:,.0f}'.format(item.tpd) }}{% endif -%}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="notes-body">
+        <ul>
+          <li>这些模型有配额，但账号下没有对应的应用推理配置。走它们的调用只能直连原厂模型 ID，
+            <strong>不会带上台账里那个成本分配标签</strong>，在「用量」页签会被算成无标签流量。要归到 MAP 上就得先建配置。</li>
+          <li>1M 上下文长度那条是<strong>独立配额</strong>，本来就没有单独的推理配置——用普通模型的配置调用，
+            靠请求里的上下文设置区分，出现在这里属正常。</li>
+        </ul>
+      </div>
+    </section>
+  {% endif %}
+{% endif %}
+
+<footer class="meta">
+  <span>Service Quotas</span>
+  <span>缓存 {{ quota_cache_hours }} 小时</span>
+  <span>生成于 {{ generated_at }}</span>
+  <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
+</footer>
+
+{% endblock %}
