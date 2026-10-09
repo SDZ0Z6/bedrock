@@ -1,0 +1,485 @@
+{% extends "shell.html" %}
+{% from "_macros.html" import avatar %}
+{% block title %}运营看板 · Bedrock 成本监控{% endblock %}
+{% block page_title %}运营看板{% endblock %}
+{% block page_sub -%}
+  {%- if not fatal -%}
+    {{ period.label }} {{ period.span.label }}
+    {%- if period.previous %} · {{ period.compare }}（{{ period.previous.label }}）{% endif %}
+    · {{ accounts | length }} 个启用中的账号
+    {%- if business and business.any_cached %} · 部分数据来自缓存{% endif -%}
+  {%- endif -%}
+{%- endblock %}
+{% block loading_label %}正在汇总各账号的数{% endblock %}
+
+
+{# 变化：箭头 + 数，跟着「比上月同期」这种说明。颜色不分涨跌——收入涨不一定是好事，
+   成本涨也不一定是坏事，交给人读 #}
+{% macro delta(value, unit='%') -%}
+  {%- if value is none -%}<span class="tone-muted">—</span>
+  {%- else -%}
+    {# 先按显示的位数取整再判断涨跌：-0.004 个百分点写成「↓0.0」没有意义，写「持平」 #}
+    {%- set shown = (value | round(1 if unit != '%' else 0)) -%}
+    {%- if shown == 0 -%}<span class="delta">持平</span>
+    {%- else -%}
+      <span class="delta">{{ '↑' if shown > 0 else '↓' }}
+        {{- ('%.1f' if unit != '%' else '%.0f') | format(shown | abs) }}{{ unit }}</span>
+    {%- endif -%}
+  {%- endif -%}
+{%- endmacro %}
+
+{# 指标卡：标签、大数字、和上一段比、迷你柱 #}
+{% macro kpi(card, compare) -%}
+  <div class="metric-card is-static">
+    <span class="metric-label">{{ card.label }}{% if card.hint %}<small>{{ card.hint }}</small>{% endif %}</span>
+    <span class="metric-value">{{ card.value }}</span>
+    <span class="metric-delta">
+      {%- if not compare %}没有可比的上一段
+      {%- elif card.delta is none %}{{ compare }}：上一段没有数
+      {%- else %}<b>{{ delta(card.delta, card.unit) }}</b> {{ compare }}{% endif -%}
+    </span>
+    {{ card.spark | safe }}
+  </div>
+{%- endmacro %}
+
+{% macro life_tags(names) -%}
+  {%- for name in names -%}
+    <span class="life-tag"><i class="tag-dot" style="--tag: {{ lifecycle_colors.get(name, '#87867f') }}"></i>{{ name }}</span>
+  {%- endfor -%}
+{%- endmacro %}
+
+{% block content %}
+
+{% if fatal %}
+  <div class="alert alert-error"><div><strong>读不到台账：</strong>{{ fatal }}</div></div>
+{% else %}
+
+{# 时间段和强制刷新放在内容区左边，不放页头右边：右上角是报错弹窗的位置，
+   报错一直留着直到手动关，会把页头右边的按钮盖住 #}
+<div class="ops-bar">
+  <nav class="seg" aria-label="时间段">
+    {% for key, label in periods.items() %}
+      <a class="seg-item{% if key == period.key %} is-on{% endif %}" href="{{ url_for('ops.index', period=key) }}"
+         {% if key == period.key %}aria-current="page"{% endif %} data-loading="正在汇总{{ label }}的数">{{ label }}</a>
+    {% endfor %}
+  </nav>
+  <a class="btn" href="{{ url_for('ops.index', period=period.key, refresh=1) }}"
+     title="跳过缓存，重新查 Cost Explorer 和 CloudWatch"
+     data-loading="正在重新汇总" data-loading-note="跳过缓存，十几秒">强制刷新</a>
+</div>
+
+{% if not accounts %}
+  <p class="note note-warn"><span>台账里没有启用中的账号，下面都是空的。去<a href="{{ url_for('accounts.index') }}">账号管理</a>加一个或恢复一个。</span></p>
+{% endif %}
+
+<!-- ================================================ 经营汇总 -->
+<section class="ops-section" aria-labelledby="ops-biz">
+  <header class="ops-head">
+    <h2 id="ops-biz">经营汇总</h2>
+    <p>收入是按台账比率折算后的消费（比率就是加价），毛利 = 收入 − AWS 原价 · 各账号从启用日期算起</p>
+  </header>
+
+  {% if business %}
+    <div class="metric-cards">
+      {% for card in business.cards %}{{ kpi(card, period.compare) }}{% endfor %}
+    </div>
+    {% if business.failed %}
+      <p class="note note-warn">{{ business.failed }} 个账号查不到 Cost Explorer，没算进上面的数（原因见右上角）。</p>
+    {% endif %}
+  {% else %}
+    <p class="note note-warn">经营汇总出不来（原因见右上角）。</p>
+  {% endif %}
+
+  <div class="bento">
+    {% if trend %}
+      <article class="viz-card span-3">
+        <div class="viz-head">
+          <div>
+            <h3 class="viz-title">近 {{ trend.months }} 个月</h3>
+            <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 每月一根柱：底下 AWS 原价，上面毛利，整根就是收入 · 本月到今天为止</p>
+          </div>
+        </div>
+        <div>
+          <p class="viz-big">{{ trend.total_margin | money0 }}<small>毛利</small></p>
+          <p class="viz-meta">收入 <strong>{{ trend.total_marked | money0 }}</strong> · AWS 原价 <strong>{{ trend.total_raw | money0 }}</strong> ·
+            毛利率 <strong>{{ trend.rate | pct }}</strong></p>
+        </div>
+        <div class="viz-chart" id="ops-trend" data-tip-src="ops-trend-data">{{ trend.chart.svg | safe }}</div>
+        <div class="legend-toggles" data-legend-for="ops-trend" role="group" aria-label="只看某一项">
+          {% for item in trend.chart.legend %}
+            <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
+                    title="{{ item.name }} 近 {{ trend.months }} 个月 {{ item.total | money }}">
+              <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
+          {% endfor %}
+        </div>
+        <script id="ops-trend-data" type="application/json">{{ trend.chart.tooltip | tojson }}</script>
+      </article>
+    {% endif %}
+
+    <article class="viz-card {% if not trend %}span-all{% endif %}">
+      <div class="viz-head">
+        <div>
+          <h3 class="viz-title">额度</h3>
+          <p class="viz-sub">{% if credit %}{{ credit.accounts }} 个账号 · 各自从启用日期累计到 {{ today.strftime('%m-%d') }}{% else %}出不来{% endif %}</p>
+        </div>
+        <a class="viz-link" href="{{ url_for('main.index') }}" data-loading="正在查 Cost Explorer">概览</a>
+      </div>
+      {% if credit %}
+        <div class="gauge">
+          {{ credit.gauge | safe }}
+          <div class="gauge-center">
+            <span class="gauge-value" data-countup>{{ credit.used | money0 }}</span>
+            <span class="gauge-of">额度 {{ credit.budget | money0 }}</span>
+          </div>
+        </div>
+        <div class="gauge-facts">
+          <span>使用率<strong class="tone-{{ credit.level }}">{{ credit.usage_pct | pct }}</strong></span>
+          <span>余额<strong class="{% if credit.balance < 0 %}tone-danger{% endif %}">{{ credit.balance | money0 }}</strong></span>
+          <span>累计毛利<strong>{{ credit.margin | money0 }}</strong></span>
+        </div>
+        <ul class="credit-flags">
+          <li><span>超出额度</span><strong class="{% if credit.overspent %}tone-danger{% endif %}">{{ credit.overspent }} 个</strong></li>
+          <li><span>快用完（≥ {{ '%.0f' | format(danger_pct) }}%）</span><strong class="{% if credit.danger %}tone-danger{% endif %}">{{ credit.danger }} 个</strong></li>
+          <li><span>过半（≥ {{ '%.0f' | format(warn_pct) }}%）</span><strong class="{% if credit.warn %}tone-warn{% endif %}">{{ credit.warn }} 个</strong></li>
+          {% if credit.failed %}<li><span>查不到</span><strong class="tone-danger">{{ credit.failed }} 个</strong></li>{% endif %}
+        </ul>
+      {% endif %}
+    </article>
+  </div>
+
+  {% if business %}
+    <section class="card ops-detail">
+      <div class="card-head">
+        <div class="card-title">
+          <h3>明细</h3>
+          <span class="card-note">{{ period.label }} {{ period.span.label }} · 点表头排序 · 额度、已用、余额是从启用日期累计到今天</span>
+        </div>
+        <div class="seg" role="tablist" aria-label="明细按什么分">
+          <button class="seg-item is-on" type="button" role="tab" aria-selected="true" aria-controls="detail-partner"
+                  id="tab-partner" data-detail="partner">按上游</button>
+          <button class="seg-item" type="button" role="tab" aria-selected="false" aria-controls="detail-account"
+                  id="tab-account" data-detail="account" tabindex="-1">按账号</button>
+        </div>
+      </div>
+
+      {# ---------------- 按上游 #}
+      <div class="table-scroll" id="detail-partner" role="tabpanel" aria-labelledby="tab-partner">
+        <table class="wide-table ops-table" data-sortable>
+          <thead>
+            <tr>
+              <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="text">上游</th>
+              <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">账号</th>
+              <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">收入</th>
+              <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">AWS 原价</th>
+              <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">毛利</th>
+              <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">毛利率</th>
+              {% if period.previous %}<th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">收入{{ period.compare }}</th>{% endif %}
+              <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">额度</th>
+              <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">已用</th>
+              <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">余额</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for group in business.partners %}
+              <tr>
+                <td data-sort="{{ group.name }}"><strong>{{ group.name }}</strong></td>
+                <td class="num" data-sort="{{ group.accounts }}">{{ group.accounts }}
+                  {%- if group.failed %}<span class="calc tone-danger">{{ group.failed }} 个查不到</span>{% endif %}</td>
+                <td class="num strong" data-sort="{{ group.marked }}">{{ group.marked | money }}</td>
+                <td class="num tone-muted" data-sort="{{ group.raw }}">{{ group.raw | money }}</td>
+                <td class="num" data-sort="{{ group.margin }}">{{ group.margin | money }}</td>
+                <td class="num" data-sort="{{ '' if group.rate is none else group.rate }}">{{ group.rate | pct }}</td>
+                {% if period.previous %}<td class="num" data-sort="{{ '' if group.growth is none else group.growth }}">{{ delta(group.growth) }}</td>{% endif %}
+                <td class="num" data-sort="{{ group.budget }}">{{ group.budget | money0 }}</td>
+                <td class="num" data-sort="{{ group.used }}">{{ group.used | money0 }}</td>
+                <td class="num {% if group.balance < 0 %}tone-danger{% endif %}" data-sort="{{ group.balance }}">{{ group.balance | money0 }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="10" class="empty">没有启用中的账号。</td></tr>
+            {% endfor %}
+          </tbody>
+          {% if business.partners %}
+            {% set total = business.total %}
+            <tfoot>
+              <tr>
+                <td>合计</td>
+                <td class="num">{{ business.accounts | length }}</td>
+                <td class="num">{{ total.marked | money }}</td>
+                <td class="num">{{ total.raw | money }}</td>
+                <td class="num">{{ total.margin | money }}</td>
+                <td class="num">{{ total.rate | pct }}</td>
+                {% if period.previous %}<td class="num">{{ delta(total.growth) }}</td>{% endif %}
+                <td class="num">{{ (credit.budget if credit else 0) | money0 }}</td>
+                <td class="num">{{ (credit.used if credit else 0) | money0 }}</td>
+                <td class="num">{{ (credit.balance if credit else 0) | money0 }}</td>
+              </tr>
+            </tfoot>
+          {% endif %}
+        </table>
+      </div>
+
+      {# ---------------- 按账号 #}
+      <div class="table-scroll" id="detail-account" role="tabpanel" aria-labelledby="tab-account" hidden>
+        <table class="wide-table ops-table" data-sortable>
+          <thead>
+            <tr>
+              <th class="sticky-col sortable" tabindex="0" aria-sort="none" data-sort-type="text">账号</th>
+              <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="text">上游</th>
+              <th>生命周期</th>
+              <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">收入</th>
+              <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">AWS 原价</th>
+              <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">毛利</th>
+              <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">毛利率</th>
+              {% if period.previous %}<th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">收入{{ period.compare }}</th>{% endif %}
+              <th class="usage-col sortable" tabindex="0" aria-sort="none" data-sort-type="number">额度使用</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in business.accounts %}
+              {% set account = row.account %}
+              <tr>
+                <td class="sticky-col" data-sort="{{ account.label }}">
+                  <a class="ident-cell ident-link" href="{{ url_for('account.cost', number=account.account) }}"
+                     data-loading="正在查各维度消费" title="看这个账号的成本">
+                    {{ avatar(account.avatar, small=true) }}
+                    <span class="acct-cell">
+                      <span class="acct-cell-id">{{ account.account }}</span>
+                      {%- if account.email %}<span class="acct-cell-mail">{{ account.email }}</span>{% endif %}
+                    </span>
+                  </a>
+                </td>
+                <td data-sort="{{ account.partner }}">{{ account.partner }}</td>
+                <td><span class="life-tags">{{ life_tags(account.lifecycle) }}</span></td>
+                {% if row.error %}
+                  {# 查不到的账号每一格都留空，排序时沉底 #}
+                  <td class="num err-cell" data-sort="" title="{{ row.error }}">查不到</td>
+                  <td class="num tone-muted" data-sort="">—</td>
+                  <td class="num tone-muted" data-sort="">—</td>
+                  <td class="num tone-muted" data-sort="">—</td>
+                  {% if period.previous %}<td class="num tone-muted" data-sort="">—</td>{% endif %}
+                {% else %}
+                  <td class="num strong" data-sort="{{ row.marked }}">{{ row.marked | money }}</td>
+                  <td class="num tone-muted" data-sort="{{ row.raw }}">{{ row.raw | money }}</td>
+                  <td class="num" data-sort="{{ row.margin }}">{{ row.margin | money }}</td>
+                  <td class="num" data-sort="{{ '' if row.rate is none else row.rate }}">{{ row.rate | pct }}</td>
+                  {% if period.previous %}<td class="num" data-sort="{{ '' if row.growth is none else row.growth }}">{{ delta(row.growth) }}</td>{% endif %}
+                {% endif %}
+                {% set credit_row = row.credit %}
+                {% if credit_row and credit_row.has_numbers and credit_row.usage_pct is not none %}
+                  <td class="usage-col" data-sort="{{ credit_row.usage_pct }}">
+                    <span class="usage-pct tone-{{ credit_row.level }}">{{ credit_row.usage_pct | pct }}</span>
+                    <div class="meter tone-{{ credit_row.level }}" aria-hidden="true"><i style="width: {{ credit_row.bar_width }}%"></i></div>
+                  </td>
+                {% else %}
+                  <td class="usage-col tone-muted" data-sort="">—</td>
+                {% endif %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+</section>
+
+<!-- ================================================ 风险与告警 -->
+<section class="ops-section" aria-labelledby="ops-risk">
+  <header class="ops-head">
+    <h2 id="ops-risk">风险与告警</h2>
+    <p>额度、Cost Explorer、用量和生命周期，有问题的账号都在左边；右边是最近发到 TG 群的告警</p>
+  </header>
+  <div class="bento">
+    <article class="viz-card span-2">
+      <div class="viz-head">
+        <div>
+          <h3 class="viz-title">需要关注</h3>
+          <p class="viz-sub">{% if watch %}{{ watch | length }} 个账号 · 最要紧的在前{% else %}都正常{% endif %}</p>
+        </div>
+      </div>
+      {% if watch %}
+        <ul class="watch-list">
+          {% for item in watch %}
+            {% set account = item.account %}
+            <li class="watch-item">
+              <a class="ident-cell ident-link" href="{{ url_for('account.summary', number=account.account) }}"
+                 data-loading="正在读这个账号" title="打开这个账号的页面">
+                {{ avatar(account.avatar, small=true) }}
+                <span class="acct-cell">
+                  <span class="acct-cell-id">{{ account.account }}</span>
+                  {%- if account.email %}<span class="acct-cell-mail">{{ account.email }}</span>{% endif %}
+                </span>
+              </a>
+              <ul class="watch-issues">
+                {% for issue in item.issues %}
+                  <li class="issue issue-{{ issue.tone }}" {% if issue.detail %}title="{{ issue.detail }}"{% endif %}>
+                    <span class="issue-label">{{ issue.label }}</span>
+                    {%- if issue.detail %}<span class="issue-detail">{{ issue.detail }}</span>{% endif %}
+                  </li>
+                {% endfor %}
+              </ul>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="watch-empty">额度、Cost Explorer、用量都正常，也没有打着风控标签的账号。</p>
+      {% endif %}
+      <div class="life-dist">
+        <span class="life-dist-label">生命周期</span>
+        {% for item in life_counts %}
+          <span class="life-tag"><i class="tag-dot" style="--tag: {{ item.color }}"></i>{{ item.name }}<b>{{ item.count }}</b></span>
+        {% endfor %}
+        {% if unlabeled %}<span class="life-tag">未标记<b>{{ unlabeled }}</b></span>{% endif %}
+        <a class="life-dist-link" href="{{ url_for('accounts.index') }}" data-loading="正在读台账">去账号管理改</a>
+      </div>
+    </article>
+
+    <article class="viz-card span-2">
+      <div class="viz-head">
+        <div>
+          <h3 class="viz-title">最近告警</h3>
+          <p class="viz-sub">{% if events %}发到 TG 群的最近 {{ events | length }} 条 · 本机时间{% else %}还没有记录{% endif %}</p>
+        </div>
+      </div>
+      {% if events %}
+        <ol class="event-list">
+          {% for event in events %}
+            <li class="event event-{{ event.tone }}">
+              <span class="event-dot" aria-hidden="true"></span>
+              <div class="event-main">
+                <p class="event-line">
+                  <span class="event-title">{{ event.title }}</span>
+                  {%- if event.who %}
+                    {%- if event.number %}<a class="event-who" href="{{ url_for('account.summary', number=event.number) }}"
+                       data-loading="正在读这个账号">{{ event.who }}</a>
+                    {%- else %}<span class="event-who">{{ event.who }}</span>{% endif %}
+                  {%- endif %}
+                </p>
+                {% if event.text %}<p class="event-text">{{ event.text }}</p>{% endif %}
+              </div>
+              <time class="event-time" datetime="{{ event.iso }}">{{ event.when }}</time>
+            </li>
+          {% endfor %}
+        </ol>
+      {% else %}
+        <p class="watch-empty">告警发出去之后会出现在这里：用量开始 / 中断、额度预警、账号变动、AWS 邮件告警和日报。</p>
+      {% endif %}
+    </article>
+  </div>
+</section>
+
+<!-- ================================================ 模型与用量 -->
+<section class="ops-section" aria-labelledby="ops-usage">
+  <header class="ops-head">
+    <h2 id="ops-usage">模型与用量</h2>
+    <p>CloudWatch · 全部启用账号 × 四个区 · 按 UTC 日期</p>
+  </header>
+  {% if usage %}
+    <div class="metric-cards">
+      {% for card in usage.cards %}
+        <div class="metric-card is-static">
+          <span class="metric-label">{{ card.label }}</span>
+          <span class="metric-value">{% if card.total is none %}—{% else %}{{ card.total | compact }}<small>{{ card.unit }}</small>{% endif %}</span>
+          <span class="metric-delta">
+            {%- if card.total is none %}{{ '没有启用中的账号' if not accounts else '读不到 CloudWatch' }}
+            {%- elif not period.previous %}没有可比的上一段
+            {%- elif card.delta is none %}{{ period.compare }}：上一段没有数
+            {%- else %}<b>{{ delta(card.delta) }}</b> {{ period.compare }}{% endif -%}
+          </span>
+          {{ card.spark | safe }}
+        </div>
+      {% endfor %}
+    </div>
+    {% if usage.failed_jobs and not usage.unreadable %}
+      <p class="note note-warn">{{ usage.failed_jobs }} / {{ usage.jobs }} 个「账号 × 区」读不到 CloudWatch，下面的数少了这些（原因见右上角）。</p>
+    {% endif %}
+    {% if not usage.unreadable %}
+      <div class="bento bento-2">
+        <article class="viz-card">
+          <div class="viz-head">
+            <div>
+              <h3 class="viz-title">按模型</h3>
+              <p class="viz-sub">{{ period.label }} 的调用次数，条长是占全部调用的比例 · 下面一行是输入 + 输出 token</p>
+            </div>
+          </div>
+          {% if usage.models %}
+            <div class="bar-list">
+              {% for model in usage.models %}
+                <div class="bar-item">
+                  <span class="bar-item-name" title="{{ model.name }}"><i class="swatch" style="background: {{ model.color }}"></i>{{ model.name | short_model }}</span>
+                  <span class="bar-item-value">{{ model.value | compact }}<small>次 · {{ model.share | pct }}</small></span>
+                  <div class="meter" style="--meter: {{ model.color }}" aria-hidden="true"><i style="width: {{ [model.share, 0.6] | max }}%"></i></div>
+                  {% if model.tokens is not none %}<span class="bar-item-sub">{{ model.tokens | compact }} token</span>{% endif %}
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="watch-empty">这段时间没有调用。</p>
+          {% endif %}
+        </article>
+        <article class="viz-card">
+          <div class="viz-head">
+            <div>
+              <h3 class="viz-title">按区域</h3>
+              <p class="viz-sub">{{ period.label }} 的调用次数 · 下面一行是输入 + 输出 token</p>
+            </div>
+          </div>
+          <div class="bar-list">
+            {% for region in usage.regions %}
+              <div class="bar-item {% if not region.value %}is-empty{% endif %}">
+                <span class="bar-item-name">{{ region.name }}<small>{{ region.region }}</small></span>
+                <span class="bar-item-value">{{ region.value | compact }}<small>次 · {{ region.share | pct }}</small></span>
+                <div class="meter" aria-hidden="true"><i style="width: {{ region.share }}%"></i></div>
+                <span class="bar-item-sub">{{ region.tokens | compact }} token</span>
+              </div>
+            {% endfor %}
+          </div>
+        </article>
+      </div>
+    {% endif %}
+  {% else %}
+    <p class="note note-warn">模型与用量出不来（原因见右上角）。</p>
+  {% endif %}
+</section>
+
+<footer class="meta">
+  <span>Cost Explorer + CloudWatch，只算启用中的账号</span>
+  <span>生成于 {{ generated_at }}</span>
+  <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
+</footer>
+
+<script>
+(function () {
+  // 明细的两个页签：按上游 / 按账号。左右方向键也能换
+  const tabs = [...document.querySelectorAll('[data-detail]')];
+  if (!tabs.length) return;
+  function show(tab) {
+    for (const other of tabs) {
+      const on = other === tab;
+      other.classList.toggle('is-on', on);
+      other.setAttribute('aria-selected', String(on));
+      other.tabIndex = on ? 0 : -1;
+      document.getElementById(other.getAttribute('aria-controls')).hidden = !on;
+    }
+    try { localStorage.setItem('ops-detail', tab.dataset.detail); } catch (e) { /* 记不住就算了 */ }
+  }
+  for (const tab of tabs) {
+    tab.addEventListener('click', function () { show(tab); });
+    tab.addEventListener('keydown', function (event) {
+      const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
+      if (!step) return;
+      event.preventDefault();
+      const next = tabs[(tabs.indexOf(tab) + step + tabs.length) % tabs.length];
+      show(next);
+      next.focus();
+    });
+  }
+  try {
+    const saved = localStorage.getItem('ops-detail');
+    const tab = tabs.find(function (t) { return t.dataset.detail === saved; });
+    if (tab) show(tab);
+  } catch (e) { /* 同上 */ }
+})();
+</script>
+
+{% endif %}
+{% endblock %}

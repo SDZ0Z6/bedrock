@@ -23,10 +23,11 @@ UNTAG_RATIO**，出来的是 AWS 原始成本，不是加价后的对外金额�
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 
 from . import config
+from .aws_errors import QueryError, as_query_error, describe
 from .cloudwatch_metrics import (
     DEFAULT_REGIONS,
     MAX_QUERIES_PER_CALL,
@@ -42,7 +43,6 @@ from .cloudwatch_metrics import (
     short_model_name,
     strip_cris_prefix,
 )
-from .cost_explorer import friendly_error
 from .excel_source import Account
 from .usage_explorer import MAX_SERIES, OTHER_LABEL, Series, assign_slots
 from .pricing import (
@@ -181,7 +181,9 @@ class EstimateReport:
     dates: list[str] = field(default_factory=list)           # 每个桶的 ISO 日期
     labels: list[str] = field(default_factory=list)          # 轴上的短标签
     series: list[Series] = field(default_factory=list)       # 每个模型每天的钱
-    errors: list[str] = field(default_factory=list)
+    # 每个读不到的 (账号, 区域) 一条，str() 是「上游 / 账号 @ 区域：原因（错误码）」；
+    # 价目表拉不到时是一条不带账号的
+    errors: list[QueryError] = field(default_factory=list)
     unpriced: list[str] = field(default_factory=list)        # 没在价目表里找到的模型
     any_cached: bool = False
     price_stale: bool = False
@@ -251,7 +253,7 @@ def build_days(start: date, end: date) -> tuple[list[datetime], list[str], list[
 
 def _fetch_region(
     account: Account, region: str, start: date, end: date, stamps: list[datetime]
-) -> tuple[dict[tuple[str, str], list[float]], bool, str | None]:
+) -> tuple[dict[tuple[str, str], list[float]], bool, QueryError | None]:
     """返回 {(ModelId, 指标): 按天对齐的 token 数}。"""
     cache_key = (
         account.ak[-6:], account.account, region,
@@ -317,7 +319,7 @@ def _fetch_region(
                 if not token:
                     break
     except Exception as exc:
-        return {}, False, friendly_error(exc, account)
+        return {}, False, describe(exc, account, region)
 
     rows = {key: values for key, values in rows.items() if any(values)}
     _store(_data_cache, cache_key, rows)
@@ -342,7 +344,8 @@ def build_estimate(
     try:
         table = load_prices(force=refresh)
     except PricingError as exc:
-        report.errors.append(str(exc))
+        # 公开端点，不属于哪个账号；它自己的消息已经是一句完整的中文
+        report.errors.append(QueryError(reason=str(exc)))
         return report
     report.price_stale = table.stale
     report.price_error = table.error
@@ -368,7 +371,9 @@ def build_estimate(
         for account, region, rows, cached, error in pool.map(run, jobs):
             if error:
                 report.errors.append(
-                    f"{account.partner} / {account.account} @ {region}：{error}"
+                    as_query_error(
+                        error, account=account.account, region=region, partner=account.partner
+                    )
                 )
                 continue
             if cached:
@@ -453,6 +458,8 @@ class SplitEstimate:
     tag_raw: float = 0.0
     untag_raw: float = 0.0
     unpriced: list[str] = field(default_factory=list)   # 没单价的模型——这部分按 0 算了
+    # 「区域：原因（错误码）」一行字，不是 QueryError：额度告警用「；」.join 直接拼它们，
+    # str.join 只收 str
     errors: list[str] = field(default_factory=list)
 
     def marked(self, account: Account) -> float:
@@ -486,7 +493,7 @@ def estimate_split(
     for region in picked:
         rows, _cached, error = _fetch_region(account, region, start, end, stamps)
         if error:
-            result.errors.append(f"{region}：{error}")
+            result.errors.append(f"{region}：{as_query_error(error).message}")
             continue
         if not rows:
             continue
@@ -528,7 +535,9 @@ class HourUsage:
     tag_raw: float = 0.0
     untag_raw: float = 0.0
     unpriced: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)          # 读不到的区；有的话上面的数偏低
+    # 读不到的区，有的话上面的数偏低。整个结果本来就是某一个账号的，所以 account 留空，
+    # str() 和原来一样是「区域：原因（错误码）」
+    errors: list[QueryError] = field(default_factory=list)
 
     @property
     def end(self) -> datetime:
@@ -564,14 +573,14 @@ def hour_usage(account: Account, hour_start: datetime, regions: list[str] | None
         table = load_prices()
     except PricingError as exc:
         table = None
-        result.errors.append(str(exc))
+        result.errors.append(QueryError(reason=str(exc)))
 
     unpriced: set[str] = set()
     for region in regions or list(DEFAULT_REGIONS):
         try:
             sums, last = _fetch_hour(account, region, start)
         except Exception as exc:
-            result.errors.append(f"{region}：{friendly_error(exc, account)}")
+            result.errors.append(replace(describe(exc, account, region), account=""))
             continue
         if not sums:
             continue

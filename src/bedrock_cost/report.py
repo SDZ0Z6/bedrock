@@ -50,6 +50,9 @@ class ReportRow:
     balance: float = 0.0
     currency: str = "USD"
     error: str | None = None
+    # error 那一行字背后的结构化原因（aws_errors.QueryError）：页面「查看详情」里的 AWS 原话、
+    # 是不是 SCP 拒绝都从这里拿。告警、last_known 这些只认 error 的地方不受影响
+    problem: object | None = None
     note: str | None = None
     tag_label: str = ""
     from_cache: bool = False
@@ -207,6 +210,7 @@ def build_row(
         untag_ratio=account.untag_ratio,
         currency=split.currency,
         error=split.error,
+        problem=split.problem,
         note=split.note,
         tag_label=account.tag_label,
         from_cache=split.from_cache,

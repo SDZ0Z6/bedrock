@@ -175,3 +175,117 @@ class TestBuildUsage:
         usage_explorer.clear_cache()
         usage = build_usage(accounts[:1], START, END, "service", "daily")
         assert usage.peak == (3, 99.0)
+
+
+# ------------------------------------------------------------ 运营看板：一个账号的逐日序列
+from bedrock_cost import config  # noqa: E402
+from bedrock_cost.aws_errors import CREDENTIALS, MISSING_CREDENTIALS, QueryError  # noqa: E402
+from bedrock_cost.excel_source import Account  # noqa: E402
+
+
+class TestAccountSeries:
+    """运营看板要每个账号各自的数：不拆维度、不折叠进「其他」，按桶把各条序列加起来。"""
+
+    @pytest.fixture(autouse=True)
+    def _clean_cache(self):
+        usage_explorer.clear_cache()
+        yield
+        usage_explorer.clear_cache()
+
+    @staticmethod
+    def install(monkeypatch, answer) -> list[dict]:
+        """把 _fetch_account 换成假的；answer(dates) 给出它的返回值。"""
+        calls: list[dict] = []
+
+        def fake(account, start, end, dimension, granularity, dates, refresh):
+            calls.append(dict(account=account, start=start, end=end, dimension=dimension,
+                              granularity=granularity, dates=list(dates), refresh=refresh))
+            return answer(dates)
+
+        monkeypatch.setattr(usage_explorer, "_fetch_account", fake)
+        return calls
+
+    def test_sums_every_series_per_bucket(self, ledger, accounts, monkeypatch):
+        def answer(dates):
+            rows = {
+                "ALPHA / 111111111111": [[1.0, 1.25] for _ in dates],
+                "其他": [[float(i), float(i) * 2] for i in range(len(dates))],
+            }
+            return rows, "USD", False, None
+
+        self.install(monkeypatch, answer)
+        dates, raw, marked, cached, error = usage_explorer.account_series(accounts[0], START, END)
+        assert error is None and cached is False
+        assert dates == build_buckets(START, END, "daily")[0]
+        assert raw == [1.0 + i for i in range(17)]
+        assert marked == [1.25 + 2 * i for i in range(17)]
+
+    def test_asks_for_the_account_dimension(self, ledger, accounts, monkeypatch):
+        calls = self.install(monkeypatch, lambda dates: ({}, "USD", False, None))
+        usage_explorer.account_series(accounts[0], START, END)
+        usage_explorer.account_series(accounts[0], START, END, "monthly", refresh=True)
+        assert [(c["dimension"], c["granularity"], c["refresh"]) for c in calls] == [
+            ("account", "daily", False), ("account", "monthly", True),
+        ]
+        assert calls[1]["dates"] == build_buckets(START, END, "monthly")[0]
+        assert (calls[0]["account"], calls[0]["start"], calls[0]["end"]) == (accounts[0], START, END)
+
+    def test_monthly_buckets(self, ledger, accounts, monkeypatch):
+        self.install(monkeypatch, lambda dates: ({"x": [[5.0, 6.0] for _ in dates]}, "USD", False, None))
+        dates, raw, marked, _, _ = usage_explorer.account_series(accounts[0], date(2026, 6, 15), END, "monthly")
+        assert dates == ["2026-06-01", "2026-07-01", "2026-08-01"]
+        assert (raw, marked) == ([5.0] * 3, [6.0] * 3)
+
+    def test_cached_flag_passes_through(self, ledger, accounts, monkeypatch):
+        self.install(monkeypatch, lambda dates: ({}, "USD", True, None))
+        assert usage_explorer.account_series(accounts[0], START, END)[3] is True
+
+    def test_no_spend_is_zeros_not_empty(self, ledger, accounts, monkeypatch):
+        """查成功但没消费：每个桶都是 0，和「查不了」的空列表分得开。"""
+        self.install(monkeypatch, lambda dates: ({}, "USD", False, None))
+        _, raw, marked, _, error = usage_explorer.account_series(accounts[0], START, END)
+        assert raw == marked == [0.0] * 17
+        assert error is None
+
+    def test_failure_gives_empty_lists_and_says_whose(self, ledger, accounts, monkeypatch):
+        self.install(monkeypatch, lambda dates: ({}, "USD", True, "凭证无效"))
+        dates, raw, marked, cached, error = usage_explorer.account_series(accounts[0], START, END)
+        assert dates == build_buckets(START, END, "daily")[0]
+        assert (raw, marked, cached) == ([], [], False)
+        assert isinstance(error, QueryError)
+        assert (error.account, error.partner, error.reason) == ("111111111111", "ALPHA", "凭证无效")
+        assert str(error) == "ALPHA / 111111111111：凭证无效"
+
+    def test_structured_failure_keeps_its_details(self, ledger, accounts, monkeypatch):
+        problem = QueryError(reason="凭证缺少 ce:GetCostAndUsage 权限", detail="AccessDeniedException: denied",
+                             code="AccessDeniedException", action="ce:GetCostAndUsage", kind="denied")
+        self.install(monkeypatch, lambda dates: ({}, "USD", False, problem))
+        error = usage_explorer.account_series(accounts[1], START, END)[4]
+        assert (error.account, error.partner) == ("222222222222", "BETA")
+        assert (error.reason, error.detail, error.code, error.action, error.kind) == (
+            problem.reason, problem.detail, problem.code, problem.action, problem.kind,
+        )
+
+    def test_missing_credentials_never_reach_aws(self, ledger, accounts):
+        keyless = Account(partner="GAMMA", account="333333333333", budget=0, tag_ratio=1, untag_ratio=1)
+        _, raw, marked, cached, error = usage_explorer.account_series(keyless, START, END)
+        assert (raw, marked, cached) == ([], [], False)
+        assert (error.account, error.partner, error.reason, error.kind) == (
+            "333333333333", "GAMMA", MISSING_CREDENTIALS, CREDENTIALS,
+        )
+
+    def test_second_call_comes_from_the_ce_cache(self, ledger, accounts, monkeypatch):
+        """真走一遍 _fetch_account 的缓存，只把发请求的 _query_account 换成假的。"""
+        dimensions: list[str] = []
+
+        def query(account, start, end, dimension, granularity, dates):
+            dimensions.append(dimension)
+            return {"ALPHA / 111111111111": [[1.0, 2.0] for _ in dates]}, "USD"
+
+        monkeypatch.setattr(usage_explorer, "_query_account", query)
+        monkeypatch.setattr(config, "CACHE_TTL", 900)
+        first = usage_explorer.account_series(accounts[0], START, END)
+        second = usage_explorer.account_series(accounts[0], START, END)
+        assert dimensions == ["account"]
+        assert (first[3], second[3]) == (False, True)
+        assert second[1:3] == first[1:3] == ([1.0] * 17, [2.0] * 17)

@@ -28,6 +28,9 @@
 **发不出去**：一封邮件的所有群都发失败（Telegram 连不上、Token 失效）就停在这封，下一轮重试；
 连续 MAX_ATTEMPTS 轮都失败就跳过它、记成问题，免得一封发不出去的邮件卡住后面所有的。
 
+**卡片上的账号**：账号 ID，认得出是台账里哪个账号时再跟上它的账号邮箱（写全）。发出去了的
+记一条进告警事件流（events.py，运营看板读它），dry-run 不记。
+
 状态在 MAIL_STATE_PATH 那个 JSON 里：每个邮箱的 UIDVALIDITY 和收到第几封、最近发过的告警。
 """
 
@@ -127,16 +130,18 @@ def _forget(state: MailState, now: datetime) -> None:
 
 
 # --------------------------------------------------------------- 卡片
-def mail_card(finding: Finding, account_id: str, mail: Mail) -> Card:
+def mail_card(finding: Finding, account_id: str, mail: Mail, email: str = "") -> Card:
     """一封认出来的邮件 -> 一张卡片。和其他告警卡片同一套样式：
 
-        标题行（图标 + 标题 + 徽章）/ 详情面板（账号 UID + 关键字段 + 收到时间）/
+        标题行（图标 + 标题 + 徽章）/ 详情面板（账号 UID + 账号邮箱 + 关键字段 + 收到时间）/
         邮件原文（原主题 + 节选）/ 怎么处理 / 底部发件人 + 署名
+
+    email 是台账里这个账号的邮箱；账号不在台账里、认不出是哪个账号时是空的。
     """
     rows = [Row(fact.label, fact.value, tone=fact.tone, pill=fact.pill) for fact in finding.facts]
     rows.append(Row("收到时间", alerts._moment(mail.received) if mail.received else "—", bold=False))
     blocks: list = [
-        Details(rows, uid=account_id),
+        Details(rows, uid=account_id, email=email),
         Quote("邮件原文（节选）" if finding.excerpt else "邮件主题", finding.excerpt, heading=mail.subject),
     ]
     if finding.notes:
@@ -151,11 +156,11 @@ def mail_card(finding: Finding, account_id: str, mail: Mail) -> Card:
         subtitle=finding.subtitle,
         blocks=blocks,
         footer=f"来自 {sender}" if sender else "",
-        caption=_mail_caption(finding, account_id, mail),
+        caption=_mail_caption(finding, account_id, mail, email),
     )
 
 
-def _mail_caption(finding: Finding, account_id: str, mail: Mail) -> str:
+def _mail_caption(finding: Finding, account_id: str, mail: Mail, email: str = "") -> str:
     """图片下面的文字：标题、关键字段、主题、原文节选（引用块）、AWS 链接。
 
     节选最长，放不下就只截它，别的行都保住——整段不能超过 Telegram 的 1024 字。
@@ -163,7 +168,7 @@ def _mail_caption(finding: Finding, account_id: str, mail: Mail) -> str:
     esc = alerts._esc
     head = f"{EMOJI.get(finding.tone, '📧')} <b>{esc(finding.title)}</b>"
     if account_id:
-        head += f" · {alerts._uid(account_id)}"
+        head += f" · {alerts._uid(account_id, email)}"
     lines = [head]
     facts = " · ".join(f"{fact.label} {fact.value}" for fact in finding.facts)
     if facts:
@@ -231,6 +236,7 @@ class _Run:
     send: Sender
     log: object
     connect: Connector | None
+    dry_run: bool              # dry-run 不记告警事件流
 
 
 def _check_box(box: Mailbox, owners: list[Account], run: _Run, *, look_back: int = 0) -> None:
@@ -314,9 +320,13 @@ def _alert(
             run.log(f"[{label}] {config.MAIL_DEDUPE_MINUTES} 分钟内发过一样的，跳过：{mail.subject}")
             return done()
 
-    card = mail_card(finding, account_id, mail)
-    if alerts._deliver_all(chats, card, run.summary, run.send, run.log):
+    email = account.email if account is not None else ""
+    card = mail_card(finding, account_id, mail, email)
+    groups = alerts._deliver_all(chats, card, run.summary, run.send, run.log)
+    if groups:
         run.state.recent[fingerprint] = run.now.isoformat()
+        if not run.dry_run:
+            alerts._record(card, groups, account_id, email)
         return done()
 
     if progress.stuck_uid == uid:
@@ -363,6 +373,7 @@ def run_check(
         send=alerts._dry_run_sender(log, save_dir) if dry_run else alerts._send,
         log=log,
         connect=connect,
+        dry_run=dry_run,
     )
     for box, owners in boxes.values():
         _check_box(box, owners, run, look_back=look_back)

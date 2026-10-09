@@ -285,7 +285,7 @@ def test_价目表拉不到时整页报错而不是出零(accounts, fake_cloudwa
 
     monkeypatch.setattr(cost_estimate, "load_prices", boom)
     report = build(accounts[:1], fake_cloudwatch)
-    assert report.errors and "端点不可达" in report.errors[0]
+    assert report.errors and "端点不可达" in str(report.errors[0])
     assert report.rows == []
 
 
@@ -373,11 +373,28 @@ def test_取数出错时报出账号和区域(accounts, fake_prices, fake_cloudw
     monkeypatch.setattr(cost_estimate, "list_model_ids", boom)
     report = build(accounts[:1], fake_cloudwatch)
     assert report.errors
-    assert accounts[0].account in report.errors[0]
+    assert accounts[0].account in str(report.errors[0])
+    assert (report.errors[0].account, report.errors[0].region) == (accounts[0].account, "us-east-1")
 
 
 # ------------------------------------------------------------------ 页面
-def test_预估成本页能打开(logged_in, ledger, fake_prices, fake_cloudwatch):
+# 预估现在是账号页的一个页签：/account/<号码>/estimate，一次只看一个账号。
+PAGE = "/account/111111111111/estimate"
+# 页面用例看「昨天」这一天：在台账的启用日期之后，也在 Cost Explorer 的保留期之内
+DAY = (date.today() - timedelta(days=1)).isoformat()
+
+
+@pytest.fixture
+def estimate_page(monkeypatch, fake_prices, fake_cloudwatch):
+    """账号页页头的用量状态不去查 CloudWatch（这里只关心预估），金额按 $ 写（.env 能改货币符号）。"""
+    from bedrock_cost import activity, config
+
+    monkeypatch.setattr(activity, "account_activity", lambda account, now=None, refresh=False: activity.Activity(kind="idle"))
+    monkeypatch.setattr(activity, "_cache", {})
+    monkeypatch.setattr(config, "CURRENCY_SYMBOL", "$")
+
+
+def test_预估成本页能打开(logged_in, ledger, estimate_page, fake_cloudwatch):
     fake_cloudwatch["regions"] = {
         "us-east-1": {
             "global.anthropic.claude-opus-5": tokens(
@@ -385,7 +402,7 @@ def test_预估成本页能打开(logged_in, ledger, fake_prices, fake_cloudwatc
             )
         }
     }
-    response = logged_in.get("/cost-estimate?start=2026-08-14&end=2026-08-14")
+    response = logged_in.get(f"{PAGE}?start={DAY}&end={DAY}")
     html = response.get_data(as_text=True)
     assert response.status_code == 200
     assert "claude-opus-5" in html
@@ -394,8 +411,9 @@ def test_预估成本页能打开(logged_in, ledger, fake_prices, fake_cloudwatc
         assert label in html
     for label in ("输入价/M", "输出价/M", "缓存读价/M", "缓存写价/M"):
         assert label in html
-    # 台账里两个账号，页面默认「全部账号」，所以是两份
-    assert "$73.50" in html  # (5 + 25 + 0.5 + 6.25) × 2
+    # 账号页只算这一个账号（以前默认「全部账号」，台账里两个账号就是两份）
+    assert "$36.75" in html  # 5 + 25 + 0.5 + 6.25
+    assert "$73.50" not in html
 
 
 def test_未登录进不去预估成本页(client, ledger):
@@ -414,43 +432,56 @@ def test_页面不泄露凭证(logged_in, ledger, fake_prices, fake_cloudwatch):
         assert ledger_value(row, "SK") not in html
 
 
-def test_没有单价的模型会在页面上提示(logged_in, ledger, fake_prices, fake_cloudwatch):
+def test_没有单价的模型会在页面上提示(logged_in, ledger, estimate_page, fake_cloudwatch):
     fake_cloudwatch["regions"] = {
         "us-east-1": {"amazon.nova-pro-v1:0": tokens(inp=1_000_000)}
     }
-    html = logged_in.get("/cost-estimate").get_data(as_text=True)
+    html = logged_in.get(PAGE).get_data(as_text=True)
     assert "amazon.nova-pro-v1:0" in html
     assert "没有对应条目" in html
 
 
-def test_页面标注了这是牌价(logged_in, ledger, fake_prices, fake_cloudwatch):
-    """不写清楚的话，有 EDP 折扣的人会以为这个数就是账单。"""
-    html = logged_in.get("/cost-estimate").get_data(as_text=True)
-    assert "牌价" in html
-    assert "折扣" in html
+def test_页面标注了这是牌价(logged_in, ledger, estimate_page, fake_cloudwatch):
+    """不写清楚的话，有 EDP 折扣的人会以为这个数就是账单。正文里要说（页脚的措辞常改，不算）。"""
+    import re
+
+    html = logged_in.get(PAGE).get_data(as_text=True)
+    body = re.sub(r'<footer class="meta">.*?</footer>', "", html, flags=re.S)
+    assert "公开牌价" in body
 
 
-def test_日期区间快捷项(logged_in, ledger, fake_prices, fake_cloudwatch):
-    response = logged_in.get("/cost-estimate?preset=last7")
+def test_日期区间快捷项(logged_in, ledger, estimate_page, fake_cloudwatch):
+    """快捷项在时间下拉里：选中的那个写在按钮上，列表里打勾。"""
+    import re
+
+    response = logged_in.get(f"{PAGE}?preset=last7")
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "chip-on" in html
+    assert re.search(r"<summary>.*?近 7 天\s*</summary>", html, re.S)
+    assert re.search(r'<a class="range-opt" href="[^"]*preset=last7[^"]*" aria-current="true">', html)
 
 
-def test_按账号筛选(logged_in, ledger, fake_prices, fake_cloudwatch, accounts):
+def test_按账号筛选(logged_in, ledger, estimate_page, fake_cloudwatch, accounts):
+    """账号写在网址里。老网址上的 account=号码#行号 跳到那个账号的预估页签，只算它一个。"""
+    from urllib.parse import quote
+
     fake_cloudwatch["regions"] = {
         "us-east-1": {"global.anthropic.claude-opus-5": tokens(inp=1_000_000)}
     }
-    response = logged_in.get(f"/cost-estimate?account={accounts[0].key}")
-    assert response.status_code == 200
-    assert accounts[0].partner in response.get_data(as_text=True)
+    beta = accounts[1]
+    response = logged_in.get(f"/cost-estimate?account={quote(beta.key, safe='')}&start={DAY}&end={DAY}")
+    assert response.status_code == 302
+    assert response.headers["Location"].startswith(f"/account/{beta.account}/estimate?")
+    html = logged_in.get(response.headers["Location"]).get_data(as_text=True)
+    assert beta.partner in html
+    assert "$5.00" in html and "$10.00" not in html   # 一个账号的量，不是两个账号的合计
 
 
 # ------------------------------------------------------------------ 页面上的交互件
 # 这三样都是「漏了也不报错、只是页面变哑巴」的东西，很容易改着改着就丢了
-def test_筛选条改动即提交(logged_in, ledger, fake_prices, fake_cloudwatch):
-    """账号和日期改了要自动重查。这一页的表单没有查询按钮，脚本丢了就等于失灵。"""
-    html = logged_in.get("/cost-estimate").get_data(as_text=True)
+def test_筛选条改动即提交(logged_in, ledger, estimate_page, fake_cloudwatch):
+    """日期改了要自动重查。这一页的表单没有查询按钮（只有时间下拉里自定义起止的「应用」），脚本丢了就等于失灵。"""
+    html = logged_in.get(PAGE).get_data(as_text=True)
     assert "estimate-filters" in html
     # 脚本在 shell.html 里按类统一绑，所以表单必须带上 filters-auto——
     # 光有 id 不起作用
@@ -459,30 +490,26 @@ def test_筛选条改动即提交(logged_in, ledger, fake_prices, fake_cloudwatc
     assert "form.submit()" in html
 
 
-def test_图表带悬浮提示(logged_in, ledger, fake_prices, fake_cloudwatch):
-    """柱子上的 hover 提示靠三样东西：容器、数据、脚本，缺一个就没反应。"""
+def test_图表带悬浮提示(logged_in, ledger, estimate_page, fake_cloudwatch):
+    """柱子上的 hover 提示靠三样东西：提示框、数据、脚本，缺一个就没反应。提示框由脚本现建。"""
     fake_cloudwatch["regions"] = {
         "us-east-1": {"global.anthropic.claude-opus-5": tokens(inp=1_000_000)}
     }
-    html = logged_in.get(
-        "/cost-estimate?start=2026-08-14&end=2026-08-14"
-    ).get_data(as_text=True)
-    assert 'id="chart-tip"' in html
+    html = logged_in.get(f"{PAGE}?start={DAY}&end={DAY}").get_data(as_text=True)
+    assert "tip.className = 'chart-tip'" in html
     assert 'id="chart-data"' in html
     assert "chart-hit" in html          # SVG 里的命中区
     assert "mouseenter" in html
 
 
-def test_悬浮数据里有每个模型的金额(logged_in, ledger, fake_prices, fake_cloudwatch):
+def test_悬浮数据里有每个模型的金额(logged_in, ledger, estimate_page, fake_cloudwatch):
     import json
     import re
 
     fake_cloudwatch["regions"] = {
         "us-east-1": {"global.anthropic.claude-opus-5": tokens(inp=1_000_000)}
     }
-    html = logged_in.get(
-        "/cost-estimate?start=2026-08-14&end=2026-08-14"
-    ).get_data(as_text=True)
+    html = logged_in.get(f"{PAGE}?start={DAY}&end={DAY}").get_data(as_text=True)
     payload = re.search(
         r'<script id="chart-data" type="application/json">(.*?)</script>', html, re.S
     )
@@ -493,18 +520,20 @@ def test_悬浮数据里有每个模型的金额(logged_in, ledger, fake_prices,
     assert buckets[0]["total"] > 0
 
 
-def test_合计行不显示单价(logged_in, ledger, fake_prices, fake_cloudwatch):
-    """单价是逐模型的，加总没有意义，那四格留空。"""
+def test_合计行不显示单价(logged_in, ledger, estimate_page, fake_cloudwatch):
+    """单价是逐模型的，加总没有意义，那四格留空。
+
+    用 200 万输入 token：合计 $10.00，和输入单价 $5.00/M 不是同一个数，才分得出来。
+    """
     import re
 
     fake_cloudwatch["regions"] = {
-        "us-east-1": {"global.anthropic.claude-opus-5": tokens(inp=1_000_000)}
+        "us-east-1": {"global.anthropic.claude-opus-5": tokens(inp=2_000_000)}
     }
-    html = logged_in.get(
-        "/cost-estimate?start=2026-08-14&end=2026-08-14"
-    ).get_data(as_text=True)
+    html = logged_in.get(f"{PAGE}?start={DAY}&end={DAY}").get_data(as_text=True)
     foot = re.search(r"<tfoot>(.*?)</tfoot>", html, re.S).group(1)
     assert "合计" in foot
+    assert "$10.00" in foot           # 估算成本的合计
     assert "$5.00" not in foot        # 单价不该出现在合计行
     assert 'colspan="4"' in foot      # 四格并成一个空格子
     assert "$5.00" in html            # 但明细行里还在
@@ -692,7 +721,7 @@ class TestHourUsage:
         minutes["fail"] = {"us-west-2"}
         usage = cost_estimate.hour_usage(self.account(), self.HOUR)
         assert usage.invocations == 3
-        assert len(usage.errors) == 1 and usage.errors[0].startswith("us-west-2：")
+        assert len(usage.errors) == 1 and str(usage.errors[0]).startswith("us-west-2：")
 
     def test_unpriced_models_are_named(self, minutes):
         minutes["regions"] = {"us-east-1": {"anthropic.claude-mystery-9": {"InputTokenCount": {1: 1000}}}}

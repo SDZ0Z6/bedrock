@@ -1,4 +1,7 @@
-"""台账读取：TAG 列解析、数字容错、列缺失、凭证不外泄。"""
+"""台账读取：TAG 列解析、数字容错、列缺失、凭证不外泄，以及改版加的几列可选列。
+
+生命周期标签（LIFECYCLE 列和第二个工作表）细测在 test_lifecycle，头像（AVATAR、AVATAR_COLOR）在 test_avatars。
+"""
 
 from __future__ import annotations
 
@@ -8,6 +11,7 @@ import pytest
 
 from bedrock_cost import config, excel_source
 from bedrock_cost.excel_source import (
+    Account,
     ExcelSourceError,
     _to_date,
     load_accounts,
@@ -216,3 +220,56 @@ class TestTgChatIds:
         from bedrock_cost.excel_source import _canon_chat_ids
 
         assert _canon_chat_ids(" -1001111111111 ，-1002222222222 ") == "-1001111111111,-1002222222222"
+
+
+class TestNewColumns:
+    """改版加的 EMAIL、LIFECYCLE、AVATAR、AVATAR_COLOR 都是可选列：老台账没有它们照样能读。"""
+
+    def test_an_old_ledger_reads_with_blanks(self, accounts):
+        for account in accounts:
+            assert (account.email, account.lifecycle, account.avatar_emoji, account.avatar_color) == ("", (), "", None)
+
+    def test_they_are_read(self, tmp_path, monkeypatch):
+        path = tmp_path / "new.xlsx"
+        # 表头和别的列一样不分大小写、不管前后空格
+        header = [*LEDGER_HEADER, "email", " Lifecycle ", "AVATAR", "avatar_color"]
+        rows = [
+            [*LEDGER_ROWS[0], " Ops.Team@Example.com ", "正常，风控", "🦊", 2],
+            [*LEDGER_ROWS[1], None, None, None, None],
+        ]
+        write_ledger(path, header=header, rows=rows)
+        monkeypatch.setattr(config, "EXCEL_PATH", path)
+        excel_source.clear_cache()
+        first, second = load_accounts(force=True)
+        assert first.email == "Ops.Team@Example.com"          # 去掉前后空格，大小写照存
+        assert first.lifecycle == ("正常", "风控")
+        assert (first.avatar_emoji, first.avatar_color) == ("🦊", 2)
+        assert (second.email, second.lifecycle, second.avatar_emoji, second.avatar_color) == ("", (), "", None)
+
+    @pytest.mark.parametrize(
+        "email, label",
+        [
+            ("ops.team@example.com", "ops.team"),     # 图表、面包屑、下拉框里的短名：@ 前面那段
+            ("", "111111111111"),                     # 没填邮箱就用号码
+        ],
+    )
+    def test_label(self, email, label):
+        account = Account(partner="P", account="111111111111", budget=0, tag_ratio=1, untag_ratio=1, email=email)
+        assert account.label == label
+
+    def test_the_missing_column_message_lists_the_optional_ones_too(self, tmp_path, monkeypatch):
+        path = tmp_path / "broken.xlsx"
+        write_ledger(path, header=["PARTNER", "ACCOUNT"], rows=[["P", 1]])
+        monkeypatch.setattr(config, "EXCEL_PATH", path)
+        excel_source.clear_cache()
+        with pytest.raises(ExcelSourceError) as caught:
+            load_accounts(force=True)
+        optional = str(caught.value).partition("可选")[2]
+        for column in ("EMAIL", "LIFECYCLE", "AVATAR", "AVATAR_COLOR"):
+            assert column in optional
+
+    def test_writing_keeps_them_editable_but_not_the_credentials(self):
+        """账号邮箱、生命周期、头像都能在修改弹窗里改；凭证不行（要换就停用重建）。"""
+        for name in ("email", "lifecycle", "avatar_emoji", "avatar_color"):
+            assert name in excel_source.EDITABLE
+        assert "ak" not in excel_source.EDITABLE and "sk" not in excel_source.EDITABLE

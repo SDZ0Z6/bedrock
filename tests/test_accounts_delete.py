@@ -6,14 +6,25 @@
 
 from __future__ import annotations
 
-import re
-
-import pytest
-
 from bedrock_cost import auth, config, excel_source
 
 from .conftest import LEDGER_ROWS, TEST_PASSWORD
-from .test_accounts import NEW_FORM, _dialog, _edit, admin, by_account, post, raw_rows  # noqa: F401
+from .test_accounts import (  # noqa: F401
+    EMAILS,
+    NEW_FORM,
+    _dialog,
+    _edit,
+    admin,
+    by_account,
+    input_attrs,
+    page,
+    post,
+    raw_rows,
+    reopened_dialogs,
+    table_rows,
+    text,
+    toasts,
+)
 
 
 def backups(ledger) -> list:
@@ -31,26 +42,34 @@ def delete(admin, account_id: str, password: str = TEST_PASSWORD):
 
 class TestDelete:
     def test_every_row_has_a_delete_icon(self, admin, ledger):
-        html = admin.get("/accounts/").get_data(as_text=True)
+        html = page(admin)
         assert html.count('data-open="dlg-del-') == len(LEDGER_ROWS)
-        assert 'aria-label="删除 111111111111"' in html
-        assert ">删除</button>" not in html                       # 和别的操作一样只有图标
+        for index, (attrs, cells) in enumerate(table_rows(html), start=1):
+            actions = cells[-1]
+            assert f'data-open="dlg-del-{index}"' in actions
+            assert f'aria-label="删除 {attrs["data-number"]}"' in actions
+            assert "删除" not in text(actions)                     # 和别的操作一样只有图标
 
     def test_the_dialog_asks_for_the_login_password(self, admin, ledger):
-        dialog = _dialog(admin.get("/accounts/").get_data(as_text=True), 'id="dlg-del-1"')
+        dialog = _dialog(page(admin), 'id="dlg-del-1"')
         assert "删除后不能恢复" in dialog
-        assert re.search(r'name="password" type="password" required', dialog)
+        field = input_attrs(dialog, "password")
+        assert field["type"] == "password" and field["required"] is True
         assert "删除不会自动备份" in dialog
         assert "「停用」就够了" in dialog                          # 启用着的账号先提醒一句停用
+
+    def test_a_disabled_account_is_not_told_to_disable(self, admin, ledger):
+        post(admin, "/accounts/toggle", key=by_account("111111111111").key, enabled="0")
+        assert "「停用」就够了" not in _dialog(page(admin), 'id="dlg-del-1"')
 
     def test_the_right_password_clears_the_whole_row(self, admin, ledger):
         response = delete(admin, "111111111111")
         assert response.status_code == 302
         assert by_account("111111111111") is None
         header, *rows = raw_rows(ledger)
-        assert rows[0] == [None] * len(header)                   # 整行清空，凭证一起没了
+        assert rows[0] == [None] * len(header)                   # 整行清空，凭证、邮箱一起没了
         assert rows[1][header.index("ACCOUNT")] == 222222222222   # 下面那行原地不动
-        assert "删除账号 111111111111（ALPHA）" in admin.get("/accounts/").get_data(as_text=True)
+        assert ("ok", "删除账号 111111111111（ALPHA）。") in toasts(page(admin))
 
     def test_other_rows_keep_their_keys(self, admin, ledger):
         """不删行：删行会让下面所有账号的行号上移，key 和各处的缓存键跟着错位。"""
@@ -64,9 +83,8 @@ class TestDelete:
         assert response.status_code == 403
         assert ledger.stat().st_mtime_ns == before
         html = response.get_data(as_text=True)
-        dialog = _dialog(html, 'id="dlg-del-1"')
-        assert "data-reopen" in html[html.index('id="dlg-del-1"') - 40 : html.index('id="dlg-del-1"') + 80]
-        assert "登录密码不对，账号没有删除" in dialog
+        assert reopened_dialogs(html) == ["dlg-del-1"]
+        assert "登录密码不对，账号没有删除" in _dialog(html, 'id="dlg-del-1"')
         assert "wrong-password" not in html
 
     def test_wrong_passwords_share_the_login_lockout(self, admin, ledger, monkeypatch):
@@ -93,6 +111,13 @@ class TestDelete:
         post(admin, "/accounts/create", **{**NEW_FORM, "account": "111111111111"})
         assert by_account("111111111111").partner == "GAMMA"
 
+    def test_a_deleted_accounts_email_is_free_again(self, admin, ledger):
+        """账号邮箱同理：停用的还占着（见 test_accounts），删掉的就空出来了。"""
+        delete(admin, "111111111111")
+        response = post(admin, "/accounts/create", **{**NEW_FORM, "email": EMAILS["111111111111"]})
+        assert response.status_code == 302
+        assert by_account("333333333333").email == EMAILS["111111111111"]
+
     def test_disabled_accounts_can_be_deleted_too(self, admin, ledger):
         post(admin, "/accounts/toggle", key=by_account("111111111111").key, enabled="0")
         delete(admin, "111111111111")
@@ -113,14 +138,14 @@ class TestDelete:
 
 
 class TestBackups:
-    """只有新增和修改账号才备份：开关、停用 / 恢复、删除都不备份。"""
+    """只有新增和修改账号才备份：开关、生命周期、停用 / 恢复、删除都不备份。"""
 
     def test_creating_and_editing_back_up(self, admin, ledger):
         post(admin, "/accounts/create", **NEW_FORM)
         _edit(admin, by_account("111111111111"), budget="777")
         assert len(backups(ledger)) == 2
 
-    def test_switches_disabling_and_deleting_do_not(self, admin, ledger):
+    def test_switches_lifecycle_disabling_and_deleting_do_not(self, admin, ledger):
         from .test_accounts_mail import MAILBOX
 
         _edit(admin, by_account("111111111111"), tg_chat_ids="-1001234567890", **MAILBOX)
@@ -128,15 +153,20 @@ class TestBackups:
         key = by_account("111111111111").key
         post(admin, "/accounts/tg-toggle", key=key, tg_enabled="1")
         post(admin, "/accounts/mail-toggle", key=key, mail_enabled="1")
+        post(admin, "/accounts/lifecycle", key=key, lifecycle=["风控"])
+        post(admin, "/accounts/lifecycle/add", name="观察", color="amber")
+        post(admin, "/accounts/lifecycle/remove", name="结算")
         post(admin, "/accounts/toggle", key=key, enabled="0")
         post(admin, "/accounts/toggle", key=key, enabled="1")
         delete(admin, "222222222222")
         assert len(backups(ledger)) == 1                          # 还是改字段时的那一份
         log = audit(ledger)
         for line in ("开启账号 111111111111 的 TG 告警", "开启账号 111111111111 的邮件告警",
+                     "账号 111111111111 的生命周期：空 → 风控", "新增生命周期标签「观察」",
+                     "删除生命周期标签「结算」",
                      "停用账号 111111111111", "恢复账号 111111111111", "删除账号 222222222222"):
             assert line in log                                   # 不备份，但照样记审计
 
-    def test_the_page_says_when_it_backs_up(self, admin, ledger):
-        html = admin.get("/accounts/").get_data(as_text=True)
-        assert "新增和修改账号前自动备份" in html and "开关、停用和删除不备份" in html
+    def test_an_unchanged_edit_neither_writes_nor_backs_up(self, admin, ledger):
+        _edit(admin, by_account("111111111111"))
+        assert backups(ledger) == []

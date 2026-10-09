@@ -92,14 +92,15 @@ def _color(tone: str) -> tuple[int, int, int]:
 # ---------------------------------------------------------------- 卡片上有什么
 @dataclass
 class Uid:
-    """「账号 UID」标签 + 等宽字的账号小块。"""
+    """「账号 UID」标签 + 等宽字的账号小块；填了账号邮箱就跟在小块右边。"""
 
     uid: str
     label: str = "账号 UID"
     chip: tuple[int, int, int] = CHIP
+    email: str = ""
 
     def strings(self) -> list[str]:
-        return [self.label, self.uid]
+        return [self.label, self.uid, self.email] if self.email else [self.label, self.uid]
 
     def layout(self, pen: _Pen, x: float, y: float, w: float, tone: Tone) -> float:
         pen.text(x, y + 9, self.label, _font(13), TEXT_2)
@@ -108,6 +109,12 @@ class Uid:
         width = _width(self.uid, font) + 18
         pen.box((x, top, x + width, top + 30), 7, fill=self.chip)
         pen.text(x + 9, top + 15, self.uid, font, WHITE)
+        if self.email:
+            # 号码一眼认不出是谁，邮箱和它写在同一行，块的高度不变。太长就截断补省略号，
+            # 不能画出这一块的宽度
+            left = x + width + 12
+            small = _font(15)
+            pen.text(left, top + 15, _fit(self.email, small, x + w - left), small, TEXT_2)
         return 56
 
 
@@ -190,12 +197,13 @@ class Cell:
     text: str
     tone: str = ""    # 字的颜色，见 _color
     mark: str = ""    # 只用在 UID 列：后面加一个彩色小圆点，表示这一行在下面有说明
-    note: str = ""    # 值下面再补一行灰色小字（「截至 09-28」）；这一行会跟着变高
+    # 值下面再补一行灰色小字（「截至 09-28」）；这一行会跟着变高。UID 列里写的是账号邮箱
+    note: str = ""
 
 
 @dataclass
 class Table:
-    """日报的表格。第一列是 UID，画成等宽字的小块；其余列右对齐。"""
+    """日报的表格。第一列是 UID，画成等宽字的小块（填了邮箱就写在小块下面）；其余列右对齐。"""
 
     columns: list[str]
     rows: list[list[Cell]]
@@ -211,6 +219,15 @@ class Table:
     def _height(self, row: list[Cell]) -> float:
         return self.NOTED_ROW if any(cell.note for cell in row) else self.ROW
 
+    def _email_room(self, row: list[Cell], step: float, cell_font, note_font) -> float:
+        """UID 下面那行邮箱能写多宽：UID 这一列总归是它的，还可以伸进第一列左边的空白，
+        但要和那一列的字留出间距——那一列是右对齐的，空白有多大看字有多长。"""
+        if len(row) < 2:
+            return self.UID_COLUMN - 10
+        cell = row[1]
+        used = max(_width(cell.text, cell_font), _width(cell.note, note_font) if cell.note else 0)
+        return max(self.UID_COLUMN - 10, self.UID_COLUMN + step - used - 14)
+
     def layout(self, pen: _Pen, x: float, y: float, w: float, tone: Tone) -> float:
         step = (w - self.UID_COLUMN) / (len(self.columns) - 1)
         head = _font(14, 700)
@@ -225,11 +242,16 @@ class Table:
             pen.line(x, top, x + w, top, LINE)
             middle = top + height / 2
             uid = row[0]
+            # 带邮箱的 UID 和带小字的格子一个排法：小块往上挪，邮箱写在下面
+            center = middle - 8 if uid.note else middle
             chip = _width(uid.text, uid_font) + 14
-            pen.box((x, middle - 13, x + chip, middle + 13), 6, fill=CHIP)
-            pen.text(x + 7, middle, uid.text, uid_font, WHITE)
+            pen.box((x, center - 13, x + chip, center + 13), 6, fill=CHIP)
+            pen.text(x + 7, center, uid.text, uid_font, WHITE)
             if uid.mark:
-                pen.ellipse((x + chip + 8, middle - 4, x + chip + 16, middle + 4), fill=_color(uid.mark))
+                pen.ellipse((x + chip + 8, center - 4, x + chip + 16, center + 4), fill=_color(uid.mark))
+            if uid.note:
+                room = self._email_room(row, step, cell_font, note_font)
+                pen.text(x, middle + 14, _fit(uid.note, note_font, room), note_font, TEXT_2)
             for index, cell in enumerate(row[1:], start=1):
                 right = x + self.UID_COLUMN + step * index
                 # 带小字的格子：值往上挪，小字放在值下面
@@ -373,18 +395,20 @@ class Row:
 
 @dataclass
 class Details:
-    """一块深色面板：顶上可选一行灰色小标题、「账号 UID」+ 账号小块，下面一行行标签和值。"""
+    """一块深色面板：顶上可选一行灰色小标题、「账号 UID」+ 账号小块（+ 账号邮箱），
+    下面一行行标签和值。"""
 
     rows: list[Row]
     uid: str = ""
     ruled: bool = False   # 行与行之间画分隔线（测试消息那种）
     title: str = ""       # 面板顶上的灰色小标题（「上一次有调用的那一小时」）
+    email: str = ""       # 账号邮箱，写在账号小块右边；没有 uid 时不画
 
     TITLE_H = 30
 
     def strings(self) -> list[str]:
         title = [self.title] if self.title else []
-        head = ["账号 UID", self.uid] if self.uid else []
+        head = Uid(self.uid, email=self.email).strings() if self.uid else []
         return [*title, *head, *(s for row in self.rows for s in (row.label, row.value))]
 
     def layout(self, pen: _Pen, x: float, y: float, w: float, tone: Tone) -> float:
@@ -400,7 +424,7 @@ class Details:
             top += title_h
         if self.uid:
             top += 14
-            Uid(self.uid, chip=CHIP_ON_PANEL).layout(pen, x + pad, top, w - pad * 2, tone)
+            Uid(self.uid, chip=CHIP_ON_PANEL, email=self.email).layout(pen, x + pad, top, w - pad * 2, tone)
             top += 56 + 8
             pen.line(x + pad, top, x + w - pad, top, LINE)
             top += 8

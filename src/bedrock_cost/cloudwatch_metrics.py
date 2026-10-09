@@ -42,7 +42,7 @@ import boto3
 from botocore.config import Config as BotoConfig
 
 from . import config
-from .cost_explorer import friendly_error
+from .aws_errors import QueryError, as_query_error, describe
 from .excel_source import Account
 from .usage_explorer import MAX_SERIES, OTHER_LABEL, assign_slots
 from .windows import MetricWindow
@@ -211,7 +211,8 @@ class UsageMetricsReport:
     series: list[MetricSeries] = field(default_factory=list)
     # 逐区域的面板，用于 2×2 小倍数图
     panels: list[RegionPanel] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
+    # 每个读不到的 (账号, 区域) 一条；str() 是「上游 / 账号 @ 区域：原因（错误码）」
+    errors: list[QueryError] = field(default_factory=list)
     any_cached: bool = False
     folded_count: int = 0
 
@@ -496,7 +497,7 @@ def is_tagged(model_id: str, profiles: dict[str, ProfileInfo], account: Account)
 # --------------------------------------------------------------- 取数
 def _fetch_region(
     account: Account, region: str, window: MetricWindow, metric_key: str
-) -> tuple[dict[str, list[float]], bool, str | None]:
+) -> tuple[dict[str, list[float]], bool, QueryError | None]:
     """返回 {ModelId: 按桶对齐的值}。"""
     cache_key = (
         account.ak[-6:], account.account, region, metric_key,
@@ -570,7 +571,7 @@ def _fetch_region(
                 if not token:
                     break
     except Exception as exc:
-        return {}, False, friendly_error(exc, account)
+        return {}, False, describe(exc, account, region)
 
     rows = {model: values for model, values in rows.items() if any(values)}
     _store(_data_cache, cache_key, rows)
@@ -625,7 +626,9 @@ def build_metrics(
         for account, region, rows, cached, error in pool.map(run, jobs):
             if error:
                 report.errors.append(
-                    f"{account.partner} / {account.account} @ {region}：{error}"
+                    as_query_error(
+                        error, account=account.account, region=region, partner=account.partner
+                    )
                 )
                 continue
             if cached:
@@ -773,7 +776,8 @@ def hourly_invocations(
                     if not token:
                         break
         except Exception as exc:
-            failed.append(f"{region}：{friendly_error(exc, account)}")
+            # 仍然给一行字而不是 QueryError：告警那边用「；」.join 直接拼，str.join 只收 str
+            failed.append(f"{region}：{describe(exc, account, region).message}")
 
     if failed:
         return None, failed

@@ -1,0 +1,111 @@
+{# 几个页面共用的小部件。用法：{% from "_macros.html" import account_picker, avatar %} #}
+
+{# 头像：见 avatars.py。small 是下拉框、表格里用的小号，large 是账号页页头的大号 #}
+{% macro avatar(av, small=false, large=false) -%}
+  <span class="avatar {{ av.css }}{% if small %} avatar-sm{% endif %}{% if large %} avatar-lg{% endif %}" aria-hidden="true"><span>{{ av.text }}</span></span>
+{%- endmacro %}
+
+{# 账号下拉框的选项。没有「全部账号」：查询页一次只看一个账号，选了哪个各页共用。
+   有停用的账号时才分组，停用的放在最后一组；全是启用的就不多一层「启用」标题。 #}
+{% macro account_options(accounts, selected) -%}
+  {%- set active = accounts | selectattr('enabled') | list -%}
+  {%- set off = accounts | rejectattr('enabled') | list -%}
+  {%- if off -%}
+    {%- for label, items in [('启用', active), ('已停用', off)] if items %}
+      <optgroup label="{{ label }}">
+        {%- for account in items %}{{ _account_option(account, selected) }}{% endfor %}
+      </optgroup>
+    {%- endfor -%}
+  {%- else -%}
+    {%- for account in active %}{{ _account_option(account, selected) }}{% endfor -%}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro _account_option(account, selected) %}
+        <option value="{{ account.key }}" {% if account.key == selected %}selected{% endif %}>
+          {{- account.account }}{% if account.email %}（{{ account.email }}）{% endif %} · {{ account.partner -}}
+        </option>
+{%- endmacro %}
+
+{# 账号选择器：ID 和邮箱分开显示，能搜。原生 <select> 一直在里面，不开 JS 也能选；
+   开了 JS 由 static/app.js 换成按钮 + 弹层。
+   href 给了（里面的 __ID__ 换成账号号码）就是「跳到那个账号的页面」，没给就是改
+   select 的值、交给所在的表单提交。 #}
+{% macro account_picker(accounts, selected, label_id, href='') -%}
+  {%- set current = (accounts | selectattr('key', 'equalto', selected) | first) or (accounts | first) -%}
+  {%- set active = accounts | selectattr('enabled') | list -%}
+  {%- set off = accounts | rejectattr('enabled') | list -%}
+  <div class="acct-picker" data-picker {% if href %}data-href="{{ href }}"{% endif %}>
+    <select id="account" name="account" aria-labelledby="{{ label_id }}">{{ account_options(accounts, selected) }}</select>
+    {% if current %}
+      <button class="acct-picker-btn" type="button" aria-haspopup="listbox" aria-expanded="false"
+              aria-labelledby="{{ label_id }} acct-picker-current" hidden>
+        {{ avatar(current.avatar, small=true) }}
+        <span class="acct-picker-id" id="acct-picker-current">{{ current.account }}</span>
+        <span class="acct-picker-mail">{{ current.email }}</span>
+      </button>
+      <div class="acct-picker-pop" hidden>
+        <input class="acct-picker-search" type="search" placeholder="搜 ID、邮箱或上游" autocomplete="off"
+               role="combobox" aria-expanded="true" aria-controls="acct-picker-list" aria-autocomplete="list"
+               aria-label="搜索账号">
+        <ul class="acct-picker-list" id="acct-picker-list" role="listbox" aria-label="账号">
+          {% for group, items in [('on', active), ('off', off)] if items %}
+            {% if group == 'off' %}<li class="acct-picker-group" role="presentation" data-group="off">已停用</li>{% endif %}
+            {% for account in items %}
+              <li class="acct-opt" role="option" id="acct-opt-{{ group }}-{{ loop.index }}" data-group="{{ group }}"
+                  data-value="{{ account.key }}" data-number="{{ account.account }}"
+                  data-search="{{ account.account }} {{ account.email }} {{ account.partner }}"
+                  aria-selected="{{ 'true' if account.key == current.key else 'false' }}">
+                {{ avatar(account.avatar, small=true) }}
+                <span class="acct-opt-text">
+                  <span class="acct-opt-id">{{ account.account }}</span>
+                  <span class="acct-opt-mail">{{ account.email or '未填账号邮箱' }}</span>
+                </span>
+                <span class="acct-opt-side">{{ account.partner }}</span>
+                <svg class="acct-opt-check" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7"/></svg>
+              </li>
+            {% endfor %}
+          {% endfor %}
+        </ul>
+        <p class="acct-picker-empty" hidden>没有匹配的账号</p>
+      </div>
+    {% endif %}
+  </div>
+{%- endmacro %}
+
+{# 表格里的账号格：号码一行，邮箱一行 #}
+{% macro account_cell(number, email) -%}
+  <span class="acct-cell">
+    <span class="acct-cell-id">{{ number }}</span>
+    {%- if email %}<span class="acct-cell-mail" title="{{ email }}">{{ email }}</span>{% endif %}
+  </span>
+{%- endmacro %}
+
+{# 时间范围下拉：按钮写着现在看的是哪段，点开是一列快捷项（链接），底下一道细线后面
+   是自定义起止（属于外面那个 GET 表单，点「应用」提交）。原生 <details>，不开 JS
+   也能用。presets 是 [(网址, 名字, 是否当前)]；min_value 是最早能选到的时间（账号的
+   启用日期），kind 是 date 或 datetime-local。 #}
+{% macro range_picker(label, presets, start, end, min_value='', max_value='', kind='date', hint='') -%}
+  <details class="range-picker" data-range-picker>
+    <summary>
+      <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="11" rx="2"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3"/></svg>
+      {{ label }}
+    </summary>
+    <div class="range-pop">
+      {% for url, name, current in presets %}
+        <a class="range-opt" href="{{ url }}" {% if current %}aria-current="true"{% endif %}>
+          {{ name }}{% if current %}<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7"/></svg>{% endif %}
+        </a>
+      {% endfor %}
+      <div class="range-custom">
+        <span class="range-custom-title">自定义</span>
+        <input type="{{ kind }}" name="start" value="{{ start }}" aria-label="开始"
+               {% if min_value %}min="{{ min_value }}"{% endif %} {% if max_value %}max="{{ max_value }}"{% endif %}>
+        <input type="{{ kind }}" name="end" value="{{ end }}" aria-label="结束"
+               {% if min_value %}min="{{ min_value }}"{% endif %} {% if max_value %}max="{{ max_value }}"{% endif %}>
+        {% if hint %}<span class="range-hint">{{ hint }}</span>{% endif %}
+        <button class="btn btn-sm btn-primary" type="submit">应用</button>
+      </div>
+    </div>
+  </details>
+{%- endmacro %}

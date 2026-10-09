@@ -4,18 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Bedrock 成本监控{% endblock %}</title>
-  {# 字体：Inter 管界面与中文之外的正文，Source Serif 4 管标题和数字。
-     两者都没有中文字形，中文会按 --font-sans / --font-display 里排在后面的
-     雅黑、苹方接住——所以「英文数字衬线、中文无衬线」不需要额外标记。
+  {# 字体：Inter 管界面和数字，Source Serif 4 管标题里的西文，思源宋体（Noto
+     Serif SC）管标题里的中文。正文的中文落到 --font-sans 里排在后面的苹方、雅黑。
+     思源宋体只要 500 一个字重：Google Fonts 会把它切成按 unicode-range 分片的
+     小文件，页面上用到哪些字才下哪几片。
      preconnect 是为了让字体和样式表并行握手，少一个往返。
      display=swap：字体没到之前先用系统字体渲染，不留白屏；万一 Google Fonts
      不可达（比如在中国大陆），页面照常可读，只是字体退回系统的。 #}
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400..600&family=Source+Serif+4:opsz,wght@8..60,400..700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400..600&family=Source+Serif+4:opsz,wght@8..60,400..600&family=Noto+Serif+SC:wght@500&display=swap">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
-  <link rel="apple-touch-icon" href="{{ url_for('static', filename='logo-mark.png') }}">
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='mascot.svg') }}">
+  <link rel="icon" type="image/png" sizes="64x64" href="{{ url_for('static', filename='favicon.png') }}">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='apple-touch-icon.png') }}">
   <script>
     // 在首次绘制前就把收起状态套上，避免侧边栏先展开再收起的闪动
     try {

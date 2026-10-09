@@ -93,13 +93,18 @@ def coarser(period_key: str) -> str | None:
     return PERIOD_ORDER[index + 1] if index + 1 < len(PERIOD_ORDER) else None
 
 
-def fit_period(start: datetime, end: datetime, period_key: str) -> tuple[str, list[str]]:
-    """把粒度调到既在保留期内、点数又不爆的档位。返回 (最终粒度, 提示)。"""
+def fit_period(
+    start: datetime, end: datetime, period_key: str, now: datetime | None = None
+) -> tuple[str, list[str]]:
+    """把粒度调到既在保留期内、点数又不爆的档位。返回 (最终粒度, 提示)。
+
+    保留期按「现在」往回算；now 给测试固定时钟用，不给就是真的现在。
+    """
     notes: list[str] = []
     if period_key not in PERIODS:
         period_key = DEFAULT_PERIOD
 
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
     while True:
         seconds, label, retention_days = PERIODS[period_key]
         age_days = (now - start).total_seconds() / 86400
@@ -162,7 +167,7 @@ def resolve_window(args: Mapping[str, str], now: datetime | None = None) -> tupl
         notes.append("开始和结束时间相同，已改用默认窗口。")
 
     period_key = (args.get("period") or DEFAULT_PERIOD).strip()
-    period_key, period_notes = fit_period(start, end, period_key)
+    period_key, period_notes = fit_period(start, end, period_key, now=now)
     notes.extend(period_notes)
 
     period = PERIODS[period_key][0]

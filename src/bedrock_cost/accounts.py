@@ -15,6 +15,9 @@ alerts.notify_account）。台账先写好，通知发不出去只另起一条�
 
 告警邮箱（平台 / 地址 / 密码）也在弹窗里填，开关在表格的「邮件告警」列，和 TG 一样。
 邮箱密码和 SK 一样不回显：修改时留空表示不改，页面上只说「已保存」。
+
+生命周期（正常、结算、风控……）是纯标记：表格里点一下就能改（fetch 调 /lifecycle，
+不整页刷新），可选的标签在右上角「生命周期标签」里增删，存在台账的第二个工作表里。
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from datetime import date
 
 from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, session, url_for
 
-from . import alerts, config, excel_source, mail_inbox, mail_rules, telegram
+from . import alerts, avatars, config, dashboard, excel_source, mail_inbox, mail_rules, telegram
 from .auth import (
     clear_failures,
     client_ip,
@@ -38,6 +41,9 @@ from .excel_source import Account, ExcelSourceError, load_accounts
 from .views import page_meta
 
 bp = Blueprint("accounts", __name__, url_prefix="/accounts")
+
+# 头像弹窗里一排现成的表情，点一下填进去；想用别的直接在框里打
+AVATAR_EMOJIS = ("🦊", "🐼", "🐳", "🦉", "🐙", "🌵", "🍊", "🚀", "⭐", "💎")
 
 
 def _actor() -> str:
@@ -66,14 +72,40 @@ def _form_values(form) -> dict:
     """
     values = {key: form.get(key) for key in form.keys()}
     values["tg_chat_ids"] = excel_source.form_chat_ids(form)
+    # 生命周期是多选框，同理
+    values["lifecycle"] = excel_source.form_lifecycle(form)
     # 邮箱密码不回填：和 SK 一样，只在提交的那一下经过服务器，不再写回页面
     values.pop("mail_password", None)
     return values
 
 
+def _lifecycle() -> list[excel_source.LifecycleTag]:
+    """标签清单。_load_all 刚强制读过文件，这里走的是同一份缓存；读不了就当没有。"""
+    try:
+        return excel_source.load_lifecycle()
+    except Exception:  # 台账读不了的时候 _load_all 已经把原因放进 fatal 了
+        return []
+
+
+def _avatar_preview(values: dict) -> avatars.Avatar:
+    """弹窗里头像预览的初始样子（之后由页面脚本跟着输入实时换）。"""
+    color = excel_source._to_avatar_color(values.get("avatar_color"))
+    return avatars.avatar_for(
+        (values.get("email") or "").strip(), (values.get("account") or "").strip(),
+        (values.get("partner") or "").strip(), (values.get("avatar_emoji") or "").strip(), color,
+    )
+
+
+def _next_color(tags: list[excel_source.LifecycleTag]) -> str:
+    """新标签默认的颜色：清单里还没人用的第一个，都用过了就陶土色。"""
+    used = {tag.color for tag in tags}
+    return next((key for key in excel_source.LIFECYCLE_COLORS if key not in used), "clay")
+
+
 def _render(**extra):
     """列表页统一入口：正常打开和「提交失败回填」都走这里。"""
     accounts, fatal = _load_all()
+    tags = [] if fatal else _lifecycle()
     context = {
         "active_page": "accounts",
         "accounts": accounts,
@@ -90,6 +122,24 @@ def _render(**extra):
         "mail_test": None,
         "mail_fixed_chats": config.MAIL_ALERT_CHAT_IDS,
         "enabled_count": sum(1 for a in accounts if a.enabled),
+        # 生命周期：清单、各标签的颜色和账号数（筛选签上的数），还有「未标记」的个数
+        "lifecycle_tags": tags,
+        "lifecycle_colors": excel_source.lifecycle_colors(tags),
+        "life_counts": dashboard.lifecycle_counts(accounts, tags),
+        "unlabeled_count": sum(1 for a in accounts if not a.lifecycle),
+        "life_color_choices": excel_source.LIFECYCLE_COLORS,
+        "life_stale_color": excel_source.LIFECYCLE_COLORS["gray"][1],
+        "max_life_name": excel_source.MAX_LIFECYCLE_NAME,
+        # 「生命周期标签」弹窗：要不要重新打开、出错的原因、回填的输入
+        "open_life": request.args.get("tags") == "1",
+        "life_error": "",
+        "life_form": {"name": "", "color": _next_color(tags)},
+        # 筛选下拉框里的上游
+        "partners": sorted({a.partner for a in accounts}),
+        # 头像：八组底色、现成的表情、弹窗里预览的初始样子
+        "avatar_tones": range(avatars.TONES),
+        "avatar_emojis": AVATAR_EMOJIS,
+        "avatar_preview": _avatar_preview,
         "fatal": fatal,
         "notes": [],
         "errors": [],
@@ -131,7 +181,7 @@ def create():
         return redirect(url_for("accounts.index"))
 
     # 查重要带上已停用的账号：停用不等于账号 ID 可以被别人占用
-    data, errors = excel_source.validate(request.form, existing, creating=True)
+    data, errors = excel_source.validate(request.form, existing, creating=True, lifecycle=_lifecycle())
     if errors:
         return _render(errors=errors, create_form=_form_values(request.form), open_create=True), 400
 
@@ -162,7 +212,9 @@ def update():
 
     others = [a for a in existing if a.key != key]
     current = next(a for a in existing if a.key == key)
-    data, errors = excel_source.validate(request.form, others, creating=False, current=current)
+    data, errors = excel_source.validate(
+        request.form, others, creating=False, current=current, lifecycle=_lifecycle()
+    )
     if errors:
         return _render(errors=errors, edit_key=key, edit_form=_form_values(request.form)), 400
 
@@ -203,8 +255,9 @@ def tg_test():
     """
     key = (request.form.get("key") or "").strip()
     chats = excel_source.form_chat_ids(request.form)
-    # 和正式消息一样只写账号 ID，不带上游
+    # 和正式消息一样写账号 ID 和账号邮箱，不带上游
     label = (request.form.get("account") or "").strip()
+    email = (request.form.get("email") or "").strip()
 
     per_chat: dict[str, dict] = {}
     for chat in chats:
@@ -212,7 +265,7 @@ def tg_test():
             per_chat[chat] = {"ok": False, "message": "格式不对"}
             continue
         try:
-            note = alerts.send_test(chat, label)
+            note = alerts.send_test(chat, label, email)
         except telegram.TelegramError as exc:
             per_chat[chat] = {"ok": False, "message": str(exc)}
         else:
@@ -323,11 +376,12 @@ def mail_test():
 
 def _probe_mailbox(form, current: Account | None) -> dict:
     provider = (form.get("mail_provider") or mail_inbox.DEFAULT_PROVIDER).strip()
-    address = (form.get("mail_address") or "").strip()
+    # 地址留空就是收账号邮箱本身，和保存时同一条规矩（见 excel_source.validate）
+    address = (form.get("mail_address") or "").strip() or (form.get("email") or "").strip()
     server = (form.get("mail_server") or "").strip()
     password = (form.get("mail_password") or "").strip()
     if not address:
-        return {"ok": False, "message": "先填邮箱地址再测。"}
+        return {"ok": False, "message": "先填邮箱地址（或账号邮箱）再测。"}
     if provider not in mail_inbox.BY_KEY:
         return {"ok": False, "message": "不认识这个邮箱平台，请从下拉框里选。"}
     if provider == mail_inbox.CUSTOM and mail_inbox.parse_server(server) is None:
@@ -403,6 +457,79 @@ def delete():
         return redirect(url_for("accounts.index"))
     flash(f"{note}。", "ok")
     return redirect(url_for("accounts.index"))
+
+
+@bp.route("/lifecycle", methods=["POST"])
+@login_required
+@csrf_protect
+def lifecycle():
+    """表格里直接改一个账号的生命周期（多选，整组替换）。
+
+    页面上用 fetch 调，回 JSON，表格原地更新、不整页刷新；没开 JS 时是普通提交。
+    只认清单里的标签，外加这个账号身上本来就有的（手改过 Excel 的老标签别一保存就丢）。
+    """
+    key = (request.form.get("key") or "").strip()
+    tags = excel_source.form_lifecycle(request.form)
+
+    def done(ok: bool, message: str, status: int = 200, names: list[str] | None = None):
+        if _wants_json():
+            payload: dict = {"ok": ok, "message": message}
+            if names is not None:
+                colors = excel_source.lifecycle_colors(_lifecycle())
+                gray = excel_source.LIFECYCLE_COLORS["gray"][1]
+                payload["tags"] = [{"name": name, "color": colors.get(name, gray)} for name in names]
+            return jsonify(payload), status
+        flash(message, "ok" if ok else "error")
+        return redirect(url_for("accounts.index"))
+
+    existing, fatal = _load_all()
+    if fatal:
+        return done(False, fatal, 500)
+    current = next((a for a in existing if a.key == key), None)
+    if current is None:
+        return done(False, "这个账号已经不在台账里了，页面可能已过期，刷新后再试。", 409)
+    known = {tag.name for tag in _lifecycle()} | set(current.lifecycle)
+    unknown = [name for name in tags if name not in known]
+    if unknown:
+        return done(False, f"标签清单里没有「{'」「'.join(unknown)}」，刷新页面再选。", 400)
+    try:
+        note = excel_source.set_lifecycle(key, tags, actor=_actor())
+    except ExcelSourceError as exc:
+        return done(False, str(exc), 409)
+    return done(True, f"{note}。" if note else "没有改动。", names=tags)
+
+
+@bp.route("/lifecycle/add", methods=["POST"])
+@login_required
+@csrf_protect
+def lifecycle_add():
+    """在标签清单里加一个。加完回到这一页，「生命周期标签」弹窗重新打开，方便接着加。"""
+    name = (request.form.get("name") or "").strip()
+    color = (request.form.get("color") or "").strip()
+    try:
+        note = excel_source.add_lifecycle(name, color, actor=_actor())
+    except ExcelSourceError as exc:
+        return _render(open_life=True, life_error=str(exc), life_form={"name": name, "color": color}), 400
+    flash(f"{note}。", "ok")
+    return redirect(url_for("accounts.index", tags=1))
+
+
+@bp.route("/lifecycle/remove", methods=["POST"])
+@login_required
+@csrf_protect
+def lifecycle_remove():
+    """从标签清单里删一个，打了这个标签的账号上一起去掉。页面上要点两下才删。"""
+    name = (request.form.get("name") or "").strip()
+    try:
+        note = excel_source.remove_lifecycle(name, actor=_actor())
+    except ExcelSourceError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("accounts.index", tags=1))
+    if note:
+        flash(f"{note}。", "ok")
+    else:
+        flash(f"标签清单里已经没有「{name}」了。", "warn")
+    return redirect(url_for("accounts.index", tags=1))
 
 
 def _notify(event: str, match) -> tuple[str, list[str]]:

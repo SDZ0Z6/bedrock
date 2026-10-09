@@ -27,7 +27,7 @@ from pathlib import Path
 
 import openpyxl
 
-from . import config, mail_inbox
+from . import avatars, config, mail_inbox
 
 # Excel 表头 -> 内部字段名。表头大小写、前后空格、列顺序都不敏感。
 REQUIRED_COLUMNS = {
@@ -58,6 +58,13 @@ REQUIRED_COLUMNS = {
 #   MAIL_PASSWORD 客户端登录密码（阿里邮箱是三方客户端安全密码）。和 SK 一样只进不出：
 #              页面上不回显，审计日志里只记「已更新」
 #   MAIL_SERVER   只有 MAIL_PROVIDER=custom 时才用：自己填的 IMAP 服务器 host:port
+#   EMAIL      这个 AWS 账号的邮箱（root 邮箱）。号码一眼认不出是谁，页面和 TG 卡片上
+#              都把它和号码一起写。新增、修改时必填，两个账号不能填同一个；老台账没有
+#              这一列也能读，只是显示「未填账号邮箱」
+#   LIFECYCLE  生命周期标签（正常、结算、风控……），一格里多个，逗号隔开。只是个标记，
+#              不影响任何查询、汇总和告警。可选的标签在第二个工作表 LIFECYCLE 里
+#   AVATAR     头像用的表情；空着就用邮箱首字母
+#   AVATAR_COLOR 头像底色，0~7 选一组（见 avatars.py）；空着就按邮箱自动配
 OPTIONAL_COLUMNS = {
     "TAG": "tag_spec",
     "ENABLED": "enabled",
@@ -69,12 +76,64 @@ OPTIONAL_COLUMNS = {
     "MAIL_ADDRESS": "mail_address",
     "MAIL_PASSWORD": "mail_password",
     "MAIL_SERVER": "mail_server",
+    "EMAIL": "email",
+    "LIFECYCLE": "lifecycle",
+    "AVATAR": "avatar_emoji",
+    "AVATAR_COLOR": "avatar_color",
 }
 
 COLUMNS = {**REQUIRED_COLUMNS, **OPTIONAL_COLUMNS}
 
 # TAG 列里 键 与 值 的分隔符。'$' 是 Cost Explorer 自己的分组键写法，一并兼容。
 _TAG_SEPARATORS = "=:$"
+
+# ---------------------------------------------------------------- 生命周期
+# 可选的标签放在台账的第二个工作表里（NAME、COLOR 两列），和账号一起备份、一起拷走。
+# 没有这张表就用下面三个默认的；第一次在页面上增删标签时才把表建出来。
+LIFECYCLE_SHEET = "LIFECYCLE"
+# 标签能选的颜色。只上在圆点和极浅的底上，字永远是墨色，所以不用担心对比度
+LIFECYCLE_COLORS = {
+    "green": ("绿", "#2c7652"),
+    "gray": ("灰", "#87867f"),
+    "red": ("红", "#bc3b2e"),
+    "clay": ("陶土", "#d97757"),
+    "amber": ("琥珀", "#c48200"),
+    "blue": ("蓝", "#2f6aa8"),
+    "teal": ("青", "#2f8f86"),
+    "violet": ("紫", "#7b6fc0"),
+}
+DEFAULT_LIFECYCLE = (("正常", "green"), ("结算", "gray"), ("风控", "red"))
+MAX_LIFECYCLE_NAME = 12
+MAX_LIFECYCLE_TAGS = 30
+# 一格里多个标签的分隔符：逗号（中英文）、顿号、分号、竖线都认，写回时统一成半角逗号。
+# 不认空白——标签名里可能有空格
+_LIFE_SEPARATORS = re.compile(r"[,，、;；|\n]+")
+
+
+@dataclass(frozen=True)
+class LifecycleTag:
+    name: str
+    color: str  # LIFECYCLE_COLORS 的 key
+
+    @property
+    def hex(self) -> str:
+        return LIFECYCLE_COLORS.get(self.color, LIFECYCLE_COLORS["gray"])[1]
+
+
+def split_lifecycle(value: object) -> tuple[str, ...]:
+    """一格（或表单里的多选）拆成去重后的标签，保持原来的顺序。"""
+    if value is None:
+        return ()
+    seen: dict[str, None] = {}
+    for piece in _LIFE_SEPARATORS.split(_clean(value)):
+        name = piece.strip()
+        if name:
+            seen.setdefault(name, None)
+    return tuple(seen)
+
+
+def _canon_lifecycle(value: object) -> str:
+    return ",".join(split_lifecycle(value))
 
 # 必填列空着时的占位显示值。写回时要按同一套规则反推行身份，所以提成常量。
 NO_PARTNER = "(未填写上游)"
@@ -132,6 +191,20 @@ class Account:
     mail_address: str = ""
     mail_password: str = field(default="", repr=False)
     mail_server: str = ""
+    # 账号邮箱、生命周期、头像（都是给人认的，不影响查询）
+    email: str = ""
+    lifecycle: tuple[str, ...] = ()
+    avatar_emoji: str = ""
+    avatar_color: int | None = None
+
+    @property
+    def label(self) -> str:
+        """图表、面包屑、下拉框里的短名：邮箱 @ 前面那段；没填邮箱用号码。"""
+        return self.email.split("@", 1)[0] if self.email else self.account
+
+    @property
+    def avatar(self) -> avatars.Avatar:
+        return avatars.avatar_for(self.email, self.account, self.partner, self.avatar_emoji, self.avatar_color)
 
     @property
     def tg_active(self) -> bool:
@@ -315,13 +388,40 @@ def _to_number(value: object, default: float = 0.0) -> float:
     return number / 100 if percent else number
 
 
+def _to_avatar_color(value: object) -> int | None:
+    """AVATAR_COLOR：0~7 的一个数；空着、写错都当没选（按邮箱自动配色）。"""
+    text = _clean(value)
+    if text.endswith(".0"):
+        text = text[:-2]
+    # isdecimal 而不是 isdigit：「²」这种上标数字 isdigit 是真的，int() 却会抛错，一格写错整张台账就读不出来
+    if text.isdecimal() and 0 <= int(text) < avatars.TONES:
+        return int(text)
+    return None
+
+
+def _read_lifecycle(workbook) -> list[LifecycleTag]:
+    """第二个工作表 LIFECYCLE（NAME、COLOR 两列）。没有这张表就是默认的三个。"""
+    if LIFECYCLE_SHEET not in workbook.sheetnames:
+        return [LifecycleTag(name, color) for name, color in DEFAULT_LIFECYCLE]
+    tags: dict[str, LifecycleTag] = {}
+    for position, row in enumerate(workbook[LIFECYCLE_SHEET].iter_rows(values_only=True)):
+        if position == 0 or not row:
+            continue  # 表头
+        name = _clean(row[0]) if len(row) > 0 else ""
+        color = _clean(row[1]).lower() if len(row) > 1 else ""
+        if name and name not in tags:
+            tags[name] = LifecycleTag(name, color if color in LIFECYCLE_COLORS else "gray")
+    return list(tags.values())
+
+
 _cache_lock = threading.Lock()
-_cache: dict[str, object] = {"stamp": None, "accounts": []}
+_cache: dict[str, object] = {"stamp": None, "accounts": [], "lifecycle": []}
 
 
-def _read_workbook(path: Path) -> list[Account]:
+def _read_workbook(path: Path) -> tuple[list[Account], list[LifecycleTag]]:
     workbook = openpyxl.load_workbook(path, data_only=True, read_only=True)
     try:
+        lifecycle = _read_lifecycle(workbook)
         sheet = workbook.worksheets[0]
         rows = sheet.iter_rows(values_only=True)
         try:
@@ -382,9 +482,13 @@ def _read_workbook(path: Path) -> list[Account]:
                     mail_address=_clean(cell(row, "mail_address")),
                     mail_password=_clean(cell(row, "mail_password")),
                     mail_server=_clean(cell(row, "mail_server")),
+                    email=_clean(cell(row, "email")),
+                    lifecycle=split_lifecycle(cell(row, "lifecycle")),
+                    avatar_emoji=_clean(cell(row, "avatar_emoji")),
+                    avatar_color=_to_avatar_color(cell(row, "avatar_color")),
                 )
             )
-        return accounts
+        return accounts, lifecycle
     finally:
         workbook.close()
 
@@ -394,6 +498,7 @@ def clear_cache() -> None:
     with _cache_lock:
         _cache["stamp"] = None
         _cache["accounts"] = []
+        _cache["lifecycle"] = []
 
 
 def load_accounts(force: bool = False, include_disabled: bool = False) -> list[Account]:
@@ -414,11 +519,25 @@ def load_accounts(force: bool = False, include_disabled: bool = False) -> list[A
             cached = list(_cache["accounts"])  # type: ignore[arg-type]
             return cached if include_disabled else [a for a in cached if a.enabled]
 
-    accounts = _read_workbook(path)
+    accounts, lifecycle = _read_workbook(path)
     with _cache_lock:
         _cache["stamp"] = stamp
         _cache["accounts"] = accounts
+        _cache["lifecycle"] = lifecycle
     return list(accounts) if include_disabled else [a for a in accounts if a.enabled]
+
+
+def load_lifecycle(force: bool = False) -> list[LifecycleTag]:
+    """可选的生命周期标签（台账第二个工作表）。和账号共用一次文件读取和缓存。"""
+    load_accounts(force=force, include_disabled=True)
+    with _cache_lock:
+        return list(_cache["lifecycle"])  # type: ignore[arg-type]
+
+
+def lifecycle_colors(tags: list[LifecycleTag] | None = None) -> dict[str, str]:
+    """标签名 -> 圆点颜色。账号上有、清单里已经没有的标签（手改过 Excel、或者标签被删了
+    还没刷新）模板里按灰色画。"""
+    return {tag.name: tag.hex for tag in (load_lifecycle() if tags is None else tags)}
 
 
 # ==================================================================== 写入
@@ -445,6 +564,7 @@ INTERNAL_TO_EXCEL = {internal: excel for excel, internal in COLUMNS.items()}
 EDITABLE = (
     "partner", "account", "budget", "tag_ratio", "untag_ratio", "tag_spec", "start_date",
     "tg_chat_ids", "mail_provider", "mail_address", "mail_server",
+    "email", "lifecycle", "avatar_emoji", "avatar_color",
 )
 # 新建时还要额外收凭证
 CREATE_ONLY = ("ak", "sk")
@@ -464,7 +584,12 @@ _NORMALIZE = {
     "mail_provider": _clean,
     "mail_address": _clean,
     "mail_server": _clean,
+    "email": _clean,
+    "lifecycle": _canon_lifecycle,
+    "avatar_emoji": _clean,
+    "avatar_color": _to_avatar_color,
 }
+
 
 _ACCOUNT_ID = re.compile(r"^\d{12}$")
 _EMAIL = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
@@ -526,8 +651,22 @@ def form_chat_ids(form) -> list[str]:
     return list(seen)
 
 
+def form_lifecycle(form) -> list[str]:
+    """表单里勾选的生命周期（多选框，同名字段有多个）。"""
+    raw = form.getlist("lifecycle") if hasattr(form, "getlist") else [form.get("lifecycle")]
+    seen: dict[str, None] = {}
+    for value in raw:
+        for name in split_lifecycle(value):
+            seen.setdefault(name, None)
+    return list(seen)
+
+
 def validate(
-    form: dict, others: list[Account], creating: bool, current: Account | None = None
+    form: dict,
+    others: list[Account],
+    creating: bool,
+    current: Account | None = None,
+    lifecycle: list[LifecycleTag] | None = None,
 ) -> tuple[dict, list[str]]:
     """把表单文本校验成可以写进台账的一行。
 
@@ -537,11 +676,43 @@ def validate(
 
     others 是「除自己以外的全部账号」，含已停用的：停用不等于账号 ID 可以被
     别人重用，否则恢复的时候就撞车了。current 是修改前的这个账号（新建时没有），
-    用来判断邮箱密码能不能留空不改。
+    用来判断邮箱密码能不能留空不改。lifecycle 是可选的标签清单；给了就只认清单里的
+    （外加这个账号身上本来就有的，免得手改过的老标签让整张表单存不进去）。
     """
     errors: list[str] = []
     data = {name: _clean(form.get(name)) for name in (*EDITABLE, *CREATE_ONLY)}
     data["mail_password"] = _clean(form.get("mail_password"))
+
+    # 账号邮箱：必填，两个账号不能是同一个（AWS 的 root 邮箱本来就不能重复）
+    email = data["email"]
+    if not email:
+        errors.append("账号邮箱不能为空，填这个 AWS 账号的 root 邮箱。")
+    elif len(email) > 254 or not _EMAIL.match(email):
+        errors.append("账号邮箱格式不对，应该形如 name@example.com。")
+    else:
+        taken = next((a for a in others if a.email and a.email.lower() == email.lower()), None)
+        if taken:
+            errors.append(f"邮箱 {email} 已经是账号 {taken.account} 的了，不能两个账号填同一个。")
+
+    tags = form_lifecycle(form)
+    data["lifecycle"] = ",".join(tags)
+    if lifecycle is not None:
+        known = {tag.name for tag in lifecycle} | set(current.lifecycle if current else ())
+        unknown = [name for name in tags if name not in known]
+        if unknown:
+            errors.append(f"生命周期里没有「{'」「'.join(unknown)}」，先在标签清单里加上。")
+    # 长度只管新加的：账号身上本来就有的（手改 Excel 写长了的）照样能存，不然这一行就再也存不进去
+    already = set(current.lifecycle) if current else set()
+    too_long = [name for name in tags if len(name) > MAX_LIFECYCLE_NAME and name not in already]
+    if too_long:
+        errors.append(f"生命周期标签最多 {MAX_LIFECYCLE_NAME} 个字：「{'」「'.join(too_long)}」太长了。")
+
+    # 头像只放一个字：填了一串（「Johanna」、几个表情）就只留第一个，不报错
+    data["avatar_emoji"] = avatars.first_grapheme(data["avatar_emoji"].strip(" ,，"))
+    raw_color = data["avatar_color"]
+    data["avatar_color"] = _to_avatar_color(raw_color)
+    if raw_color and data["avatar_color"] is None:
+        errors.append("头像底色不对，请从色块里选。")
 
     if not data["partner"]:
         errors.append("上游不能为空。")
@@ -603,6 +774,10 @@ def validate(
         ))
     elif len(chats) > MAX_TG_CHATS:
         errors.append(FormError(f"一个账号最多 {MAX_TG_CHATS} 个群，现在填了 {len(chats)} 个。", "tg"))
+
+    # 告警邮箱的地址留空、却填了密码：要收的就是账号邮箱本身，地址照它填上
+    if not data["mail_address"] and data["mail_password"] and email and _EMAIL.match(email):
+        data["mail_address"] = email
 
     errors.extend(_validate_mail(data, creating, current))
 
@@ -1039,5 +1214,102 @@ def delete_account(key: str, actor: str = "") -> str:
             # 写 .value = None 才真的清空（cell(..., value=None) 会被 openpyxl 当成没给值）
             sheet.cell(row=row, column=column).value = None
         return f"删除账号 {key.rpartition('#')[0]}（{partner}）"
+
+    return _mutate(action, actor, backup=False)
+
+
+# ---------------------------------------------------------------- 生命周期
+# 表格里直接点改某个账号的标签、在标签清单里增删标签，都不备份（只有新增和修改账号才备份）。
+def set_lifecycle(key: str, tags: list[str], actor: str = "") -> str:
+    """账号管理表格里直接改一个账号的生命周期：只写 LIFECYCLE 这一格。"""
+    clean = list(dict.fromkeys(name.strip() for name in tags if name and name.strip()))
+
+    def action(sheet, index) -> str:
+        row = _locate(sheet, index, key)
+        column = _ensure_column(sheet, index, "lifecycle")
+        before = split_lifecycle(sheet.cell(row=row, column=column).value)
+        # 长度只管新加的：这一格里本来就有的长标签（手改 Excel 写的）不挡保存
+        too_long = [name for name in clean if len(name) > MAX_LIFECYCLE_NAME and name not in before]
+        if too_long:
+            raise ExcelSourceError(
+                f"生命周期标签最多 {MAX_LIFECYCLE_NAME} 个字：「{'」「'.join(too_long)}」太长了。"
+            )
+        if list(before) == clean:
+            return ""
+        sheet.cell(row=row, column=column).value = ",".join(clean) or None
+        return (f"账号 {key.rpartition('#')[0]} 的生命周期："
+                f"{'、'.join(before) or '空'} → {'、'.join(clean) or '空'}")
+
+    return _mutate(action, actor, backup=False)
+
+
+def _lifecycle_sheet(book):
+    """拿到 LIFECYCLE 工作表；还没有就建一张，先写上默认的三个，再在上面增删。"""
+    if LIFECYCLE_SHEET in book.sheetnames:
+        return book[LIFECYCLE_SHEET]
+    sheet = book.create_sheet(LIFECYCLE_SHEET)
+    sheet.append(["NAME", "COLOR"])
+    for name, color in DEFAULT_LIFECYCLE:
+        sheet.append([name, color])
+    return sheet
+
+
+def _sheet_tags(sheet) -> list[tuple[int, str]]:
+    """LIFECYCLE 表里的 (行号, 名字)，跳过空行。"""
+    return [
+        (row, _clean(sheet.cell(row=row, column=1).value))
+        for row in range(2, sheet.max_row + 1)
+        if _clean(sheet.cell(row=row, column=1).value)
+    ]
+
+
+def add_lifecycle(name: str, color: str, actor: str = "") -> str:
+    """在标签清单里加一个。"""
+    name = _clean(name)
+    if not name:
+        raise ExcelSourceError("标签名不能为空。")
+    if len(name) > MAX_LIFECYCLE_NAME:
+        raise ExcelSourceError(f"标签名最多 {MAX_LIFECYCLE_NAME} 个字。")
+    if _LIFE_SEPARATORS.search(name):
+        raise ExcelSourceError("标签名里不能有逗号、顿号、分号或竖线。")
+    if color not in LIFECYCLE_COLORS:
+        raise ExcelSourceError("请从色块里选一个颜色。")
+
+    def action(sheet, index) -> str:
+        tags = _lifecycle_sheet(sheet.parent)
+        existing = _sheet_tags(tags)
+        if any(found == name for _, found in existing):
+            raise ExcelSourceError(f"已经有「{name}」这个标签了。")
+        if len(existing) >= MAX_LIFECYCLE_TAGS:
+            raise ExcelSourceError(f"标签最多 {MAX_LIFECYCLE_TAGS} 个。")
+        tags.append([name, color])
+        return f"新增生命周期标签「{name}」（{LIFECYCLE_COLORS[color][0]}色）"
+
+    return _mutate(action, actor, backup=False)
+
+
+def remove_lifecycle(name: str, actor: str = "") -> str:
+    """从标签清单里删掉一个，打了这个标签的账号上一起去掉。"""
+    name = _clean(name)
+
+    def action(sheet, index) -> str:
+        tags = _lifecycle_sheet(sheet.parent)
+        rows = [row for row, found in _sheet_tags(tags) if found == name]
+        if not rows:
+            return ""
+        for row in reversed(rows):
+            tags.delete_rows(row)   # 清单表单独一张，删行不影响账号的行号
+        touched = 0
+        if "lifecycle" in index:
+            column = index["lifecycle"]
+            for row in range(2, sheet.max_row + 1):
+                cell = sheet.cell(row=row, column=column)
+                current = split_lifecycle(cell.value)
+                if name in current:
+                    kept = [tag for tag in current if tag != name]
+                    cell.value = ",".join(kept) or None
+                    touched += 1
+        extra = f"（{touched} 个账号上的一起去掉）" if touched else ""
+        return f"删除生命周期标签「{name}」{extra}"
 
     return _mutate(action, actor, backup=False)

@@ -13,7 +13,7 @@ from email import policy
 
 import pytest
 
-from bedrock_cost import alerts, cards, config, excel_source, mail_alerts, mail_inbox, mail_rules, telegram
+from bedrock_cost import alerts, cards, config, events, excel_source, mail_alerts, mail_inbox, mail_rules, telegram
 from bedrock_cost.mail_inbox import Mailbox, MailError, Session
 from bedrock_cost.telegram import TelegramError
 
@@ -420,15 +420,16 @@ class TestSession:
 
 
 # ================================================================== 收一轮、发一轮
-MAIL_HEADER = [*LEDGER_HEADER, "TG_ENABLED", "TG_CHAT_IDS", "MAIL_ENABLED", "MAIL_PROVIDER", "MAIL_ADDRESS", "MAIL_PASSWORD"]
+MAIL_HEADER = [*LEDGER_HEADER, "TG_ENABLED", "TG_CHAT_IDS", "MAIL_ENABLED", "MAIL_PROVIDER", "MAIL_ADDRESS",
+               "MAIL_PASSWORD", "EMAIL"]
 
 
 def mail_ledger(path, *, alpha=None, beta=None):
-    """ALPHA 开着 TG 和邮件告警；BETA 只开 TG。关键字参数按列名覆盖。"""
+    """ALPHA 开着 TG 和邮件告警；BETA 只开 TG。两个都没填账号邮箱。关键字参数按列名覆盖。"""
     alpha_row = dict(TG_ENABLED=True, TG_CHAT_IDS=ALPHA_CHAT, MAIL_ENABLED=True, MAIL_PROVIDER="aliyun-sg",
-                     MAIL_ADDRESS="root-alpha@example.com", MAIL_PASSWORD=PASSWORD)
+                     MAIL_ADDRESS="root-alpha@example.com", MAIL_PASSWORD=PASSWORD, EMAIL=None)
     beta_row = dict(TG_ENABLED=True, TG_CHAT_IDS=BETA_CHAT, MAIL_ENABLED=False, MAIL_PROVIDER=None,
-                    MAIL_ADDRESS=None, MAIL_PASSWORD=None)
+                    MAIL_ADDRESS=None, MAIL_PASSWORD=None, EMAIL=None)
     alpha_row.update(alpha or {})
     beta_row.update(beta or {})
     extra = MAIL_HEADER[len(LEDGER_HEADER):]
@@ -658,6 +659,7 @@ class TestRunCheck:
             "01-mail-abuse-1001111111111.png", "02-mail-root-1001111111111.png",
         ]
         assert not config.MAIL_STATE_PATH.exists()
+        assert not config.ALERT_EVENTS_PATH.exists()          # 也不记告警事件流
 
     def test_look_back_needs_dry_run(self, server):
         with pytest.raises(ValueError):
@@ -714,6 +716,76 @@ class TestMailCards:
                           blocks=[cards.Details([row])])
         assert card.png().startswith(b"\x89PNG")
         assert cards._fit("x" * 400, cards._font(16, 700), 100).endswith("…")
+
+
+class TestMailEmailAndEvents:
+    """认得出是台账里哪个账号：卡片和 caption 跟上它的账号邮箱（写全）。发出去了的记一条告警事件。"""
+
+    MAIL = "alpha.root@example.com"
+
+    @pytest.fixture
+    def mailed(self, ledger, outbox):
+        """ALPHA 在台账里填了账号邮箱，收件箱已经建好基线。"""
+        mail_ledger(ledger, alpha={"EMAIL": self.MAIL})
+        server = FakeIMAP()
+        primed(server, outbox)
+        return server
+
+    def test_the_card_carries_the_account_email(self, mailed, outbox):
+        mailed.add(2, samples.abuse())
+        check(mailed)
+        (_, card), = outbox
+        details = card.blocks[0]
+        assert (details.uid, details.email) == (ALPHA, self.MAIL)
+        assert f"<code>{ALPHA}</code> · {self.MAIL}" in card.caption
+
+    def test_the_quoted_mail_text_is_still_masked(self):
+        """写全的只是台账里的账号邮箱；邮件原文节选里引用的地址可能是别人的，照旧打码。"""
+        assert mail_rules.excerpt("Contact alice@example.com about it.") == "Contact a***@example.com about it."
+
+    def test_an_account_outside_the_ledger_has_no_email(self, mailed, outbox, monkeypatch):
+        monkeypatch.setattr(config, "MAIL_ALERT_CHAT_IDS", (FIXED_CHAT,))
+        mailed.add(2, samples.message("no-reply-aws@amazon.com", "Amazon Web Services: New Support case: 1",
+                                      samples.CASE_NEW.replace(ALPHA, "333333333333")))
+        check(mailed)
+        (_, card), = outbox
+        assert card.blocks[0].email == ""
+        assert self.MAIL not in card.text()
+        assert "<code>333333333333</code> · " not in card.caption
+
+    def test_delivered_mail_alerts_are_recorded(self, mailed, outbox):
+        mailed.add(2, samples.abuse())
+        check(mailed)
+        (event,) = events.recent()
+        assert (event.kind, event.title, event.tone, event.groups) == ("mail-abuse", "模型权限被撤销", "error", 1)
+        assert (event.account, event.email) == (ALPHA, self.MAIL)
+        assert event.text.startswith("处理动作 撤销 Anthropic 模型的调用权限")
+
+    def test_a_deduplicated_copy_is_recorded_once(self, server, outbox):
+        primed(server, outbox)
+        server.add(2, samples.suspicious())
+        server.add(3, samples.health())
+        check(server)
+        assert [event.kind for event in events.recent()] == ["mail-compromised"]
+
+    def test_a_mail_nobody_can_be_matched_to_is_recorded_without_an_account(self, ledger, outbox, monkeypatch):
+        """两个账号共用一个邮箱、邮件里又没写账号 ID：认不出是谁，事件里也不写账号。"""
+        shared = {"MAIL_ENABLED": True, "MAIL_PROVIDER": "aliyun-sg", "MAIL_ADDRESS": "root-alpha@example.com",
+                  "MAIL_PASSWORD": PASSWORD}
+        mail_ledger(ledger, alpha={"EMAIL": self.MAIL}, beta=shared)
+        monkeypatch.setattr(config, "MAIL_ALERT_CHAT_IDS", (FIXED_CHAT,))
+        server = FakeIMAP()
+        primed(server, outbox)
+        server.add(2, samples.mfa())
+        check(server)
+        (event,) = events.recent()
+        assert (event.kind, event.account, event.email, event.groups) == ("mail-root", "", "", 1)
+
+    def test_a_failed_send_records_nothing(self, mailed, outbox, monkeypatch):
+        mailed.add(2, samples.abuse())
+        monkeypatch.setattr(alerts, "_send", lambda chat, card: (_ for _ in ()).throw(TelegramError("坏了")))
+        check(mailed)
+        assert events.recent() == []
 
 
 class TestCli:

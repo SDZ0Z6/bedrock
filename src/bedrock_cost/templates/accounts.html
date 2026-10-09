@@ -1,27 +1,35 @@
 {% extends "shell.html" %}
+{% from "_macros.html" import avatar %}
 {% block title %}账号管理 · Bedrock 成本监控{% endblock %}
 {% block page_title %}账号管理{% endblock %}
+{% block page_sub %}
+  {%- if not fatal -%}
+    {{ excel_name }} · 共 {{ accounts | length }} 个账号，启用 {{ enabled_count }} 个
+    {%- if accounts | length > enabled_count %}，停用 {{ accounts | length - enabled_count }} 个{% endif %}
+  {%- endif -%}
+{% endblock %}
 {% block loading_label %}正在读台账{% endblock %}
 
 {% block page_actions %}
   {% if not fatal %}
-    <button class="btn btn-primary" type="button" data-open="dlg-create">
-      <span class="plus">＋</span> 新增账号
-    </button>
+    <button class="btn" type="button" data-open="dlg-life">{{ icon('tag') }}生命周期标签</button>
+    <button class="btn btn-primary" type="button" data-open="dlg-create">{{ icon('plus') }}新增账号</button>
   {% endif %}
 {% endblock %}
 
 {# 校验没过时的错误清单，显示在对应的弹窗里——用户此刻正看着那儿 #}
 {% macro error_box(messages) -%}
   <div class="alert alert-error">
-    <strong>没有保存：</strong>
-    <ul class="error-list">{% for message in messages %}<li>{{ message }}</li>{% endfor %}</ul>
+    <div>
+      <strong>没有保存：</strong>
+      <ul class="error-list">{% for message in messages %}<li>{{ message }}</li>{% endfor %}</ul>
+    </div>
   </div>
 {%- endmacro %}
 
 {# 线条图标，16px，描边跟着文字颜色走。只放这一页用到的几个 #}
 {% macro icon(name) -%}
-  <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+  <svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
   {%- if name == 'pencil' -%}
     <path d="M11.3 2.3a1.5 1.5 0 0 1 2.1 2.1L5 12.8l-2.8.9.9-2.8Z"/><path d="M9.8 3.8l2.1 2.1"/>
   {%- elif name == 'power' -%}
@@ -35,8 +43,25 @@
   {%- elif name == 'trash' -%}
     <path d="M2.6 4.2h10.8"/><path d="M6.2 4.2V2.6h3.6v1.6"/><path d="M4 4.2l.7 9.2h6.6l.7-9.2"/>
     <path d="M6.6 6.8v4.2"/><path d="M9.4 6.8v4.2"/>
+  {%- elif name == 'tag' -%}
+    <path d="M2.2 2.2h5.3l6.3 6.3-5.3 5.3-6.3-6.3Z"/><circle cx="5.3" cy="5.3" r="1"/>
+  {%- elif name == 'search' -%}
+    <circle cx="7" cy="7" r="4.5"/><path d="m10.4 10.4 3.4 3.4"/>
+  {%- elif name == 'plug' -%}
+    <path d="M6 1.8v3M10 1.8v3"/><path d="M4 4.8h8v2.4a4 4 0 0 1-8 0Z"/><path d="M8 11.2v3"/>
+  {%- elif name == 'send' -%}
+    <path d="M14.2 1.8 7 9"/><path d="M14.2 1.8 9.6 14.2 7 9 1.8 6.4Z"/>
   {%- endif -%}
   </svg>
+{%- endmacro %}
+
+{# 一组生命周期签。清单里已经没有的老标签按灰色画 #}
+{% macro life_tags(names) -%}
+  {%- for name in names -%}
+    <span class="life-tag"><i class="tag-dot" style="--tag: {{ lifecycle_colors.get(name, life_stale_color) }}"></i>{{ name }}</span>
+  {%- else -%}
+    <span class="life-none">未标记</span>
+  {%- endfor -%}
 {%- endmacro %}
 
 {# 表格里 TG 开关的悬停提示。开关旁边不放字，状态细节都收在这里 #}
@@ -93,43 +118,108 @@
     <section class="tab-page{{ ' is-active' if active == 'basic' }}" role="tabpanel" data-page="basic"
              id="{{ uid }}-page-basic" aria-labelledby="{{ uid }}-tab-basic">
       <div class="form-grid">
-        <div class="field">
-          <label for="{{ uid }}-partner">上游</label>
-          <input id="{{ uid }}-partner" name="partner" required maxlength="64"
-                 value="{{ values.get('partner', '') }}">
+        {# 头像：默认是账号邮箱的首字母、按邮箱配的底色；可以换成表情、自己挑底色。
+           预览跟着输入实时变（页面脚本照 avatars.py 的规则算） #}
+        {% set av = avatar_preview(values) %}
+        {% set color = values.get('avatar_color') %}
+        {% set color = '' if color is none else color | string %}
+        <div class="field field-full">
+          <span class="field-label" id="{{ uid }}-avatar-label">头像</span>
+          <div class="avatar-pick" data-avatar-pick>
+            <span class="avatar avatar-lg {{ av.css }}" data-avatar-preview aria-hidden="true"><span>{{ av.text }}</span></span>
+            <div class="avatar-pick-body">
+              <div class="avatar-pick-row">
+                <input class="avatar-emoji-input" id="{{ uid }}-avatar" name="avatar_emoji" maxlength="16"
+                       autocomplete="off" spellcheck="false" placeholder="一个字或表情，留空用首字母"
+                       title="只用第一个字：填一串也只取第一个"
+                       aria-labelledby="{{ uid }}-avatar-label" value="{{ values.get('avatar_emoji') or '' }}" data-avatar-emoji>
+                <div class="emoji-quick" role="group" aria-label="常用表情">
+                  {% for emoji in avatar_emojis %}
+                    <button class="emoji-btn" type="button" data-emoji="{{ emoji }}" title="用 {{ emoji }}">{{ emoji }}</button>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="swatch-row" role="radiogroup" aria-label="头像底色">
+                <label class="swatch-opt swatch-auto" title="按账号邮箱自动配色">
+                  <input type="radio" name="avatar_color" value="" {% if color == '' %}checked{% endif %}><span>自动</span>
+                </label>
+                {% for tone in avatar_tones %}
+                  <label class="swatch-opt" title="底色 {{ tone + 1 }}">
+                    <input type="radio" name="avatar_color" value="{{ tone }}" {% if color == tone | string %}checked{% endif %}>
+                    <span class="av-{{ tone }}" aria-hidden="true"></span><span class="sr-only">底色 {{ tone + 1 }}</span>
+                  </label>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
         </div>
         <div class="field">
           <label for="{{ uid }}-account">账号 ID</label>
           <input id="{{ uid }}-account" name="account" required inputmode="numeric"
-                 pattern="[0-9]{12}" title="12 位数字的 AWS 账号 ID"
+                 pattern="[0-9]{12}" title="12 位数字的 AWS 账号 ID" autocomplete="off"
                  placeholder="123456789012" value="{{ values.get('account', '') }}">
+        </div>
+        <div class="field field-span2">
+          {# 号码一眼认不出是谁，各页面和 TG 卡片上都把邮箱和号码一起写 #}
+          <label for="{{ uid }}-email">账号邮箱</label>
+          <input id="{{ uid }}-email" name="email" type="email" required maxlength="254"
+                 autocomplete="off" spellcheck="false" placeholder="这个 AWS 账号的 root 邮箱"
+                 value="{{ values.get('email', '') }}">
+        </div>
+        <div class="field">
+          <label for="{{ uid }}-partner">上游</label>
+          <input id="{{ uid }}-partner" name="partner" required maxlength="64" autocomplete="off"
+                 value="{{ values.get('partner', '') }}">
         </div>
         <div class="field">
           <label for="{{ uid }}-budget">额度</label>
-          <input id="{{ uid }}-budget" name="budget" required inputmode="decimal"
+          <input id="{{ uid }}-budget" name="budget" required inputmode="decimal" autocomplete="off"
                  placeholder="100000" value="{{ values.get('budget', '') }}">
         </div>
         <div class="field">
           {# 概览页的消费和余额从这一天累计到今天，所以改它会改变整个账号的口径 #}
           <label for="{{ uid }}-start-date">启用日期</label>
           <input id="{{ uid }}-start-date" name="start_date" type="date" max="{{ today.isoformat() }}"
-                 title="概览页从这一天开始累计消费；留空则按 Cost Explorer 最早可查日起算"
+                 title="概览页从这一天开始累计消费；各页的开始日期也最早只能选到这一天"
                  value="{{ values.get('start_date', '') }}">
         </div>
         <div class="field">
           <label for="{{ uid }}-tag-ratio">TAG 比率</label>
-          <input id="{{ uid }}-tag-ratio" name="tag_ratio" required inputmode="decimal"
+          <input id="{{ uid }}-tag-ratio" name="tag_ratio" required inputmode="decimal" autocomplete="off"
                  value="{{ values.get('tag_ratio', '1') }}">
         </div>
         <div class="field">
           <label for="{{ uid }}-untag-ratio">UNTAG 比率</label>
-          <input id="{{ uid }}-untag-ratio" name="untag_ratio" required inputmode="decimal"
+          <input id="{{ uid }}-untag-ratio" name="untag_ratio" required inputmode="decimal" autocomplete="off"
                  value="{{ values.get('untag_ratio', '1') }}">
         </div>
         <div class="field field-full">
           <label for="{{ uid }}-tag">TAG（可选，留空则用默认标签键 {{ tag_key }}）</label>
-          <input id="{{ uid }}-tag" name="tag_spec" placeholder="{{ tag_key }}=migXXXXXXXX"
+          <input id="{{ uid }}-tag" name="tag_spec" placeholder="{{ tag_key }}=migXXXXXXXX" autocomplete="off"
                  value="{{ values.get('tag_spec', '') }}">
+        </div>
+        {# 生命周期：多选，只是标记。清单在右上角「生命周期标签」里增删 #}
+        {% set picked = values.get('lifecycle') or [] %}
+        <div class="field field-full">
+          <span class="field-label" id="{{ uid }}-life-label">生命周期 <span class="tone-muted">（可多选，只是标记，不影响查询和告警）</span></span>
+          <div class="life-checks" role="group" aria-labelledby="{{ uid }}-life-label">
+            {% for tag in lifecycle_tags %}
+              <label class="life-check">
+                <input type="checkbox" name="lifecycle" value="{{ tag.name }}" {% if tag.name in picked %}checked{% endif %}>
+                <i class="tag-dot" style="--tag: {{ tag.hex }}"></i>{{ tag.name }}
+              </label>
+            {% endfor %}
+            {# 账号身上有、清单里已经没有的老标签：照样列出来，取消勾选就去掉 #}
+            {% for name in picked if name not in lifecycle_colors %}
+              <label class="life-check is-stale" title="标签清单里已经没有它了，取消勾选后就选不回来">
+                <input type="checkbox" name="lifecycle" value="{{ name }}" checked>
+                <i class="tag-dot" style="--tag: {{ life_stale_color }}"></i>{{ name }}
+              </label>
+            {% endfor %}
+            {% if not lifecycle_tags and not picked %}
+              <span class="form-hint">标签清单是空的，先在右上角「生命周期标签」里加几个。</span>
+            {% endif %}
+          </div>
         </div>
         {% if creating %}
           <div class="field">
@@ -138,7 +228,7 @@
             <input id="{{ uid }}-ak" name="ak" required autocomplete="off" spellcheck="false"
                    placeholder="AKIA…">
           </div>
-          <div class="field">
+          <div class="field field-span2">
             <label for="{{ uid }}-sk">SK</label>
             <input id="{{ uid }}-sk" name="sk" type="password" required
                    autocomplete="new-password" spellcheck="false" placeholder="写入后不再回显">
@@ -163,12 +253,9 @@
     {% set hint = (mail_providers | selectattr('key', 'equalto', provider) | map(attribute='password_hint') | first) or '' %}
     <section class="tab-page{{ ' is-active' if active == 'mail' }}" role="tabpanel" data-page="mail"
              id="{{ uid }}-page-mail" aria-labelledby="{{ uid }}-tab-mail">
-      <div class="field mail-block" data-mail-block>
-        <p class="form-hint">
-          填了就每 5 分钟收一次信，AWS 发来的封号、盗用、滥用、工单和 root 安全通知会发到 TG；不填就不收。
-          开关在表格的「邮件告警」列。
-        </p>
-        <div class="mail-grid">
+      <div class="setting-block mail-block" data-mail-block>
+        <p class="setting-intro">AWS 发到这个邮箱的封号、盗用、滥用、工单和 root 安全通知，每 5 分钟收一次、转发到 TG 群。不填就不收；开关在表格的「邮件告警」列。</p>
+        <div class="setting-grid">
           <div class="field">
             <label for="{{ uid }}-mail-provider">邮箱平台</label>
             <select id="{{ uid }}-mail-provider" name="mail_provider" data-mail-provider>
@@ -181,39 +268,36 @@
           <div class="field">
             <label for="{{ uid }}-mail-address">邮箱地址</label>
             <input id="{{ uid }}-mail-address" name="mail_address" type="email" autocomplete="off" spellcheck="false"
-                   placeholder="这个 AWS 账号的 root 邮箱" value="{{ values.get('mail_address', '') }}">
+                   placeholder="留空就用账号邮箱" value="{{ values.get('mail_address', '') }}">
+            <span class="field-hint">一般就是账号邮箱本身，留空、只填密码就行</span>
           </div>
-          <div class="field">
+          <div class="field field-full">
             <label for="{{ uid }}-mail-password">密码</label>
             {# new-password：别让浏览器把登录本站用的密码自动填进来 #}
             <input id="{{ uid }}-mail-password" name="mail_password" type="password" autocomplete="new-password"
                    spellcheck="false" placeholder="{{ '已保存，留空不修改' if password_saved else '客户端登录密码' }}">
+            <span class="field-hint">填<strong data-mail-hint>{{ hint or '这个平台给第三方客户端用的密码' }}</strong>，网页登录密码一般登不上；邮箱后台要开着 IMAP</span>
           </div>
-          <div class="field" data-mail-server{% if provider != 'custom' %} hidden{% endif %}>
+          <div class="field field-full" data-mail-server{% if provider != 'custom' %} hidden{% endif %}>
             <label for="{{ uid }}-mail-server">IMAP 服务器</label>
             <input id="{{ uid }}-mail-server" name="mail_server" autocomplete="off" spellcheck="false"
                    placeholder="imap.example.com:993" value="{{ values.get('mail_server', '') }}">
           </div>
         </div>
-        <p class="form-hint">
-          密码填<strong data-mail-hint>{{ hint or '这个平台给第三方客户端用的密码' }}</strong>，网页登录密码一般登不上；邮箱后台还要开着 IMAP。
-          只读地收，不会把邮件标成已读。
-        </p>
-        <div class="chat-actions">
-          <span></span>
+        <div class="setting-test">
           {# 开着 JS 时用 fetch 测（弹窗和填着的密码原地不动）；没开 JS 就是一次普通提交 #}
           <button class="btn btn-sm" type="submit" formnovalidate data-mail-test
-                  formaction="{{ url_for('accounts.mail_test') }}">测试连接</button>
+                  formaction="{{ url_for('accounts.mail_test') }}">{{ icon('plug') }}测试连接</button>
+          <span class="setting-test-note">只读地登录一下，看得到收件箱就算通；不会把邮件标成已读</span>
         </div>
         <div class="alert mail-result {{ ('alert-ok' if mail_result.ok else 'alert-error') if mail_result }}"
              data-mail-result role="status"{% if not mail_result %} hidden{% endif %}>
           {{- mail_result.message if mail_result -}}
         </div>
-        {% if creating %}
-          <p class="form-hint">填了邮箱，账号建好就会打开邮件告警。只发之后新到的邮件，不补发旧的。</p>
-        {% else %}
-          <p class="form-hint">清空邮箱地址就会关掉邮件告警，并删掉存着的密码。</p>
-        {% endif %}
+        <p class="setting-foot">
+          {%- if creating %}填了邮箱，账号建好就会打开邮件告警；只发之后新到的邮件，不补发旧的。
+          {%- else %}清空邮箱地址（密码也留空）就会关掉邮件告警，并删掉存着的密码。{% endif -%}
+        </p>
       </div>
     </section>
 
@@ -221,47 +305,49 @@
        只管发到哪些群。开关不在这里，只在表格的「TG 告警」列——一个地方管开关。 #}
     <section class="tab-page{{ ' is-active' if active == 'tg' }}" role="tabpanel" data-page="tg"
              id="{{ uid }}-page-tg" aria-labelledby="{{ uid }}-tab-tg">
-      <div class="field tg-block">
+      <div class="setting-block tg-block">
         {% set chats = values.get('tg_chat_ids') or [] %}
         {% set results = tg_result.chats if tg_result and tg_result.chats else {} %}
-        <p class="form-hint">
-          日报、用量和额度告警、账号变动通知，以及邮件告警，都发到这里填的群。开关在表格的「TG 告警」列。
-        </p>
-        <span class="field-label">TG 群组 ID <span class="tone-muted">（每个群一行，最多 {{ max_tg_chats }} 个）</span></span>
-        <div class="chat-rows" data-chat-rows data-max="{{ max_tg_chats }}">
-          {# 至少留一行空的，总得有个框能填 #}
-          {% for chat in (chats or ['']) %}
-            {% set outcome = results.get(chat) if chat else none %}
-            <div class="chat-row">
-              <input name="tg_chat_ids" inputmode="numeric" spellcheck="false" autocomplete="off"
-                     aria-label="群组 ID" placeholder="-1001234567890" value="{{ chat }}">
-              <button class="icon-btn" type="button" data-remove-chat
-                      title="删掉这个群" aria-label="删掉这个群">{{ icon('x') }}</button>
-              {% if outcome %}
-                <span class="chat-result {{ 'tone-ok' if outcome.ok else 'tone-danger' }}">
-                  {{- '✓ ' if outcome.ok else '✗ ' }}{{ outcome.message }}</span>
-              {% endif %}
-            </div>
-          {% endfor %}
+        <p class="setting-intro">日报、用量和额度告警、账号变动通知，还有邮件告警，都发到这些群。开关在表格的「TG 告警」列。</p>
+        <div class="field">
+          <span class="field-label">群组 ID <span class="field-label-note">每个群一行，最多 {{ max_tg_chats }} 个</span></span>
+          <div class="chat-rows" data-chat-rows data-max="{{ max_tg_chats }}">
+            {# 至少留一行空的，总得有个框能填 #}
+            {% for chat in (chats or ['']) %}
+              {% set outcome = results.get(chat) if chat else none %}
+              <div class="chat-row">
+                <input name="tg_chat_ids" inputmode="numeric" spellcheck="false" autocomplete="off"
+                       aria-label="群组 ID" placeholder="-1001234567890" value="{{ chat }}">
+                <button class="icon-btn" type="button" data-remove-chat
+                        title="删掉这个群" aria-label="删掉这个群">{{ icon('x') }}</button>
+                {% if outcome %}
+                  <span class="chat-result {{ 'tone-ok' if outcome.ok else 'tone-danger' }}">
+                    {{- '✓ ' if outcome.ok else '✗ ' }}{{ outcome.message }}</span>
+                {% endif %}
+              </div>
+            {% endfor %}
+          </div>
+          {# 加一行：虚线框，紧贴在列表下面，一看就是「往这个列表里加」 #}
+          <button class="chat-add" type="button" data-add-chat>{{ icon('plus') }}添加群组</button>
         </div>
-        <div class="chat-actions">
-          <button class="btn btn-sm btn-ghost" type="button" data-add-chat>{{ icon('plus') }}添加群组</button>
+        <div class="setting-test">
           {# formaction：提交的是同一个表单，所以测的就是此刻填着的这些 ID，不用先保存。
              formnovalidate：别让 AK/SK 之类的必填项挡住测试。 #}
           <button class="btn btn-sm" type="submit" formnovalidate
-                  formaction="{{ url_for('accounts.tg_test') }}">发测试消息</button>
+                  formaction="{{ url_for('accounts.tg_test') }}">{{ icon('send') }}发测试消息</button>
+          <span class="setting-test-note">往上面每个群发一张测试卡片，结果写在对应那一行下面</span>
         </div>
         {% if tg_result %}
           <div class="alert {{ 'alert-ok' if tg_result.ok else 'alert-error' }} tg-result">
             {{ tg_result.message }}
           </div>
         {% endif %}
-        {% if creating %}
-          {# 新增时填了群就直接打开 TG 告警（见 excel_source.create_account） #}
-          <p class="form-hint">填了群组 ID，账号建好就会打开 TG 告警，并往这些群发一张「新账号启用」卡片。</p>
-        {% endif %}
-        {% if not tg_configured %}
-          <p class="form-hint">服务器还没配置 <code>TELEGRAM_BOT_TOKEN</code>：群组 ID 可以先存，但在配置好之前一条都不会发，测试消息也发不出去。</p>
+        {% if creating or not tg_configured %}
+          <p class="setting-foot">
+            {#- 新增时填了群就直接打开 TG 告警（见 excel_source.create_account） -#}
+            {%- if creating %}填了群组 ID，账号建好就会打开 TG 告警，并往这些群发一张「新账号启用」卡片。{% endif %}
+            {%- if not tg_configured %}服务器还没配置 <code>TELEGRAM_BOT_TOKEN</code>：群组 ID 可以先存，但配置好之前一条都不会发，测试消息也发不出去。{% endif -%}
+          </p>
         {% endif %}
       </div>
     </section>
@@ -272,7 +358,7 @@
 {% block content %}
 
 {% if fatal %}
-  <div class="alert alert-error"><strong>读不到台账：</strong> {{ fatal }}</div>
+  <div class="alert alert-error"><div><strong>读不到台账：</strong>{{ fatal }}</div></div>
 {% else %}
 
 {# 兜底：所有错误都该显示在某个弹窗里，这里只防万一 #}
@@ -281,82 +367,145 @@
 {% endif %}
 
 <noscript>
-  <div class="alert alert-warn">
-    这一页的新增、修改、停用都用弹窗，需要浏览器开启 JavaScript。
-    关掉 JS 的话只能看，不能改。
-  </div>
+  <p class="note note-warn">这一页的新增、修改、停用都用弹窗，需要浏览器开启 JavaScript。关掉 JS 的话只能看，不能改。</p>
 </noscript>
 
 {# 开关旁边不放字，「开着却发不出去」就在这里说一次，不是每行一个 #}
 {% set tg_on = accounts | selectattr('tg_active') | list %}
 {% set mail_on = accounts | selectattr('mail_active') | list %}
 {% if not tg_configured and (tg_on or mail_on) %}
-  <div class="alert alert-warn">
+  {# .note 是 flex：正文包一层，不然里面的 <code> 会单独成一列 #}
+  <p class="note note-warn"><span>
     服务器还没配置 <code>TELEGRAM_BOT_TOKEN</code>：
     {%- if tg_on %}表格里开着的 TG 告警在配置好之前一条都不会发{% endif %}
     {%- if tg_on and mail_on %}；{% endif %}
     {%- if mail_on %}开着的邮件告警收到了也发不出去{% endif %}。
-  </div>
+  </span></p>
 {% endif %}
 
-<section class="card">
-  <div class="card-head">
-    <h2>账号台账</h2>
-    <span class="card-note">
-      {{ excel_name }} · 共 {{ accounts | length }} 个账号，
-      启用 {{ enabled_count }} 个{% if accounts | length > enabled_count %}，
-      停用 {{ accounts | length - enabled_count }} 个{% endif %}
-    </span>
-  </div>
-
+<section class="card accounts-card">
   {% if not accounts %}
     <p class="empty">台账里还没有账号，用右上角的「新增账号」加一个。</p>
   {% else %}
+  {# 筛选全在浏览器里做（账号就几十个，整张表已经在页面上了）。选择记在本标签页里，
+     改完东西整页刷新回来还是这个筛选 #}
+  <div class="table-tools" id="acct-tools">
+    <div class="field tools-search">
+      <label for="f-q">搜索</label>
+      <span class="search-box">{{ icon('search') }}
+        <input id="f-q" type="search" placeholder="账号 ID、邮箱或上游" autocomplete="off" spellcheck="false" data-filter="q">
+      </span>
+    </div>
+    <div class="field">
+      <label for="f-partner">上游</label>
+      <select id="f-partner" data-filter="partner">
+        <option value="">全部</option>
+        {% for partner in partners %}<option value="{{ partner }}">{{ partner }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-state">状态</label>
+      <select id="f-state" data-filter="state">
+        <option value="">全部</option>
+        <option value="on">启用</option>
+        <option value="off">停用</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-alert">告警</label>
+      <select id="f-alert" data-filter="alert">
+        <option value="">全部</option>
+        <option value="tg">TG 开着</option>
+        <option value="mail">邮件开着</option>
+        <option value="none">都没开</option>
+      </select>
+    </div>
+    <div class="tools-end">
+      <span class="tools-count" data-count aria-live="polite">共 {{ accounts | length }} 个</span>
+      <button class="btn btn-sm btn-ghost" type="button" data-clear-filters hidden>清除筛选</button>
+    </div>
+  </div>
+  <div class="table-tools tools-life">
+    <div class="fchips" role="group" aria-label="按生命周期筛选" data-group="life">
+      <span class="fchips-label">生命周期</span>
+      <button class="fchip" type="button" data-value="" aria-pressed="true">
+        全部 <span class="fchip-count">{{ accounts | length }}</span></button>
+      {% for item in life_counts %}
+        <button class="fchip" type="button" data-value="{{ item.name }}" aria-pressed="false">
+          <i class="tag-dot" style="--tag: {{ item.color }}"></i>{{ item.name }}
+          <span class="fchip-count" data-life-count="{{ item.name }}">{{ item.count }}</span></button>
+      {% endfor %}
+      <button class="fchip" type="button" data-value="__none__" aria-pressed="false">
+        未标记 <span class="fchip-count" data-life-count="__none__">{{ unlabeled_count }}</span></button>
+    </div>
+  </div>
+
   <div class="table-scroll">
-    <table class="wide-table accounts-table">
+    <table class="wide-table accounts-table" id="acct-table" data-sortable>
       <thead>
         <tr>
-          <th>状态</th>
-          <th>上游</th>
-          <th>账号 ID</th>
-          <th>启用日期</th>
-          <th class="num">额度</th>
-          <th class="num">TAG 比率</th>
-          <th class="num">UNTAG 比率</th>
-          <th>TAG</th>
+          <th class="sticky-col sortable" tabindex="0" aria-sort="none" data-sort-type="text">账号</th>
+          <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="text">上游</th>
+          <th class="col-life">生命周期</th>
+          <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="number">状态</th>
+          <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="text">启用日期</th>
+          <th class="num sortable" tabindex="0" aria-sort="none" data-sort-type="number">额度</th>
+          <th class="num" title="TAG 比率 / UNTAG 比率：有标签的消费、没标签的消费各乘多少">比率</th>
           <th>TG 告警</th>
           <th>邮件告警</th>
-          <th>AK</th>
-          <th class="col-actions">操作</th>
+          <th class="col-actions"><span class="sr-only">操作</span></th>
         </tr>
       </thead>
       <tbody>
         {% for account in accounts %}
-          <tr {% if not account.enabled %}class="row-off"{% endif %}>
-            <td class="col-state">
+          <tr {% if not account.enabled %}class="row-off"{% endif %}
+              data-key="{{ account.key }}" data-number="{{ account.account }}" data-edit="dlg-edit-{{ loop.index }}"
+              data-search="{{ [account.account, account.email, account.partner, account.mail_address] | join(' ') | lower }}"
+              data-partner="{{ account.partner }}" data-state="{{ 'on' if account.enabled else 'off' }}"
+              data-alert="{{ ['tg' if account.tg_enabled else '', 'mail' if account.mail_enabled else ''] | select | join(' ') }}"
+              data-life="{{ account.lifecycle | join('|') }}">
+            <td class="sticky-col col-ident" data-sort="{{ account.account }}">
+              <div class="ident-cell">
+                {{ avatar(account.avatar, small=true) }}
+                <span class="acct-cell">
+                  <a class="acct-cell-id" href="{{ url_for('account.summary', number=account.account) }}"
+                     data-loading="正在读这个账号" title="打开这个账号的页面">{{ account.account }}</a>
+                  {%- if account.email %}<span class="acct-cell-mail" title="{{ account.email }}">{{ account.email }}</span>
+                  {%- else %}<span class="acct-cell-none" title="点「修改」补上，各页面和 TG 卡片上都要用">未填账号邮箱</span>{% endif %}
+                </span>
+              </div>
+            </td>
+            <td data-sort="{{ account.partner }}">{{ account.partner }}</td>
+            <td class="col-life">
+              <div class="life-cell">
+                <span class="life-tags" data-life-tags>{{ life_tags(account.lifecycle) }}</span>
+                <button class="icon-btn life-edit" type="button" data-life-edit
+                        title="改生命周期" aria-label="改 {{ account.account }} 的生命周期">{{ icon('pencil') }}</button>
+              </div>
+            </td>
+            {# SK 任何时候都不出现在页面上；AK 只露头尾，放在这一格的悬停提示和「修改」弹窗里。
+               缺凭证的账号哪个页面都查不出数，直接在这一格标出来 #}
+            <td class="col-state" data-sort="{{ '0' if account.enabled else '1' }}"
+                {% if account.ak %}title="AK {{ account.ak_masked }}（只读，要换请停用后新建）"{% endif %}>
               {% if account.enabled %}
                 <span class="dot dot-on"></span>启用
               {% else %}
                 <span class="dot dot-off"></span>停用
               {% endif %}
+              {% if not account.ak %}
+                <span class="state-flag" title="没有凭证，所有查询页都取不到这个账号的数">缺凭证</span>
+              {% endif %}
             </td>
-            <td>{{ account.partner }}</td>
-            <td class="cell-id">{{ account.account }}</td>
-            <td>
-              {%- if account.start_date %}<code>{{ account.start_date.isoformat() }}</code>
+            <td data-sort="{{ account.start_date.isoformat() if account.start_date else '' }}">
+              {%- if account.start_date %}<span class="tab-num">{{ account.start_date.isoformat() }}</span>
               {%- else %}<span class="tone-warn"
                     title="概览页会按 Cost Explorer 最早可查日起算，累计消费可能不是这个账号的全部消费">未设置</span>
               {%- endif -%}
             </td>
-            <td class="num">{{ account.budget | money }}</td>
-            <td class="num">{{ account.tag_ratio | ratio }}</td>
-            <td class="num">{{ account.untag_ratio | ratio }}</td>
-            <td>
-              {% if account.tag_spec %}
-                <code>{{ account.tag_spec }}</code>
-              {% else %}
-                <span class="tone-muted" title="台账 TAG 列留空，回落到 .env 里的 TAG_KEY">默认 {{ tag_key }}</span>
-              {% endif %}
+            <td class="num" data-sort="{{ account.budget }}">{{ account.budget | money }}</td>
+            <td class="num col-ratio"
+                title="TAG 比率 {{ account.tag_ratio | ratio }} · UNTAG 比率 {{ account.untag_ratio | ratio }}&#10;标签：{{ account.tag_label }}">
+              {{- account.tag_ratio | ratio }}<span class="ratio-sep">/</span>{{ account.untag_ratio | ratio -}}
             </td>
             <td class="col-tg">
               {# 点一下立刻写台账，和「恢复」一样走 POST + CSRF。没填群组 ID 的开不了，
@@ -385,42 +534,62 @@
                         title="{{ mail_title(account) }}"{% if not can_mail %} disabled{% endif %}></button>
               </form>
             </td>
-            <td>
-              {# SK 任何时候都不出现在页面上；AK 也只露头尾 #}
-              {% if account.ak %}
-                <code title="只读，如需更换请停用后新建">{{ account.ak_masked }}</code>
-              {% else %}
-                <span class="tone-danger" title="没有凭证，所有查询页都取不到这个账号的数">缺凭证</span>
-              {% endif %}
-            </td>
             <td class="row-actions">
-              <button class="icon-btn" type="button" data-open="dlg-edit-{{ loop.index }}"
-                      title="修改 {{ account.partner }} / {{ account.account }}"
-                      aria-label="修改 {{ account.partner }} / {{ account.account }}">{{ icon('pencil') }}</button>
-              {% if account.enabled %}
-                <button class="icon-btn icon-danger" type="button" data-open="dlg-off-{{ loop.index }}"
-                        title="停用 {{ account.account }}" aria-label="停用 {{ account.account }}">{{ icon('power') }}</button>
-              {% else %}
-                {# 恢复是安全且可逆的，不值得再拦一道；<form> 放在 <td> 里是合法的 #}
-                <form class="inline-form" method="post" action="{{ url_for('accounts.toggle') }}">
-                  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
-                  <input type="hidden" name="key" value="{{ account.key }}">
-                  <input type="hidden" name="enabled" value="1">
-                  <button class="icon-btn" type="submit" title="恢复 {{ account.account }}"
-                          aria-label="恢复 {{ account.account }}">{{ icon('restore') }}</button>
-                </form>
-              {% endif %}
-              {# 删除不能恢复：先过确认窗，还要输登录密码 #}
-              <button class="icon-btn icon-danger" type="button" data-open="dlg-del-{{ loop.index }}"
-                      title="删除 {{ account.account }}" aria-label="删除 {{ account.account }}">{{ icon('trash') }}</button>
+              <div class="row-btns">
+                <button class="icon-btn" type="button" data-open="dlg-edit-{{ loop.index }}"
+                        title="修改 {{ account.account }}"
+                        aria-label="修改 {{ account.account }}">{{ icon('pencil') }}</button>
+                {% if account.enabled %}
+                  <button class="icon-btn icon-danger" type="button" data-open="dlg-off-{{ loop.index }}"
+                          title="停用 {{ account.account }}" aria-label="停用 {{ account.account }}">{{ icon('power') }}</button>
+                {% else %}
+                  {# 恢复是安全且可逆的，不值得再拦一道；<form> 放在 <td> 里是合法的 #}
+                  <form class="inline-form" method="post" action="{{ url_for('accounts.toggle') }}">
+                    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+                    <input type="hidden" name="key" value="{{ account.key }}">
+                    <input type="hidden" name="enabled" value="1">
+                    <button class="icon-btn" type="submit" title="恢复 {{ account.account }}"
+                            aria-label="恢复 {{ account.account }}">{{ icon('restore') }}</button>
+                  </form>
+                {% endif %}
+                {# 删除不能恢复：先过确认窗，还要输登录密码 #}
+                <button class="icon-btn icon-danger" type="button" data-open="dlg-del-{{ loop.index }}"
+                        title="删除 {{ account.account }}" aria-label="删除 {{ account.account }}">{{ icon('trash') }}</button>
+              </div>
             </td>
           </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
+  <p class="empty" id="acct-empty" hidden>没有符合筛选条件的账号。</p>
   {% endif %}
 </section>
+
+<!-- ------------------------------------------------ 表格里改生命周期的小弹层 -->
+{# 整页共用一个：点哪一行的铅笔，就把那一行的账号和标签填进来。用原生 popover：在顶层
+   图层里，不会被表格的横向滚动框裁掉；点外面、按 Esc 自己会关 #}
+<div class="life-pop" id="life-pop" popover>
+  <form method="post" action="{{ url_for('accounts.lifecycle') }}" data-fetch data-life-form>
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="key" value="">
+    <p class="life-pop-head">生命周期 <span class="life-pop-who" data-life-who></span></p>
+    <div class="life-checks" data-life-checks>
+      {% for tag in lifecycle_tags %}
+        <label class="life-check">
+          <input type="checkbox" name="lifecycle" value="{{ tag.name }}">
+          <i class="tag-dot" style="--tag: {{ tag.hex }}"></i>{{ tag.name }}
+        </label>
+      {% else %}
+        <span class="form-hint">标签清单是空的，先点下面的「管理标签」加几个。</span>
+      {% endfor %}
+    </div>
+    <div class="life-pop-foot">
+      <button class="btn btn-sm btn-ghost" type="button" data-open="dlg-life">管理标签</button>
+      <button class="btn btn-sm btn-primary" type="submit">保存</button>
+    </div>
+  </form>
+</div>
 
 <!-- ------------------------------------------------ 弹窗 -->
 {# <dialog> 不能放在 <table> 里，统一收在表格后面。showModal() 会把它提到
@@ -435,7 +604,9 @@
     </header>
     <div class="modal-body">
       {% if open_create and errors %}{{ error_box(errors) }}{% endif %}
-      {{ fields('new', create_form, true,
+      {# 新建默认打上「正常」（清单里有的话）；校验没过回填时用刚才勾的 #}
+      {% set create_values = create_form if create_form else {'lifecycle': ['正常'] if '正常' in lifecycle_colors else []} %}
+      {{ fields('new', create_values, true,
                 tg_test if open_create else none,
                 mail_test if open_create else none,
                 active=open_page if open_create else 'basic',
@@ -455,11 +626,15 @@
   {% set current = {
        'partner': account.partner,
        'account': account.account,
+       'email': account.email,
        'budget': account.budget | ratio,
        'tag_ratio': account.tag_ratio | ratio,
        'untag_ratio': account.untag_ratio | ratio,
        'tag_spec': account.tag_spec,
        'start_date': account.start_date.isoformat() if account.start_date else '',
+       'lifecycle': account.lifecycle | list,
+       'avatar_emoji': account.avatar_emoji,
+       'avatar_color': '' if account.avatar_color is none else account.avatar_color | string,
        'tg_chat_ids': account.tg_chat_ids,
        'mail_provider': account.mail_provider,
        'mail_address': account.mail_address,
@@ -475,7 +650,7 @@
       <input type="hidden" name="key" value="{{ account.key }}">
       <header class="modal-head">
         <h2>修改账号</h2>
-        <span class="modal-sub">{{ account.partner }} / {{ account.account }}</span>
+        <span class="modal-sub">{{ account.account }}{% if account.email %} · {{ account.email }}{% endif %}</span>
         <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
       </header>
       <div class="modal-body">
@@ -511,11 +686,10 @@
         </header>
         <div class="modal-body">
           <p class="confirm-lead">
-            要停用 <strong>{{ account.partner }} / {{ account.account }}</strong> 吗？
+            要停用 <strong>{{ account.account }}</strong>{% if account.email %}（{{ account.email }}）{% endif %}吗？
           </p>
           <ul class="confirm-list">
-            <li>它会从概览、成本和使用情况、模型用量、模型配额四个页面消失，不再参与额度合计。</li>
-            <li>不再对它发起 Cost Explorer 查询（省钱）。</li>
+            <li>它会从概览里消失，不再参与额度合计，概览也不再为它查 Cost Explorer（省钱）。</li>
             {% if account.tg_enabled and account.tg_chat_ids %}
               <li>它的 {{ account.tg_chat_ids | length }} 个 TG 群会收到一张「账号停用」卡片（带停用前的累计消费），之后不再收到它的任何消息。</li>
             {% endif %}
@@ -550,7 +724,7 @@
           <div class="alert alert-error">{{ delete_error }}</div>
         {% endif %}
         <p class="confirm-lead">
-          要删除 <strong>{{ account.partner }} / {{ account.account }}</strong> 吗？
+          要删除 <strong>{{ account.account }}</strong>{% if account.email %}（{{ account.email }}）{% endif %}吗？
           <strong class="tone-danger">删除后不能恢复。</strong>
         </p>
         <ul class="confirm-list">
@@ -579,56 +753,114 @@
   </dialog>
 {% endfor %}
 
+{# 生命周期标签清单：增、删。里面有好几个表单，所以外面套的是 div 不是 form #}
+<dialog class="modal modal-sm" id="dlg-life" {% if open_life %}data-reopen{% endif %}>
+  <div class="modal-frame">
+    <header class="modal-head">
+      <h2>生命周期标签</h2>
+      <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+    </header>
+    <div class="modal-body">
+      <p class="form-hint">只是给人看的标记，不影响查询、汇总和告警；一个账号可以打多个。
+        给某个账号打标签，在表格「生命周期」那一列点铅笔。</p>
+      {% if life_error %}<div class="alert alert-error life-error">{{ life_error }}</div>{% endif %}
+      <ul class="life-list">
+        {% for item in life_counts if item.name in lifecycle_colors %}
+          <li class="life-row">
+            <span class="life-tag"><i class="tag-dot" style="--tag: {{ item.color }}"></i>{{ item.name }}</span>
+            {# 数字和筛选签上的一样，表格里改了标签之后由页面脚本一起重数 #}
+            <span class="life-row-count"><span data-life-count="{{ item.name }}">{{ item.count }}</span> 个账号</span>
+            {# 点一下只是「上膛」，按钮变成「确定删除」，再点才提交 #}
+            <form class="life-row-del" method="post" action="{{ url_for('accounts.lifecycle_remove') }}" data-arm>
+              <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+              <input type="hidden" name="name" value="{{ item.name }}">
+              <span class="life-row-warn" data-arm-note hidden>打了它的账号上会一起去掉</span>
+              <button class="btn btn-sm btn-ghost" type="submit" data-arm-button>删除</button>
+            </form>
+          </li>
+        {% else %}
+          <li class="life-row life-row-empty">清单是空的。</li>
+        {% endfor %}
+      </ul>
+      <form class="life-add" method="post" action="{{ url_for('accounts.lifecycle_add') }}">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <div class="field life-add-name">
+          <label for="life-name">新标签</label>
+          <input id="life-name" name="name" required maxlength="{{ max_life_name }}" autocomplete="off"
+                 placeholder="比如：观察" value="{{ life_form.name }}">
+        </div>
+        <div class="field">
+          <span class="field-label" id="life-color-label">颜色</span>
+          <div class="color-picks" role="radiogroup" aria-labelledby="life-color-label">
+            {% for key, choice in life_color_choices.items() %}
+              <label class="color-pick" title="{{ choice[0] }}">
+                <input type="radio" name="color" value="{{ key }}" {% if key == life_form.color %}checked{% endif %}>
+                <span style="--tag: {{ choice[1] }}" aria-hidden="true"></span><span class="sr-only">{{ choice[0] }}</span>
+              </label>
+            {% endfor %}
+          </div>
+        </div>
+        <button class="btn btn-primary life-add-btn" type="submit">添加</button>
+      </form>
+    </div>
+  </div>
+</dialog>
+
 <footer class="meta">
-  <span>改动直接写回 <code>{{ excel_name }}</code>；新增和修改账号前自动备份到 <code>ledger-backups/</code>（保留最近 20 份），开关、停用和删除不备份</span>
-  <span>操作记录：<code>ledger-audit.log</code></span>
-  <span class="tone-danger">台账请只从这一页改——本地另存的 {{ excel_name }} 再 scp 上来会把这里的改动整个覆盖</span>
+  <span>改动直接写回 {{ excel_name }}，新增和修改前自动备份</span>
   <span>生成于 {{ generated_at }}</span>
 </footer>
 
 <script>
 (function () {
+  const lifePop = document.getElementById('life-pop');
+  const closePop = function () {
+    if (lifePop && lifePop.matches(':popover-open')) lifePop.hidePopover();
+  };
+
   // 用事件委托，不给每个按钮单独挂监听——一页上可能有几十个弹窗触发点
   document.addEventListener('click', function (event) {
     if (!(event.target instanceof Element)) return;
 
-    var opener = event.target.closest('[data-open]');
+    const opener = event.target.closest('[data-open]');
     if (opener) {
-      var target = document.getElementById(opener.getAttribute('data-open'));
+      const target = document.getElementById(opener.getAttribute('data-open'));
       if (target) {
+        closePop();
         // 每次打开都从「基础信息」那一页开始，不停在上次关掉时的那一页
         showPage(target, 'basic');
         target.showModal();
-        // showModal 默认聚焦第一个可聚焦元素（页签），这里显式落到第一个输入框
-        // 删除确认窗没有分页，落到它的密码框上
-        var first = target.querySelector('.tab-page.is-active input:not([type=hidden])') ||
-                    target.querySelector('input:not([type=hidden])');
+        // showModal 默认聚焦第一个可聚焦元素（页签），这里显式落到第一个输入框。
+        // 删除确认窗没有分页，落到它的密码框上；标签清单落到「新标签」上
+        const first = target.querySelector('.tab-page.is-active [name="account"]') ||
+                      target.querySelector('.tab-page.is-active input:not([type=hidden]):not([type=radio])') ||
+                      target.querySelector('input:not([type=hidden]):not([type=radio])');
         if (first) first.focus();
       }
       return;
     }
 
     // 弹窗里的页签：换一页显示。三页在同一个表单里，保存时一起提交
-    var tab = event.target.closest('[data-tab]');
+    const tab = event.target.closest('[data-tab]');
     if (tab) {
       showPage(tab.closest('dialog'), tab.getAttribute('data-tab'));
       return;
     }
 
-    var closer = event.target.closest('[data-close]');
+    const closer = event.target.closest('[data-close]');
     if (closer) {
-      var owner = closer.closest('dialog');
+      const owner = closer.closest('dialog');
       if (owner) owner.close();
       return;
     }
 
     // 告警邮箱的「测试连接」：用 fetch 发同一个表单，结果贴在按钮下面。
     // 不整页刷新——密码不回填，刷新了就得重打一遍
-    var tester = event.target.closest('[data-mail-test]');
+    const tester = event.target.closest('[data-mail-test]');
     if (tester && window.fetch && window.FormData) {
       event.preventDefault();
-      var box = tester.closest('[data-mail-block]').querySelector('[data-mail-result]');
-      var show = function (tone, text) {
+      const box = tester.closest('[data-mail-block]').querySelector('[data-mail-result]');
+      const show = function (tone, text) {
         box.className = 'alert mail-result' + (tone ? ' alert-' + tone : '');
         box.textContent = text;
         box.hidden = false;
@@ -649,14 +881,14 @@
     }
 
     // 群组 ID：加一行。复制现有的第一行、清空，上一次测试的结果别跟着复制过去
-    var adder = event.target.closest('[data-add-chat]');
+    const adder = event.target.closest('[data-add-chat]');
     if (adder) {
-      var rows = adder.closest('.tg-block').querySelector('[data-chat-rows]');
-      var max = parseInt(rows.getAttribute('data-max'), 10) || 10;
+      const rows = adder.closest('.tg-block').querySelector('[data-chat-rows]');
+      const max = parseInt(rows.getAttribute('data-max'), 10) || 10;
       if (rows.querySelectorAll('.chat-row').length >= max) return;
-      var fresh = rows.querySelector('.chat-row').cloneNode(true);
+      const fresh = rows.querySelector('.chat-row').cloneNode(true);
       fresh.querySelector('input').value = '';
-      var stale = fresh.querySelector('.chat-result');
+      const stale = fresh.querySelector('.chat-result');
       if (stale) stale.remove();
       rows.appendChild(fresh);
       fresh.querySelector('input').focus();
@@ -665,18 +897,28 @@
     }
 
     // 群组 ID：删一行。最后一行不删、只清空——总得留一个框能填
-    var remover = event.target.closest('[data-remove-chat]');
+    const remover = event.target.closest('[data-remove-chat]');
     if (remover) {
-      var row = remover.closest('.chat-row');
-      var list = row.parentElement;
+      const row = remover.closest('.chat-row');
+      const list = row.parentElement;
       if (list.querySelectorAll('.chat-row').length > 1) {
         row.remove();
       } else {
         row.querySelector('input').value = '';
-        var result = row.querySelector('.chat-result');
+        const result = row.querySelector('.chat-result');
         if (result) result.remove();
       }
       syncAdder(list);
+      return;
+    }
+
+    // 头像：点一个现成的表情填进框里；再点同一个就清掉（回到首字母）
+    const emoji = event.target.closest('[data-emoji]');
+    if (emoji) {
+      const pick = emoji.closest('[data-avatar-pick]');
+      const input = pick.querySelector('[data-avatar-emoji]');
+      input.value = input.value === emoji.dataset.emoji ? '' : emoji.dataset.emoji;
+      paintAvatar(pick);
     }
   });
 
@@ -684,7 +926,7 @@
   function showPage(scope, key) {
     if (!scope) return;
     scope.querySelectorAll('[data-tab]').forEach(function (tab) {
-      var on = tab.getAttribute('data-tab') === key;
+      const on = tab.getAttribute('data-tab') === key;
       tab.setAttribute('aria-selected', on ? 'true' : 'false');
       tab.tabIndex = on ? 0 : -1;
     });
@@ -696,14 +938,14 @@
   // 页签上按左右方向键换页（Home / End 到头尾），和常见的标签页控件一样
   document.addEventListener('keydown', function (event) {
     if (!(event.target instanceof Element)) return;
-    var tab = event.target.closest('[data-tab]');
+    const tab = event.target.closest('[data-tab]');
     if (!tab) return;
-    var tabs = Array.prototype.slice.call(tab.parentElement.querySelectorAll('[data-tab]'));
-    var index = tabs.indexOf(tab);
-    var next = { ArrowRight: index + 1, ArrowLeft: index - 1, Home: 0, End: tabs.length - 1 }[event.key];
+    const tabs = Array.prototype.slice.call(tab.parentElement.querySelectorAll('[data-tab]'));
+    const index = tabs.indexOf(tab);
+    const next = { ArrowRight: index + 1, ArrowLeft: index - 1, Home: 0, End: tabs.length - 1 }[event.key];
     if (next === undefined) return;
     event.preventDefault();
-    var goal = tabs[(next + tabs.length) % tabs.length];
+    const goal = tabs[(next + tabs.length) % tabs.length];
     showPage(tab.closest('dialog'), goal.getAttribute('data-tab'));
     goal.focus();
   });
@@ -711,10 +953,10 @@
   // 点「保存」时有必填项没填：浏览器要把焦点放到那个框上提示，但它可能在另一页，看不见就
   // 聚焦不了、表单也不提交，看上去像按钮没反应。先翻到它所在的那一页。只管第一个——浏览器
   // 提示的就是按顺序的第一个
-  var turning = false;
+  let turning = false;
   document.addEventListener('invalid', function (event) {
     if (turning || !(event.target instanceof Element)) return;
-    var page = event.target.closest('[data-page]');
+    const page = event.target.closest('[data-page]');
     if (!page) return;
     turning = true;
     setTimeout(function () { turning = false; }, 0);
@@ -723,8 +965,8 @@
 
   // 到上限就把「添加群组」按钮置灰，别让人加了之后才被服务端拒
   function syncAdder(rows) {
-    var max = parseInt(rows.getAttribute('data-max'), 10) || 10;
-    var adder = rows.closest('.tg-block').querySelector('[data-add-chat]');
+    const max = parseInt(rows.getAttribute('data-max'), 10) || 10;
+    const adder = rows.closest('.tg-block').querySelector('[data-add-chat]');
     if (adder) adder.disabled = rows.querySelectorAll('.chat-row').length >= max;
   }
   document.querySelectorAll('[data-chat-rows]').forEach(syncAdder);
@@ -732,13 +974,13 @@
   // 告警邮箱换平台：「其他平台」才要填服务器；密码提示跟着换成这家要的那种密码
   document.addEventListener('change', function (event) {
     if (!(event.target instanceof Element)) return;
-    var select = event.target.closest('[data-mail-provider]');
+    const select = event.target.closest('[data-mail-provider]');
     if (!select) return;
-    var block = select.closest('[data-mail-block]');
-    var server = block.querySelector('[data-mail-server]');
+    const block = select.closest('[data-mail-block]');
+    const server = block.querySelector('[data-mail-server]');
     if (server) server.hidden = select.value !== 'custom';
-    var option = select.options[select.selectedIndex];
-    var hint = block.querySelector('[data-mail-hint]');
+    const option = select.options[select.selectedIndex];
+    const hint = block.querySelector('[data-mail-hint]');
     if (hint) hint.textContent = (option && option.getAttribute('data-hint')) || '这个平台给第三方客户端用的密码';
   });
 
@@ -750,19 +992,342 @@
     });
   });
 
-  // 服务端说这次提交没通过校验（或者刚测完）：把对应的弹窗重新打开，里面已经带着错误和
-  // 回填值，停在服务端指定的那一页——有错的第一页，或者刚测试的那一页
-  var reopen = document.querySelector('dialog[data-reopen]');
+  // ---------------------------------------------------- 头像预览
+  // 和 avatars.py 同一套规则：表情优先；没有就取账号邮箱（没有就上游、号码）的第一个
+  // 字母或数字。底色选了就用选的，「自动」按邮箱（没有就号码、上游）的 crc32 散到八组里
+  const CRC = (function () {
+    const table = [];
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+      table.push(c >>> 0);
+    }
+    return table;
+  })();
+  function crc32(text) {
+    let c = 0xFFFFFFFF;
+    for (const byte of new TextEncoder().encode(text)) c = CRC[(c ^ byte) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+  // 圆圈里只放一个字，按人眼看到的算（带肤色的表情、国旗都是一个），和 avatars.first_grapheme 一样
+  function firstGrapheme(text) {
+    text = text.replace(/^[\s,，]+/, '');
+    if (!text) return '';
+    if (window.Intl && Intl.Segmenter) {
+      const first = new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)[Symbol.iterator]().next();
+      return first.done ? '' : first.value.segment;
+    }
+    return Array.from(text)[0];
+  }
+  const upper = function (ch) { const up = ch.toUpperCase(); return up.length === 1 ? up : ch; };
+
+  function paintAvatar(pick) {
+    const form = pick.closest('form');
+    const value = function (name) { const f = form.elements[name]; return f && f.value ? f.value.trim() : ''; };
+    const email = value('email'), number = value('account'), partner = value('partner');
+    const chosenText = firstGrapheme(value('avatar_emoji'));
+    const chosen = form.querySelector('input[name="avatar_color"]:checked');
+    const tone = chosen && chosen.value !== ''
+      ? Number(chosen.value)
+      : crc32((email || number || partner || '?').toLowerCase()) % 8;
+    let text = '?', emoji = false;
+    if (chosenText) {
+      // 字母和数字按普通头像画（大写），别的（表情、符号）字号放大一点
+      emoji = !/^[\p{L}\p{N}]$/u.test(chosenText);
+      text = emoji ? chosenText : upper(chosenText);
+    } else {
+      const letter = (email || partner || number || '?').match(/[\p{L}\p{N}]/u);
+      text = letter ? upper(letter[0]) : '?';
+    }
+    const preview = pick.querySelector('[data-avatar-preview]');
+    preview.className = 'avatar avatar-lg av-' + tone + (emoji ? ' avatar-emoji' : '');
+    preview.firstElementChild.textContent = text;
+  }
+  document.querySelectorAll('[data-avatar-pick]').forEach(function (pick) {
+    const form = pick.closest('form');
+    form.addEventListener('input', function (event) {
+      if (['email', 'account', 'partner', 'avatar_emoji'].includes(event.target.name)) paintAvatar(pick);
+    });
+    form.addEventListener('change', function (event) {
+      if (event.target.name === 'avatar_color') paintAvatar(pick);
+    });
+  });
+
+  // ---------------------------------------------------- 要点两下的删除（标签清单里的「删除」）
+  // 第一下只是上膛：按钮变成「确定删除」、旁边写清楚影响；4 秒内不点第二下就退回去
+  document.querySelectorAll('form[data-arm]').forEach(function (form) {
+    const button = form.querySelector('[data-arm-button]');
+    const note = form.querySelector('[data-arm-note]');
+    let timer = null;
+    const disarm = function () {
+      form.classList.remove('is-armed');
+      button.textContent = '删除';
+      button.classList.replace('btn-danger-solid', 'btn-ghost');
+      if (note) note.hidden = true;
+    };
+    form.addEventListener('submit', function (event) {
+      if (form.classList.contains('is-armed')) return;
+      event.preventDefault();
+      form.classList.add('is-armed');
+      button.textContent = '确定删除';
+      button.classList.replace('btn-ghost', 'btn-danger-solid');
+      if (note) note.hidden = false;
+      clearTimeout(timer);
+      timer = setTimeout(disarm, 4000);
+    });
+  });
+
+  // ---------------------------------------------------- 筛选
+  const table = document.getElementById('acct-table');
+  const rows = table ? [...table.tBodies[0].rows] : [];
+  const tools = document.getElementById('acct-tools');
+  const chipsBox = document.querySelector('.tools-life .fchips');
+  const chips = chipsBox ? [...chipsBox.querySelectorAll('.fchip')] : [];
+  const fields = tools ? [...tools.querySelectorAll('[data-filter]')] : [];
+  const counter = document.querySelector('[data-count]');
+  const clearer = document.querySelector('[data-clear-filters]');
+  const empty = document.getElementById('acct-empty');
+  const picked = new Set();
+  const STORE = 'accounts-filters';
+
+  const lifeOf = function (row) { return row.dataset.life ? row.dataset.life.split('|') : []; };
+
+  function apply() {
+    const want = {};
+    for (const field of fields) want[field.dataset.filter] = field.value.trim();
+    const query = (want.q || '').toLowerCase();
+    let shown = 0;
+    for (const row of rows) {
+      const life = lifeOf(row);
+      const alerts = row.dataset.alert ? row.dataset.alert.split(' ') : [];
+      const ok = (!query || row.dataset.search.includes(query))
+        && (!want.partner || row.dataset.partner === want.partner)
+        && (!want.state || row.dataset.state === want.state)
+        && (!want.alert || (want.alert === 'none' ? !alerts.length : alerts.includes(want.alert)))
+        && (!picked.size || life.some(function (v) { return picked.has(v); })
+            || (picked.has('__none__') && !life.length));
+      row.hidden = !ok;
+      if (ok) shown += 1;
+    }
+    const filtered = fields.some(function (f) { return f.value; }) || picked.size > 0;
+    if (counter) counter.textContent = filtered ? '显示 ' + shown + ' / ' + rows.length + ' 个' : '共 ' + rows.length + ' 个';
+    if (clearer) clearer.hidden = !filtered;
+    if (empty) empty.hidden = shown > 0;
+    for (const chip of chips) {
+      const on = chip.dataset.value ? picked.has(chip.dataset.value) : !picked.size;
+      chip.setAttribute('aria-pressed', String(on));
+    }
+    try {
+      const saved = { life: [...picked] };
+      for (const field of fields) saved[field.dataset.filter] = field.value;
+      sessionStorage.setItem(STORE, JSON.stringify(saved));
+    } catch (e) { /* 存不了就只是刷新后不记得 */ }
+  }
+
+  if (table) {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(STORE) || 'null');
+      if (saved) {
+        for (const field of fields) {
+          const value = saved[field.dataset.filter] || '';
+          // 下拉框里已经没有这一项（比如上游改名了）就不恢复
+          if (field.tagName !== 'SELECT' || [...field.options].some(function (o) { return o.value === value; })) {
+            field.value = value;
+          }
+        }
+        for (const name of saved.life || []) {
+          if (chips.some(function (c) { return c.dataset.value === name; })) picked.add(name);
+        }
+      }
+    } catch (e) { /* 同上 */ }
+    for (const field of fields) field.addEventListener(field.tagName === 'SELECT' ? 'change' : 'input', apply);
+    if (chipsBox) {
+      chipsBox.addEventListener('click', function (event) {
+        const chip = event.target.closest('.fchip');
+        if (!chip) return;
+        const value = chip.dataset.value;
+        if (!value) picked.clear();
+        else if (picked.has(value)) picked.delete(value);
+        else picked.add(value);
+        apply();
+      });
+    }
+    if (clearer) {
+      clearer.addEventListener('click', function () {
+        for (const field of fields) field.value = '';
+        picked.clear();
+        apply();
+      });
+    }
+    apply();
+  }
+
+  // 筛选签上的数：表格里改了某个账号的标签之后重新数一遍
+  function recount() {
+    for (const badge of document.querySelectorAll('[data-life-count]')) {
+      const name = badge.dataset.lifeCount;
+      badge.textContent = rows.filter(function (row) {
+        const life = lifeOf(row);
+        return name === '__none__' ? !life.length : life.includes(name);
+      }).length;
+    }
+  }
+
+  // ---------------------------------------------------- 表格里改生命周期
+  const lifeForm = lifePop ? lifePop.querySelector('[data-life-form]') : null;
+  let lifeRow = null;
+  let lifeButton = null;
+
+  function placePop(anchor) {
+    const box = anchor.getBoundingClientRect();
+    const width = lifePop.offsetWidth, height = lifePop.offsetHeight;
+    let left = Math.min(box.left, window.innerWidth - width - 8);
+    let top = box.bottom + 6;
+    if (top + height > window.innerHeight - 8) top = box.top - height - 6;
+    lifePop.style.left = Math.max(8, left) + 'px';
+    lifePop.style.top = Math.max(8, top) + 'px';
+  }
+
+  function openLife(button) {
+    const row = button.closest('tr');
+    // 没有 popover 的老浏览器：退回到「修改」弹窗，生命周期也在那里
+    if (!lifePop || !lifePop.showPopover) {
+      const dialog = document.getElementById(row.dataset.edit);
+      if (dialog) { showPage(dialog, 'basic'); dialog.showModal(); }
+      return;
+    }
+    lifeRow = row;
+    lifeButton = button;
+    lifeForm.elements.key.value = row.dataset.key;
+    lifePop.querySelector('[data-life-who]').textContent = row.dataset.number;
+    const current = lifeOf(row);
+    const checks = lifePop.querySelector('[data-life-checks]');
+    for (const stale of checks.querySelectorAll('.is-stale')) stale.remove();
+    const known = new Set();
+    for (const box of checks.querySelectorAll('input')) {
+      box.checked = current.includes(box.value);
+      known.add(box.value);
+    }
+    // 账号身上有、清单里已经没有的老标签：临时列出来（勾着），取消勾选就去掉
+    for (const name of current) {
+      if (known.has(name)) continue;
+      const label = document.createElement('label');
+      label.className = 'life-check is-stale';
+      label.title = '标签清单里已经没有它了，取消勾选后就选不回来';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.name = 'lifecycle';
+      box.value = name;
+      box.checked = true;
+      const dot = document.createElement('i');
+      dot.className = 'tag-dot';
+      label.append(box, dot, document.createTextNode(name));
+      checks.append(label);
+    }
+    lifePop.showPopover();
+    placePop(button);
+    const first = checks.querySelector('input');
+    if (first) first.focus();
+  }
+
+  if (lifePop && lifeForm) {
+    document.addEventListener('click', function (event) {
+      if (!(event.target instanceof Element)) return;
+      const button = event.target.closest('[data-life-edit]');
+      if (button) openLife(button);
+    });
+    // 弹层是 fixed 定位的，页面一滚就和那一行对不上了，干脆收起来
+    document.addEventListener('scroll', function (event) {
+      if (!lifePop.contains(event.target)) closePop();
+    }, { capture: true, passive: true });
+    lifePop.addEventListener('toggle', function (event) {
+      if (event.newState === 'closed' && lifeButton && document.activeElement === document.body) lifeButton.focus();
+    });
+
+    lifeForm.addEventListener('submit', function (event) {
+      if (!window.fetch) return;   // 没有 fetch 就整页提交，服务端会跳回这一页
+      event.preventDefault();
+      const row = lifeRow;
+      const save = lifeForm.querySelector('[type=submit]');
+      save.disabled = true;
+      fetch(lifeForm.action, {
+        method: 'POST',
+        body: new FormData(lifeForm),
+        headers: { 'X-Requested-With': 'fetch' },
+        credentials: 'same-origin'
+      })
+        .then(function (response) { return response.json(); })
+        .then(function (result) {
+          if (!result.ok) {
+            window.appToast('error', '生命周期没有保存', result.message);
+            return;
+          }
+          const names = result.tags.map(function (t) { return t.name; });
+          row.dataset.life = names.join('|');
+          const cell = row.querySelector('[data-life-tags]');
+          cell.replaceChildren();
+          for (const tag of result.tags) {
+            const chip = document.createElement('span');
+            chip.className = 'life-tag';
+            const dot = document.createElement('i');
+            dot.className = 'tag-dot';
+            dot.style.setProperty('--tag', tag.color);
+            chip.append(dot, document.createTextNode(tag.name));
+            cell.append(chip);
+          }
+          if (!result.tags.length) {
+            const none = document.createElement('span');
+            none.className = 'life-none';
+            none.textContent = '未标记';
+            cell.append(none);
+          }
+          // 「修改」弹窗里的勾选跟着改，不然在那里点保存会把刚改的又改回去
+          const dialog = document.getElementById(row.dataset.edit);
+          if (dialog) {
+            for (const box of dialog.querySelectorAll('input[name="lifecycle"]')) box.checked = names.includes(box.value);
+          }
+          closePop();
+          recount();
+          apply();
+          window.appToast(result.message === '没有改动。' ? 'info' : 'ok', result.message);
+        })
+        .catch(function () { window.appToast('error', '生命周期没有保存', '页面可能已经过期，刷新后再试。'); })
+        .then(function () { save.disabled = false; });
+    });
+  }
+
+  // ---------------------------------------------------- 整页提交回来停在原处
+  // 开关、停用、保存都是「提交 → 跳回这一页」，回来时滚到提交前的位置，不用再往下找
+  const SCROLL = 'accounts-scroll';
+  document.addEventListener('submit', function (event) {
+    if (event.defaultPrevented || event.target.method !== 'post') return;
+    try { sessionStorage.setItem(SCROLL, JSON.stringify({ y: window.scrollY, at: Date.now() })); } catch (e) { /* 无所谓 */ }
+  });
+  try {
+    const back = JSON.parse(sessionStorage.getItem(SCROLL) || 'null');
+    sessionStorage.removeItem(SCROLL);
+    if (back && Date.now() - back.at < 30000) window.scrollTo(0, back.y);
+  } catch (e) { /* 同上 */ }
+
+  // 服务端说这次提交没通过校验（或者刚测完、刚增删过标签）：把对应的弹窗重新打开，里面已经
+  // 带着错误和回填值，停在服务端指定的那一页——有错的第一页，或者刚测试的那一页
+  const reopen = document.querySelector('dialog[data-reopen]');
   if (reopen) {
     reopen.showModal();
-    var active = reopen.querySelector('.tab-page.is-active') || reopen;
-    var tested = active.querySelector('.tg-result, .mail-result:not([hidden])');
+    const active = reopen.querySelector('.tab-page.is-active') || reopen;
+    const tested = active.querySelector('.tg-result, .mail-result:not([hidden])');
     if (tested) {
       tested.scrollIntoView({ block: 'center' });
     } else {
-      var bad = active.querySelector('input:not([type=hidden])');
+      const bad = active.querySelector('input:not([type=hidden]):not([type=radio])');
       if (bad) bad.focus();
     }
+  }
+  // 「?tags=1」只是让标签清单弹窗重新打开一次，别留在地址栏里，手动刷新时又弹出来
+  if (location.search.includes('tags=1')) {
+    const url = new URL(location.href);
+    url.searchParams.delete('tags');
+    history.replaceState(null, '', url.pathname + url.search + url.hash);
   }
 })();
 </script>

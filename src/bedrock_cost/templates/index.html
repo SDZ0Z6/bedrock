@@ -1,170 +1,371 @@
 {% extends "shell.html" %}
+{% from "_macros.html" import avatar %}
 {% block title %}概览 · Bedrock 成本监控{% endblock %}
 {% block page_title %}概览{% endblock %}
 {% block loading_label %}正在查 Cost Explorer{% endblock %}
 
-{% macro usage_cell(pct, level, width) -%}
-  <div class="usage">
-    <span class="usage-num tone-{{ level }}">{{ pct | pct }}</span>
-    <span class="bar"><i class="tone-{{ level }}" style="width: {{ width }}%"></i></span>
-  </div>
+{# 这一页没有日期筛选：额度是一次性发的，拿某个可选区间的消费去比它没有意义。
+   消费和余额都是「从各账号的启用日期累计到今天」，区间由台账决定。 #}
+{% block page_sub -%}
+  {%- if report -%}
+    {{ report.rows | length }} 个账号 · 各自从启用日期累计到 {{ report.end.isoformat() }}
+    {%- if report.any_cached %} · 部分数据来自缓存{% endif -%}
+  {%- endif -%}
+{%- endblock %}
+
+{% macro refresh_button() -%}
+  <a class="btn" href="{{ url_for('main.index', refresh=1) }}"
+     title="跳过缓存，重新调用 Cost Explorer 和 CloudWatch"
+     data-loading="正在重新查 Cost Explorer" data-loading-note="跳过缓存">强制刷新</a>
 {%- endmacro %}
 
-{# 这一页没有日期筛选：额度是一次性发的，拿某个可选区间的消费去比它没有意义。
-   消费和余额都是「从各账号的启用日期累计到今天」，区间由台账决定。
-   只剩「强制刷新」一个按钮，就挪到标题旁，不为它单留一整张筛选卡片。 #}
-{% block page_actions %}
-  <a class="btn btn-ghost" href="{{ url_for('main.index', refresh=1) }}"
-     title="跳过缓存，重新调用 Cost Explorer"
-     data-loading="正在重新查 Cost Explorer" data-loading-note="跳过缓存">强制刷新</a>
-{% endblock %}
+{# 出不了报表时没有筛选条，强制刷新只能放在页头 #}
+{% block page_actions %}{% if not report %}{{ refresh_button() }}{% endif %}{% endblock %}
+
+{# 卡片三列小标签前面的图标：上游（一栋楼）、启用日期（日历）、已启用（钟） #}
+{% macro stat_icon(name) -%}
+  <svg class="stat-icon" viewBox="0 0 16 16" aria-hidden="true">
+  {%- if name == 'partner' -%}
+    <path d="M2.5 14V3.5a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1V14"/><path d="M9.5 7h3a1 1 0 0 1 1 1v6"/><path d="M1.5 14h13"/>
+    <path d="M5 5.5h2M5 8h2M5 10.5h2"/>
+  {%- elif name == 'calendar' -%}
+    <rect x="2" y="3" width="12" height="11" rx="2"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3"/>
+  {%- elif name == 'clock' -%}
+    <circle cx="8" cy="8" r="6"/><path d="M8 4.8V8l2.2 1.4"/>
+  {%- endif -%}
+  </svg>
+{%- endmacro %}
+
+{% macro warn_icon() -%}
+  <svg class="state-icon" viewBox="0 0 16 16" aria-hidden="true">
+    <path d="M8 1.8 15 14H1z"/><path d="M8 6.2v3.6M8 11.6v.3"/>
+  </svg>
+{%- endmacro %}
 
 {% block content %}
 
 {% if fatal %}
-  <div class="alert alert-error"><strong>无法生成报表：</strong> {{ fatal }}</div>
+  <div class="alert alert-error"><div><strong>无法生成报表：</strong>{{ fatal }}</div></div>
 {% elif report %}
 
-  <!-- ------------------------------------------------ 汇总 -->
-  <section class="summary">
-    <div class="tile">
-      <span class="tile-label">总额度</span>
-      <span class="tile-value">{{ report.total_budget | money }}</span>
-    </div>
-    <div class="tile">
-      <span class="tile-label">累计消费</span>
-      <span class="tile-value">{{ report.total_cost | money }}</span>
-      <span class="tile-sub">TAG {{ report.total_tag | money }} + UNTAG {{ report.total_untag | money }}</span>
-    </div>
-    <div class="tile">
-      <span class="tile-label">整体使用率</span>
-      <span class="tile-value tone-{{ report.total_level }}">{{ report.total_usage_pct | pct }}</span>
-    </div>
-    <div class="tile">
-      <span class="tile-label">总余额</span>
-      <span class="tile-value {% if report.total_balance < 0 %}tone-danger{% endif %}">{{ report.total_balance | money }}</span>
-    </div>
+  <!-- ------------------------------------------------ 图：额度、调用走势、消费构成 -->
+  <section class="bento" aria-label="全部账号的图表">
+    <article class="viz-card">
+      <div class="viz-head">
+        <div>
+          <h2 class="viz-title">额度使用</h2>
+          <p class="viz-sub">{{ report.rows | length }} 个账号 · 截至 {{ report.end.strftime('%m-%d') }}</p>
+        </div>
+      </div>
+      <div class="gauge">
+        {{ gauge | safe }}
+        <div class="gauge-center">
+          <span class="gauge-value" data-countup>{{ report.total_cost | money0 }}</span>
+          <span class="gauge-of">额度 {{ report.total_budget | money0 }}</span>
+        </div>
+      </div>
+      <div class="gauge-facts">
+        <span>使用率<strong class="tone-{{ report.total_level }}">{{ report.total_usage_pct | pct }}</strong></span>
+        <span>余额<strong class="{% if report.total_balance < 0 %}tone-danger{% endif %}">{{ report.total_balance | money }}</strong></span>
+        <span>查询失败<strong>{{ report.missing_count }} 个</strong></span>
+      </div>
+      {% if near_limit %}
+        <div class="near-list">
+          <p class="near-title">快用完的账号</p>
+          {% for row in near_limit %}
+            <div class="bar-item near-item">
+              <span class="bar-item-name">{{ avatar(row.avatar, small=true) }}{{ row.label }}</span>
+              <span class="bar-item-value">{{ row.usage_pct | pct }}</span>
+              {# 进场时一条接一条长到位（--delay 错开） #}
+              <div class="meter tone-{{ row.level }}" aria-hidden="true"><i style="width: {{ row.bar_width }}%; --delay: {{ 300 + loop.index0 * 120 }}ms"></i></div>
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </article>
+
+    <article class="viz-card span-2">
+      <div class="viz-head">
+        <div>
+          <h2 class="viz-title">近 {{ trend.days }} 天成本</h2>
+          <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 每天一根柱，按账号分色 ·
+            Cost Explorer 晚 1~2 天出数，最近两天可能还不全</p>
+        </div>
+        {% if config.OPS_DASHBOARD %}
+          <a class="viz-link" href="{{ url_for('ops.index') }}" data-loading="正在汇总各账号的数">收入和毛利</a>
+        {% endif %}
+      </div>
+      <div>
+        <p class="viz-big">{{ trend.total | money0 }}</p>
+        <p class="viz-meta">日均 <strong>{{ trend.average | money }}</strong> · 最多的一天是 {{ trend.peak_label }}（{{ trend.peak_value | money }}）</p>
+      </div>
+      <div class="viz-chart" id="trend-chart" data-tip-src="trend-data">{{ trend.chart.svg | safe }}</div>
+      {# 图例可以点：点一下只看这个账号，再点一下恢复 #}
+      <div class="legend-toggles" data-legend-for="trend-chart" role="group" aria-label="只看某个账号">
+        {% for item in trend.chart.legend %}
+          <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
+                  title="{{ item.name }} 近 {{ trend.days }} 天 {{ item.total | money }}">
+            <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
+        {% endfor %}
+      </div>
+      <script id="trend-data" type="application/json">{{ trend.chart.tooltip | tojson }}</script>
+    </article>
+
+    <article class="viz-card">
+      <div class="viz-head">
+        <div>
+          <h2 class="viz-title">消费构成</h2>
+          <p class="viz-sub">按账号 · 各自从启用日起累计</p>
+        </div>
+      </div>
+      <div class="viz-chart">{{ share.svg | safe }}</div>
+      <div class="viz-legend">
+        {% for item in share.legend %}
+          <div class="viz-legend-item">
+            <span class="viz-legend-name"><i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</span>
+            <span class="viz-legend-value">{{ item.value | money }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    </article>
   </section>
 
-  <!-- ------------------------------------------------ 明细表 -->
-  <section class="card">
-    <div class="card-head">
-      <h2>账号明细</h2>
-      <span class="card-note">
-        各账号自启用日期累计至 {{ report.end.isoformat() }} ·
-        {{ report.rows | length }} 个账号
-        {% if report.failed_count %}· <span class="tone-danger">{{ report.failed_count }} 个查询失败</span>
-          {%- if report.stale_rows %}<span class="tone-warn">（{{ report.stale_rows | length }} 个显示上一次查到的数）</span>{% endif %}{% endif %}
-        {% if report.incomplete_rows %}·
-          <span class="tone-warn">{{ report.incomplete_rows | length }} 个账号区间不完整</span>{% endif %}
-        {% if report.any_cached %}· <span class="tone-muted">部分数据来自缓存</span>{% endif %}
-      </span>
-    </div>
-
-    <div class="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>上游</th>
-            <th>账号</th>
-            <th>启用日期</th>
-            <th class="num">额度</th>
-            <th class="num">TAG 消费</th>
-            <th class="num">UNTAG 消费</th>
-            <th class="num">总消费</th>
-            <th class="num usage-col">使用率</th>
-            <th class="num">余额</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for row in report.rows %}
-            {# 查询失败但有上一次成功的数（row.stale_as_of）时照常显示金额，下面补一行说明 #}
-            {% if not row.has_numbers %}
-              <tr class="row-error">
-                <td>{{ row.partner }}</td>
-                <td class="mono">{{ row.account }}</td>
-                <td>
-                  {%- if row.start_date %}<code>{{ row.start_date.isoformat() }}</code>
-                  {%- else %}<span class="tone-warn">未设置</span>{% endif -%}
-                </td>
-                <td class="num">{{ row.budget | money }}</td>
-                <td colspan="5" class="err-cell">查询失败：{{ row.error }}</td>
-              </tr>
-            {% else %}
-              <tr>
-                <td>{{ row.partner }}</td>
-                <td class="mono">
-                  {{ row.account }}
-                  <span class="calc">{{ row.tag_label }}</span>
-                </td>
-                {# 列里是台账填的启用日期；副行只在「实际起算点和它对不上」时出现
-                   ——没填、或早于 CE 保留期。两者一致时再写一遍纯属噪音。 #}
-                <td {% if row.range_hint %}title="{{ row.range_hint }}"{% endif %}>
-                  {%- if row.start_date %}<code>{{ row.start_date.isoformat() }}</code>
-                  {%- else %}<span class="tone-warn">未设置</span>{% endif -%}
-                  {% if row.range_incomplete and row.range_start %}
-                    <span class="calc tone-warn">⚠ 实际自 {{ row.range_start.isoformat() }} 起算</span>
-                  {% endif %}
-                </td>
-                <td class="num">{{ row.budget | money }}</td>
-                <td class="num">
-                  {{ row.tag_cost | money }}
-                  <span class="calc">{{ row.tag_raw | money }} × {{ row.tag_ratio | ratio }}</span>
-                </td>
-                <td class="num">
-                  {{ row.untag_cost | money }}
-                  <span class="calc">{{ row.untag_raw | money }} × {{ row.untag_ratio | ratio }}</span>
-                </td>
-                <td class="num strong">
-                  {{ row.total_cost | money }}
-                  {% if row.stale_as_of %}<span class="calc tone-warn">截至 {{ row.stale_as_of.isoformat() }}</span>{% endif %}
-                </td>
-                <td class="num usage-col">{{ usage_cell(row.usage_pct, row.level, row.bar_width) }}</td>
-                <td class="num {% if row.overspent %}tone-danger strong{% endif %}">{{ row.balance | money }}</td>
-              </tr>
-              {% if row.stale_as_of %}
-                <tr class="row-note"><td colspan="9">⚠ 这次查询失败：{{ row.error }}——这一行显示的是截至 {{ row.stale_as_of.isoformat() }} 的累计消费（上一次查询成功时的数）</td></tr>
-              {% endif %}
-              {# 标签值没匹配上时的提示条已撤掉。数据层照旧在算
-                 （cost_explorer 的 split.note，两个分支都还在），report.py 也照旧
-                 传到 row.note 上，只是这里不渲染。想恢复就把下面三行放回来：
-                   <tr class="row-note"><td colspan="9">⚠ {{ row.note }}</td></tr>
-                 .row-note 的样式也留着，没删。 #}
-            {% endif %}
-          {% else %}
-            <tr><td colspan="9" class="empty">{{ excel_name }} 里没有账号记录。</td></tr>
+  <!-- ------------------------------------------------ 筛选签：组内任选其一，组间同时满足 -->
+  <div class="overview-bar">
+    {% if report.rows %}
+      <div class="overview-filters" id="acct-filters">
+        <div class="fchips" role="group" aria-label="按生命周期筛选" data-group="life">
+          <span class="fchips-label">生命周期</span>
+          <button class="fchip" type="button" data-value="" aria-pressed="true">
+            全部 <span class="fchip-count">{{ report.rows | length }}</span></button>
+          {% for item in lifecycle_counts %}
+            <button class="fchip" type="button" data-value="{{ item.name }}" aria-pressed="false">
+              <i class="tag-dot" style="--tag: {{ item.color }}"></i>{{ item.name }}
+              <span class="fchip-count">{{ item.count }}</span></button>
           {% endfor %}
-        </tbody>
-        {% if report.rows %}
-        <tfoot>
-          <tr>
-            <td colspan="3">合计<span class="calc">
-              {%- if report.missing_count or report.stale_rows -%}
-                {%- if report.missing_count %}不含查询失败的账号{% endif -%}
-                {%- if report.missing_count and report.stale_rows %}；{% endif -%}
-                {%- if report.stale_rows %}含 {{ report.stale_rows | length }} 个账号上一次查到的数{% endif -%}
-              {%- else %}各账号区间不同，仅为金额加总{% endif -%}
-            </span></td>
-            <td class="num">{{ report.total_budget | money }}</td>
-            <td class="num">{{ report.total_tag | money }}</td>
-            <td class="num">{{ report.total_untag | money }}</td>
-            <td class="num strong">{{ report.total_cost | money }}</td>
-            <td class="num usage-col">{{ usage_cell(report.total_usage_pct, report.total_level, 0 if report.total_usage_pct is none else (report.total_usage_pct if report.total_usage_pct < 100 else 100)) }}</td>
-            <td class="num {% if report.total_balance < 0 %}tone-danger strong{% endif %}">{{ report.total_balance | money }}</td>
-          </tr>
-        </tfoot>
-        {% endif %}
-      </table>
+          {% set unlabeled = report.rows | rejectattr('lifecycle') | list | length %}
+          {% if unlabeled %}
+            <button class="fchip" type="button" data-value="__none__" aria-pressed="false">
+              未标记 <span class="fchip-count">{{ unlabeled }}</span></button>
+          {% endif %}
+        </div>
+        <div class="fchips" role="group" aria-label="按状态筛选" data-group="state">
+          <span class="fchips-label">状态</span>
+          <button class="fchip" type="button" data-value="" aria-pressed="true">
+            全部 <span class="fchip-count">{{ report.rows | length }}</span></button>
+          {% for item in state_counts %}
+            <button class="fchip" type="button" data-value="{{ item.key }}" aria-pressed="false">
+              <i class="state-dot k-{{ item.key }}" aria-hidden="true"></i>{{ item.label }}
+              <span class="fchip-count">{{ item.count }}</span></button>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+    <div class="overview-tools">
+      {% if report.rows %}
+        <label class="sr-only" for="acct-sort">卡片排序</label>
+        <select class="select" id="acct-sort" title="卡片排序">
+          <option value="risk">有问题的排前面</option>
+          <option value="usage">按使用率</option>
+          <option value="balance">按余额（少的在前）</option>
+          <option value="order">按台账顺序</option>
+        </select>
+      {% endif %}
+      {{ refresh_button() }}
     </div>
+  </div>
+
+  <!-- ------------------------------------------------ 账号卡片 -->
+  <section class="acct-grid" id="acct-grid" aria-label="账号">
+    {% for row in report.rows %}
+      {% set chip = 'error' if row.activity.kind == 'unknown' and row.error else row.activity.kind %}
+      <article class="acct-card"
+               data-life="{{ row.lifecycle | join('|') }}"
+               data-state="{{ row.activity.kind }}{% if row.error %} error{% endif %}"
+               data-risk="{{ 0 if row.error else (1 if row.activity.kind == 'stopped' else 2) }}"
+               data-usage="{{ row.usage_pct if row.usage_pct is not none else -1 }}"
+               data-balance="{{ row.balance if row.has_numbers else '' }}"
+               data-order="{{ row.order }}">
+        <div class="acct-body">
+        <div class="acct-top">
+          {{ avatar(row.avatar) }}
+          {# 状态是名字上面一行带色点的小字；主行是邮箱（一眼认得出是谁），副行是号码。
+             没填邮箱时号码当主行。状态不占右上角，邮箱就能用满整行宽度 #}
+          <div class="acct-ident">
+            <p class="acct-status k-{{ chip }}">
+              <i class="state-dot k-{{ row.activity.kind }}" aria-hidden="true"></i>{{ row.activity.label }}</p>
+            {% if row.email %}
+              <p class="acct-name" title="{{ row.email }}">{{ row.email }}</p>
+              <p class="acct-sub">{{ row.account }}</p>
+            {% else %}
+              <p class="acct-name tab-num">{{ row.account }}</p>
+              <p class="acct-sub tone-warn">未填账号邮箱</p>
+            {% endif %}
+          </div>
+        </div>
+
+        {# 上游、启用日期、天数：三列，小字标签在上、数在下 #}
+        <dl class="acct-stats">
+          <div class="acct-stat">
+            <dt>{{ stat_icon('partner') }}上游</dt>
+            <dd title="{{ row.partner }}">{{ row.partner }}</dd>
+          </div>
+          <div class="acct-stat">
+            <dt>{{ stat_icon('calendar') }}启用日期</dt>
+            {% if row.start_date and row.range_incomplete %}
+              {# 启用日期早于 Cost Explorer 的保留期：更早的消费查不到，余额偏高 #}
+              <dd class="tab-num tone-warn" title="{{ row.range_hint }}">{{ row.start_date.isoformat() }}</dd>
+            {% elif row.start_date %}
+              <dd class="tab-num">{{ row.start_date.isoformat() }}</dd>
+            {% else %}
+              <dd class="tone-warn" title="{{ row.range_hint }}">未填</dd>
+            {% endif %}
+          </div>
+          <div class="acct-stat">
+            <dt>{{ stat_icon('clock') }}已启用</dt>
+            <dd>{% if row.start_date %}<span class="tab-num">{{ row.days_active }}</span> 天{% else %}—{% endif %}</dd>
+          </div>
+        </dl>
+
+        {% if row.lifecycle %}
+          <div class="acct-pills">
+            {% for name in row.lifecycle %}
+              <span class="pill"><i class="tag-dot" style="--tag: {{ lifecycle_colors.get(name, '#87867f') }}"></i>{{ name }}</span>
+            {% endfor %}
+          </div>
+        {% endif %}
+
+        <div class="acct-activity">
+          <div class="acct-activity-text">
+            <strong>{{ row.activity.sub or row.activity.label }}</strong>
+            <span>近 14 天调用</span>
+          </div>
+          {{ row.spark | safe }}
+        </div>
+
+        {% if row.error %}
+          <p class="acct-issue" title="{{ row.error }}">
+            {{ warn_icon() }}
+            <span>消费查询失败：{{ row.issue }}
+              {%- if row.stale_as_of %}。下面是截至 {{ row.stale_as_of.strftime('%m-%d') }} 的数{% endif %}</span>
+          </p>
+        {% endif %}
+
+        {% if row.has_numbers %}
+          <div class="acct-usage">
+            <div class="meter tone-{{ row.level }}" aria-hidden="true"><i style="width: {{ row.bar_width }}%"></i></div>
+            <div class="acct-usage-row">
+              <span>使用率 <strong>{{ row.usage_pct | pct }}</strong></span>
+              <span>余额 <strong class="{% if row.overspent %}tone-danger{% endif %}">{{ row.balance | money }}</strong></span>
+            </div>
+          </div>
+        {% endif %}
+
+        </div>
+
+        <div class="acct-bottom">
+          <div>
+            {% if row.has_numbers %}
+              <div class="acct-amount {% if row.stale_as_of %}tone-warn{% endif %}">{{ row.total_cost | money }}</div>
+              <div class="acct-amount-sub">累计消费 · 额度 {{ row.budget | money }}</div>
+            {% else %}
+              <div class="acct-amount tone-muted">—</div>
+              <div class="acct-amount-sub">没有查到消费 · 额度 {{ row.budget | money }}</div>
+            {% endif %}
+          </div>
+          {# 卡片里唯一的链接，它的 ::after 盖住整张卡片：点哪里都是进这个账号的页面 #}
+          <a class="btn btn-dark acct-go" href="{{ url_for('account.summary', number=row.account) }}"
+             data-loading="正在读这个账号"
+             aria-label="查看 {{ row.account }}{% if row.email %}（{{ row.email }}）{% endif %} 的详情">查看详情</a>
+        </div>
+      </article>
+    {% endfor %}
+    <p class="acct-empty" id="acct-empty" {% if report.rows %}hidden{% endif %}>
+      {%- if report.rows %}没有符合筛选条件的账号。
+      {%- else %}{{ excel_name }} 里没有账号记录。{% endif -%}
+    </p>
   </section>
 {% endif %}
 
 <footer class="meta">
-  <span>数据源：Cost Explorer（{{ cost_metric }}，{{ service_scope }}）+ {{ excel_name }}</span>
-  <span>TAG/UNTAG 依据 {{ excel_name }} 的 <code>TAG</code> 列逐账号判定，其余消费归 UNTAG（缺省标签键 <code>{{ tag_key }}</code>）</span>
-  <span>消费和余额自各账号的启用日期（{{ excel_name }} 的 <code>START_DATE</code> 列）累计至今天；
-    没填的按 Cost Explorer 最早可查日 <code>{{ earliest.isoformat() }}</code> 起算</span>
-  <span>缓存 {{ cache_ttl_minutes }} 分钟 · 生成于 {{ generated_at }}</span>
+  <span>Cost Explorer + CloudWatch</span>
+  <span>缓存 {{ cache_label }}</span>
+  <span>生成于 {{ generated_at }}</span>
   <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
 </footer>
+
+{% if report and report.rows %}
+<script>
+(function () {
+  const grid = document.getElementById('acct-grid');
+  const empty = document.getElementById('acct-empty');
+  const sort = document.getElementById('acct-sort');
+  if (!grid) return;
+  const cards = [...grid.querySelectorAll('.acct-card')];
+  const picked = { life: new Set(), state: new Set() };
+
+  // ---- 筛选：组内任选其一（或），组间同时满足（且）
+  function apply() {
+    let shown = 0;
+    for (const card of cards) {
+      const life = card.dataset.life ? card.dataset.life.split('|') : [];
+      const state = card.dataset.state.split(' ');
+      const okLife = !picked.life.size || life.some(v => picked.life.has(v))
+        || (picked.life.has('__none__') && !life.length);
+      const okState = !picked.state.size || state.some(v => picked.state.has(v));
+      card.hidden = !(okLife && okState);
+      if (!card.hidden) shown += 1;
+    }
+    empty.hidden = shown > 0;
+  }
+
+  for (const group of document.querySelectorAll('#acct-filters .fchips')) {
+    const name = group.dataset.group;
+    const chips = [...group.querySelectorAll('.fchip')];
+    group.addEventListener('click', function (event) {
+      const chip = event.target.closest('.fchip');
+      if (!chip) return;
+      const value = chip.dataset.value;
+      if (!value) picked[name].clear();
+      else if (picked[name].has(value)) picked[name].delete(value);
+      else picked[name].add(value);
+      for (const other of chips) {
+        const on = other.dataset.value ? picked[name].has(other.dataset.value) : !picked[name].size;
+        other.setAttribute('aria-pressed', String(on));
+      }
+      apply();
+    });
+  }
+
+  // ---- 排序。选择记在浏览器里，下次打开还是这个顺序
+  const num = (card, key) => {
+    const raw = card.dataset[key];
+    return raw === '' || raw === undefined ? NaN : Number(raw);
+  };
+  const orders = {
+    risk: (a, b) => num(a, 'risk') - num(b, 'risk') || num(b, 'usage') - num(a, 'usage'),
+    usage: (a, b) => num(b, 'usage') - num(a, 'usage'),
+    // 查不到余额的放最后
+    balance: (a, b) => (isNaN(num(a, 'balance')) - isNaN(num(b, 'balance')))
+                       || num(a, 'balance') - num(b, 'balance'),
+    order: (a, b) => num(a, 'order') - num(b, 'order'),
+  };
+  function reorder(key) {
+    const sorted = [...cards].sort((a, b) => orders[key](a, b) || num(a, 'order') - num(b, 'order'));
+    grid.prepend(...sorted);
+  }
+  if (sort) {
+    try {
+      const saved = localStorage.getItem('overview-sort');
+      if (saved && orders[saved]) sort.value = saved;
+    } catch (e) { /* 存不了就用默认 */ }
+    reorder(sort.value);
+    sort.addEventListener('change', function () {
+      reorder(sort.value);
+      try { localStorage.setItem('overview-sort', sort.value); } catch (e) { /* 同上 */ }
+    });
+  }
+})();
+</script>
+{% endif %}
 {% endblock %}

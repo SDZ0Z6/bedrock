@@ -134,6 +134,13 @@ def resolve_range(args: Mapping[str, str], today: date) -> tuple[date, date, lis
         notes.append("结束日期不能晚于今天，已调整为今天。")
 
     earliest = earliest_queryable(today)
+    if end < earliest:
+        # 整段都在保留期之前：只抬开始日期的话区间就倒过来了，改成从最早可查日到今天
+        notes.append(
+            f"所选区间早于 Cost Explorer 的保留期（约 {CE_HISTORY_MONTHS} 个月），"
+            f"已改成从 {earliest.isoformat()} 到今天。"
+        )
+        return earliest, today, notes
     if start < earliest:
         start = earliest
         notes.append(

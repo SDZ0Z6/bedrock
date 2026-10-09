@@ -345,7 +345,7 @@ class TestFetchRegionQuotas:
         quotas.clear_cache()
         pairs, error = fetch_region_quotas(accounts[0], "us-east-1")
         assert pairs == {}
-        assert error and "servicequotas" in error
+        assert error and "servicequotas" in str(error)
 
     def test_error_does_not_leak_the_key(self, ledger, accounts, monkeypatch):
         def broken(*a, **k):
@@ -354,7 +354,8 @@ class TestFetchRegionQuotas:
         monkeypatch.setattr(quotas.boto3, "client", broken)
         quotas.clear_cache()
         _pairs, error = fetch_region_quotas(accounts[0], "us-east-1")
-        assert accounts[0].ak not in error
+        assert accounts[0].ak not in str(error)
+        assert accounts[0].ak not in error.detail
 
 
 class TestFetchAppProfiles:
@@ -378,7 +379,7 @@ class TestFetchAppProfiles:
     def test_denied_is_returned_not_raised(self, ledger, accounts, fake_aws_no_profiles):
         profiles, error = fetch_app_profiles(accounts[0], "us-east-1")
         assert profiles == []
-        assert error and "service control policy" in error
+        assert error and "service control policy" in str(error)
 
     def test_denied_error_does_not_leak_the_key(self, ledger, accounts, monkeypatch):
         def broken(*a, **k):
@@ -387,7 +388,8 @@ class TestFetchAppProfiles:
         monkeypatch.setattr(quotas.boto3, "client", broken)
         quotas.clear_cache()
         _profiles, error = fetch_app_profiles(accounts[0], "us-east-1")
-        assert accounts[0].ak not in error
+        assert accounts[0].ak not in str(error)
+        assert accounts[0].ak not in error.detail
 
 
 class TestArnDrivenReport:
@@ -587,3 +589,100 @@ class TestBuildQuotaReport:
         report = build_quota_report([accounts[0]])
         assert report.rows == []
         assert report.error and "servicequotas" in report.error
+
+
+# ------------------------------------------------------------ 账号页摘要：只读缓存
+from bedrock_cost import config  # noqa: E402
+
+
+def forbid_aws(monkeypatch) -> None:
+    def explode(*a, **k):
+        raise AssertionError("peek_quota_report 只能读缓存，不能建 client")
+
+    monkeypatch.setattr(quotas.boto3, "client", explode)
+
+
+class TestPeekQuotaReport:
+    """账号页摘要的「配额」卡：第一次查配额要四五十秒（Service Quotas 按账号限流），不能拖慢
+    摘要，所以只拿缓存里已经有的拼；哪个账号哪个区还没查过（或者过期了）就是 None。"""
+
+    @pytest.fixture(autouse=True)
+    def _cache_on(self, monkeypatch):
+        monkeypatch.setattr(config, "CACHE_TTL", 900)
+        quotas.clear_cache()
+        yield
+        quotas.clear_cache()
+
+    def test_no_accounts(self):
+        assert quotas.peek_quota_report([]) is None
+
+    def test_nothing_cached_yet(self, ledger, accounts, monkeypatch):
+        forbid_aws(monkeypatch)
+        assert quotas.peek_quota_report([accounts[0]]) is None
+
+    def test_built_purely_from_the_cache(self, ledger, accounts, fake_aws, monkeypatch):
+        full = build_quota_report([accounts[0]])
+        forbid_aws(monkeypatch)
+        peeked = quotas.peek_quota_report([accounts[0]])
+        assert peeked is not None
+
+        def rows(report):
+            return [(r.region, r.profile_id, r.display, r.tpm, r.tpd, r.best_tpm) for r in report.rows]
+
+        assert rows(peeked) == rows(full)
+        assert peeked.lagging_models == full.lagging_models == ["Claude Opus 4.6 V1"]
+        assert [o.name for o in peeked.orphan_models] == [o.name for o in full.orphan_models]
+        assert (peeked.arn_driven, peeked.error, peeked.arn_error) == (True, None, None)
+
+    @pytest.mark.parametrize("kind", ["quotas", "app-profiles"])
+    @pytest.mark.parametrize("region", ["us-east-1", "us-west-2"])
+    def test_one_region_missing_from_the_cache(self, ledger, accounts, fake_aws, monkeypatch, kind, region):
+        build_quota_report([accounts[0]])
+        del quotas._cache[(accounts[0].ak[-6:], accounts[0].account, region, kind)]
+        forbid_aws(monkeypatch)
+        assert quotas.peek_quota_report([accounts[0]]) is None
+
+    def test_expired_entry_counts_as_missing(self, ledger, accounts, fake_aws, monkeypatch):
+        build_quota_report([accounts[0]])
+        key = (accounts[0].ak[-6:], accounts[0].account, "us-east-2", "quotas")
+        stamp, value = quotas._cache[key]
+        quotas._cache[key] = (stamp - quotas.QUOTA_CACHE_TTL - 1, value)
+        forbid_aws(monkeypatch)
+        assert quotas.peek_quota_report([accounts[0]]) is None
+
+    def test_failed_region_is_not_cached_so_nothing_is_shown(self, ledger, accounts, monkeypatch):
+        """查失败的区不进缓存：上一次有区失败时摘要上就不显示（配额页签会说清楚为什么）。"""
+
+        def flaky(region, acct):
+            if region == "us-east-2":
+                raise RuntimeError("ThrottlingException: Rate exceeded")
+            return profiles_for(region, acct)
+
+        install(monkeypatch, profiles=flaky)
+        report = build_quota_report([accounts[0]])
+        assert [e.region for e in report.arn_errors] == ["us-east-2"]
+        forbid_aws(monkeypatch)
+        assert quotas.peek_quota_report([accounts[0]]) is None
+
+    def test_an_empty_answer_still_counts_as_asked(self, ledger, accounts, monkeypatch):
+        """某个区一条应用推理配置都没有（空列表）也是查过了，不能当成没查。"""
+        install(monkeypatch, profiles=lambda region, acct: [] if region == "us-west-1" else profiles_for(region, acct))
+        build_quota_report([accounts[0]])
+        forbid_aws(monkeypatch)
+        report = quotas.peek_quota_report([accounts[0]])
+        assert report is not None
+        assert "us-west-1" not in {r.region for r in report.rows}
+
+    def test_every_account_must_be_cached(self, ledger, accounts, fake_aws, monkeypatch):
+        build_quota_report([accounts[0]])
+        assert quotas.peek_quota_report(accounts) is None   # 第二个账号还没查过
+        build_quota_report([accounts[1]])
+        forbid_aws(monkeypatch)
+        report = quotas.peek_quota_report(accounts)
+        assert report is not None and report.account_count == 2
+        assert {r.account for r in report.rows} == {"111111111111", "222222222222"}
+
+    def test_cache_turned_off(self, ledger, accounts, fake_aws, monkeypatch):
+        build_quota_report([accounts[0]])
+        monkeypatch.setattr(config, "CACHE_TTL", 0)
+        assert quotas.peek_quota_report([accounts[0]]) is None

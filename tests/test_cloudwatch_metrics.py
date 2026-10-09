@@ -315,7 +315,11 @@ class TestTagFilter:
         report = cwm.build_metrics(accounts, ["us-east-1"], window(), "invocations", "all")
         # 每个 (账号, 区域) 组合各报一条，出错的账号能被指名
         assert len(report.errors) == len(accounts)
-        assert all(a.partner in " ".join(report.errors) for a in accounts)
+        assert all(a.partner in " ".join(map(str, report.errors)) for a in accounts)
+        # 一行字的样子没变：「上游 / 账号 @ 区域：原因」
+        assert str(report.errors[0]) == (
+            f"{accounts[0].partner} / {accounts[0].account} @ us-east-1：凭证缺少 cloudwatch 权限"
+        )
         assert report.series == []
 
     def test_one_bad_region_does_not_sink_the_others(self, ledger, accounts, monkeypatch, fake_cw):

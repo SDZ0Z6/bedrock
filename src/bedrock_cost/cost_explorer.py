@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import re
 import threading
 import time
 from collections.abc import Mapping
@@ -27,12 +26,12 @@ from datetime import date, timedelta
 
 import boto3
 from botocore.config import Config as BotoConfig
-from botocore.exceptions import BotoCoreError, ClientError
 
 from . import config, last_known
+from .aws_errors import QueryError, describe, missing_credentials
+# redact 搬去了 aws_errors；留个名字在这里，老代码 from .cost_explorer import redact 照样能用
+from .aws_errors import redact  # noqa: F401
 from .excel_source import Account
-
-_AK_PATTERN = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{8,}\b")
 
 
 @dataclass
@@ -52,6 +51,9 @@ class CostSplit:
     # 只有概览页和日报的 build_row 会拿它来显示；其余地方看到 error 就当失败，比如额度
     # 告警——拿旧的数去判阈值只会晚报
     stale_as_of: date | None = None
+    # 失败原因的结构化版本（哪个账号、一句话原因、AWS 原话），给页面的报错弹窗用。
+    # error 是它的一行字（problem.message），report / alerts / last_known 照旧只读 error
+    problem: QueryError | None = None
 
     @property
     def ok(self) -> bool:
@@ -62,37 +64,12 @@ class CostSplit:
         return self.tag_raw + self.untag_raw
 
 
-def redact(message: str, account: Account) -> str:
-    """错误信息可能带上凭证片段，落到页面前先擦掉。"""
-    cleaned = _AK_PATTERN.sub("[已隐藏]", message)
-    for secret in (account.ak, account.sk):
-        if secret and len(secret) > 6:
-            cleaned = cleaned.replace(secret, "[已隐藏]")
-    return cleaned.strip()
-
-
 def friendly_error(exc: Exception, account: Account) -> str:
-    if isinstance(exc, ClientError):
-        code = exc.response.get("Error", {}).get("Code", "")
-        detail = exc.response.get("Error", {}).get("Message", str(exc))
-        hints = {
-            "AccessDeniedException": "凭证缺少 ce:GetCostAndUsage 权限",
-            "AccessDenied": "凭证缺少 ce:GetCostAndUsage 权限",
-            "UnauthorizedOperation": "凭证缺少 ce:GetCostAndUsage 权限",
-            "InvalidClientTokenId": "AK 无效或已删除",
-            "SignatureDoesNotMatch": "SK 不匹配，请检查台账里的密钥",
-            "DataUnavailableException": "该区间暂无成本数据",
-            "LimitExceededException": "Cost Explorer 请求过于频繁，请稍后重试",
-            "RequestChangedException": "分页请求参数发生变化，请重试",
-        }
-        hint = hints.get(code)
-        label = f"{code}: {detail}" if code else detail
-        if hint:
-            label = f"{hint}（{code}）"
-        return redact(label, account)
-    if isinstance(exc, BotoCoreError):
-        return redact(f"网络或凭证错误：{exc}", account)
-    return redact(f"{type(exc).__name__}: {exc}", account)
+    """一行「原因（错误码）」，给只要一句话的老调用方。
+
+    要把账号、原因、原始报错分开显示的（页面弹窗），用 aws_errors.describe 拿 QueryError。
+    """
+    return describe(exc, account).message
 
 
 def build_filter() -> dict | None:
@@ -228,7 +205,8 @@ def clear_cache() -> None:
 def fetch_split(account: Account, start: date, end: date, refresh: bool = False) -> CostSplit:
     """取单个账号的 TAG / UNTAG 原始消费，命中缓存则不发请求。"""
     if not account.has_credentials:
-        return CostSplit(error="台账中缺少 AK 或 SK，无法查询", fetched_at=time.time())
+        problem = missing_credentials(account)
+        return CostSplit(error=problem.message, problem=problem, fetched_at=time.time())
 
     key = _cache_key(account, start, end)
     now = time.time()
@@ -243,7 +221,9 @@ def fetch_split(account: Account, start: date, end: date, refresh: bool = False)
     try:
         split = _query(account, start, end)
     except Exception as exc:  # 单个账号失败不能影响整页
-        return _fallback(account, start, end, CostSplit(error=friendly_error(exc, account), fetched_at=now))
+        problem = describe(exc, account)
+        failed = CostSplit(error=problem.message, problem=problem, fetched_at=now)
+        return _fallback(account, start, end, failed)
 
     try:
         last_known.remember(account, start, end, split)
@@ -268,6 +248,7 @@ def _fallback(account: Account, start: date, end: date, failed: CostSplit) -> Co
         untag_raw=known.untag_raw,
         currency=known.currency,
         error=failed.error,
+        problem=failed.problem,
         fetched_at=failed.fetched_at,
         stale_as_of=known.as_of,
     )
