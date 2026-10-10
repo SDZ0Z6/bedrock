@@ -36,6 +36,8 @@
     <path d="M8 1.8v6"/><path d="M11.9 4.3a5.5 5.5 0 1 1-7.8 0"/>
   {%- elif name == 'restore' -%}
     <path d="M2.2 8a5.8 5.8 0 1 0 1.7-4.1L2.2 5.6"/><path d="M2.2 2.2v3.4h3.4"/>
+  {%- elif name == 'history' -%}
+    <path d="M2.2 8a5.8 5.8 0 1 0 1.7-4.1L2.2 5.6"/><path d="M2.2 2.2v3.4h3.4"/><path d="M8 5v3.2l2 1.3"/>
   {%- elif name == 'plus' -%}
     <path d="M8 3v10"/><path d="M3 8h10"/>
   {%- elif name == 'x' -%}
@@ -105,7 +107,7 @@
    active 是打开时停在哪一页，error_pages 是有错误的那几页（页签上标红点）。
    凭证只在新增时出现，这是「编辑改不了 AK/SK」在模板层的体现。 #}
 {% macro fields(uid, values, creating, tg_result=none, mail_result=none, password_saved=false,
-                active='basic', error_pages=(), ak_masked='') -%}
+                active='basic', error_pages=(), ak_masked='', budget_log=(), timeline_url='') -%}
   <div class="modal-tabs" role="tablist" aria-label="账号设置">
     {% for key, label, optional, glyph in [('basic', '基础信息', false, 'card'), ('mail', '告警邮箱', true, 'mail'),
                                            ('tg', 'Telegram 告警', true, 'send')] %}
@@ -178,10 +180,27 @@
           <input id="{{ uid }}-partner" name="partner" required maxlength="64" autocomplete="off"
                  value="{{ values.get('partner', '') }}">
         </div>
+        {# 客户：不选就在库存里。改了客户，两边客户的时间线上都会记一笔 #}
+        <div class="field">
+          <label for="{{ uid }}-customer">客户</label>
+          <select id="{{ uid }}-customer" name="customer">
+            <option value="" {% if not values.get('customer') %}selected{% endif %}>库存（还没分给客户）</option>
+            {% for c in customers %}
+              <option value="{{ c.id }}" {% if values.get('customer') == c.id %}selected{% endif %}>{{ c.name }}（{{ c.id }}）</option>
+            {% endfor %}
+          </select>
+        </div>
         <div class="field">
           <label for="{{ uid }}-budget">额度</label>
           <input id="{{ uid }}-budget" name="budget" required inputmode="decimal" autocomplete="off"
                  placeholder="100000" value="{{ values.get('budget', '') }}">
+          {# 调过额度的：写上一次（哪天、谁、从多少到多少），全部的在账号页的时间线上（解绑以后也在） #}
+          {% if budget_log %}
+            {% set last = budget_log[0] %}
+            <span class="form-hint budget-hint">上次 {{ last.date.strftime('%m-%d') }}{% if last.actor %} {{ last.actor }}{% endif %}
+              从 {{ last.before | money0 }} 调到 {{ last.amount | money0 }} ·
+              <a href="{{ timeline_url }}" data-loading="正在读这个账号的事">调过 {{ budget_log | length }} 次，看时间线</a></span>
+          {% endif %}
         </div>
         <div class="field">
           {# 概览页的消费和余额从这一天累计到今天，所以改它会改变整个账号的口径 #}
@@ -409,6 +428,14 @@
       </select>
     </div>
     <div class="field">
+      <label for="f-customer">客户</label>
+      <select id="f-customer" data-filter="customer">
+        <option value="">全部</option>
+        <option value="__stock__">库存</option>
+        {% for c in customers %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
       <label for="f-state">状态</label>
       <select id="f-state" data-filter="state">
         <option value="">全部</option>
@@ -451,6 +478,7 @@
         <tr>
           <th class="sticky-col sortable" tabindex="0" aria-sort="none" data-sort-type="text">账号</th>
           <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="text">上游</th>
+          <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="text">客户</th>
           <th class="col-life">生命周期</th>
           <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="number">状态</th>
           <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="text">启用日期</th>
@@ -468,7 +496,8 @@
           <tr {% if not account.enabled %}class="row-off"{% endif %}
               data-key="{{ account.key }}" data-who="{{ who }}" data-edit="dlg-edit-{{ loop.index }}"
               data-search="{{ [account.email, account.account, account.partner, account.mail_address] | join(' ') | lower }}"
-              data-partner="{{ account.partner }}" data-state="{{ 'on' if account.enabled else 'off' }}"
+              data-partner="{{ account.partner }}" data-customer="{{ account.customer or '__stock__' }}"
+              data-state="{{ 'on' if account.enabled else 'off' }}"
               data-alert="{{ ['tg' if account.tg_enabled else '', 'mail' if account.mail_enabled else ''] | select | join(' ') }}"
               data-life="{{ account.lifecycle | join('|') }}">
             <td class="sticky-col col-ident" data-sort="{{ who | lower }}">
@@ -485,6 +514,11 @@
               </div>
             </td>
             <td data-sort="{{ account.partner }}">{{ account.partner }}</td>
+            {% set owner = customer_names.get(account.customer) %}
+            <td class="col-customer" data-sort="{{ owner or ('~' if not account.customer else account.customer) }}">
+              {%- if owner %}<a href="{{ url_for('customers.detail', cid=account.customer) }}" data-loading="正在读这个客户">{{ owner }}</a>
+              {%- elif account.customer %}<span class="tone-warn" title="台账里写的客户编号不存在">{{ account.customer }}</span>
+              {%- else %}<span class="tone-muted">库存</span>{% endif %}</td>
             <td class="col-life">
               <div class="life-cell">
                 <span class="life-tags" data-life-tags>{{ life_tags(account.lifecycle) }}</span>
@@ -511,7 +545,14 @@
                     title="概览页会按 Cost Explorer 最早可查日起算，累计消费可能不是这个账号的全部消费">未设置</span>
               {%- endif -%}
             </td>
-            <td class="num" data-sort="{{ account.budget }}">{{ account.budget | money }}</td>
+            {# 额度：和生命周期一样，悬停出一支笔，点了就地改（时间线上记一条「调整额度」） #}
+            <td class="num" data-sort="{{ account.budget }}">
+              <div class="budget-cell">
+                <button class="icon-btn life-edit" type="button" data-budget-edit data-budget="{{ account.budget }}"
+                        title="改额度" aria-label="改 {{ who }} 的额度">{{ icon('pencil') }}</button>
+                <span data-budget-text>{{ account.budget | money }}</span>
+              </div>
+            </td>
             <td class="num col-ratio"
                 title="TAG 比率 {{ account.tag_ratio | ratio }} · UNTAG 比率 {{ account.untag_ratio | ratio }}&#10;标签：{{ account.tag_label }}">
               {{- account.tag_ratio | ratio }}<span class="ratio-sep">/</span>{{ account.untag_ratio | ratio -}}
@@ -545,6 +586,11 @@
             </td>
             <td class="row-actions">
               <div class="row-btns">
+                {# 这个账号的时间线：分给过哪些客户、每次调额度（解绑以后也查得到） #}
+                <a class="icon-btn" href="{{ url_for('account.timeline', number=account.account) }}"
+                   data-loading="正在读这个账号的事"
+                   title="{{ who }} 的时间线（调额度、分给客户、风控……）"
+                   aria-label="{{ who }} 的时间线">{{ icon('history') }}</a>
                 <button class="icon-btn" type="button" data-open="dlg-edit-{{ loop.index }}"
                         title="修改 {{ who }}"
                         aria-label="修改 {{ who }}">{{ icon('pencil') }}</button>
@@ -574,6 +620,29 @@
   <p class="empty" id="acct-empty" hidden>没有符合筛选条件的账号。</p>
   {% endif %}
 </section>
+
+<!-- ------------------------------------------------ 表格里改额度的小弹层 -->
+{# 整页共用一个：点哪一行额度旁边的笔，就把那一行的账号和额度填进来 #}
+<div class="life-pop budget-pop" id="budget-pop" popover data-currency="{{ config.CURRENCY_SYMBOL }}">
+  <form method="post" action="{{ url_for('accounts.budget') }}" data-budget-form>
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="key" value="">
+    <p class="life-pop-head">额度 <span class="life-pop-who" data-budget-who></span></p>
+    <div class="field">
+      <label for="budget-pop-input">新的额度</label>
+      <input id="budget-pop-input" name="budget" inputmode="decimal" required autocomplete="off" data-budget-input>
+      <span class="form-hint" data-budget-preview></span>
+    </div>
+    <div class="field">
+      <label for="budget-pop-note">说明（可选）</label>
+      <input id="budget-pop-note" name="note" maxlength="200" autocomplete="off" placeholder="比如：客户补了 30 万">
+    </div>
+    <div class="life-pop-foot">
+      <span class="form-hint">时间线上记一条「调整额度」</span>
+      <button class="btn btn-sm btn-primary" type="submit">保存</button>
+    </div>
+  </form>
+</div>
 
 <!-- ------------------------------------------------ 表格里改生命周期的小弹层 -->
 {# 整页共用一个：点哪一行的铅笔，就把那一行的账号和标签填进来。用原生 popover：在顶层
@@ -648,15 +717,19 @@
        'mail_provider': account.mail_provider,
        'mail_address': account.mail_address,
        'mail_server': account.mail_server,
+       'customer': account.customer,
      } %}
   {# 校验没过时回填用户刚填的值，别让人重打一遍 #}
   {% set values = edit_form if edit_key == account.key else current %}
 
+  {# 从账号页点「编辑」过来（?edit=）：打开这一行；带着 back 的，改完、取消都回账号页 #}
+  {% set asked = edit_key == account.key or open_edit == account.key %}
   <dialog class="modal" id="dlg-edit-{{ loop.index }}"
-          {% if edit_key == account.key %}data-reopen{% endif %}>
+          {% if asked %}data-reopen{% endif %}{% if asked and edit_back %} data-back="{{ edit_back }}"{% endif %}>
     <form method="post" action="{{ url_for('accounts.update') }}" autocomplete="off">
       <input type="hidden" name="csrf" value="{{ csrf_token() }}">
       <input type="hidden" name="key" value="{{ account.key }}">
+      {% if asked and edit_back %}<input type="hidden" name="next" value="{{ edit_back }}">{% endif %}
       <header class="modal-head">
         <h2>修改账号</h2>
         <span class="modal-sub">{% if account.email %}{{ account.email }} · {% endif %}{{ account.account }}</span>
@@ -671,7 +744,9 @@
                   password_saved=account.mail_password_saved,
                   active=open_page if mine else 'basic',
                   error_pages=error_pages if mine else (),
-                  ak_masked=account.ak_masked) }}
+                  ak_masked=account.ak_masked,
+                  budget_log=budget_log.get(account.account, ()),
+                  timeline_url=url_for('account.timeline', number=account.account)) }}
       </div>
       <footer class="modal-foot">
         <span class="card-note">没有实际改动时不会写文件</span>
@@ -823,8 +898,11 @@
 <script>
 (function () {
   const lifePop = document.getElementById('life-pop');
+  const budgetPop = document.getElementById('budget-pop');
   const closePop = function () {
-    if (lifePop && lifePop.matches(':popover-open')) lifePop.hidePopover();
+    for (const pop of [lifePop, budgetPop]) {
+      if (pop && pop.matches(':popover-open')) pop.hidePopover();
+    }
   };
 
   // 用事件委托，不给每个按钮单独挂监听——一页上可能有几十个弹窗触发点
@@ -1124,6 +1202,7 @@
       const alerts = row.dataset.alert ? row.dataset.alert.split(' ') : [];
       const ok = (!query || row.dataset.search.includes(query))
         && (!want.partner || row.dataset.partner === want.partner)
+        && (!want.customer || row.dataset.customer === want.customer)
         && (!want.state || row.dataset.state === want.state)
         && (!want.alert || (want.alert === 'none' ? !alerts.length : alerts.includes(want.alert)))
         && (!picked.size || life.some(function (v) { return picked.has(v); })
@@ -1200,14 +1279,15 @@
   let lifeRow = null;
   let lifeButton = null;
 
-  function placePop(anchor) {
+  function placePop(anchor, pop) {
+    pop = pop || lifePop;
     const box = anchor.getBoundingClientRect();
-    const width = lifePop.offsetWidth, height = lifePop.offsetHeight;
+    const width = pop.offsetWidth, height = pop.offsetHeight;
     let left = Math.min(box.left, window.innerWidth - width - 8);
     let top = box.bottom + 6;
     if (top + height > window.innerHeight - 8) top = box.top - height - 6;
-    lifePop.style.left = Math.max(8, left) + 'px';
-    lifePop.style.top = Math.max(8, top) + 'px';
+    pop.style.left = Math.max(8, left) + 'px';
+    pop.style.top = Math.max(8, top) + 'px';
   }
 
   function openLife(button) {
@@ -1318,6 +1398,93 @@
     });
   }
 
+  // ---------------------------------------------------- 表格里改额度
+  // 和生命周期一样：点笔弹一个小层，填新的额度，fetch 提交，那一格原地换成新的数
+  const budgetForm = budgetPop ? budgetPop.querySelector('[data-budget-form]') : null;
+  let budgetRow = null;
+  let budgetButton = null;
+  const symbol = budgetPop ? budgetPop.dataset.currency || '$' : '$';
+  const money = function (value) {
+    return (value < 0 ? '-' : '') + symbol + Math.abs(value).toLocaleString('en-US', { maximumFractionDigits: 2 });
+  };
+  const amount = function (text) {
+    const body = String(text || '').replace(/[,\s]/g, '').replace(symbol, '');
+    return body === '' || isNaN(Number(body)) ? null : Number(body);
+  };
+  function budgetPreview() {
+    const input = budgetForm.elements.budget;
+    const before = Number(input.dataset.before);
+    const after = amount(input.value);
+    const note = budgetPop.querySelector('[data-budget-preview]');
+    if (after === null) { note.textContent = '现在是 ' + money(before) + '，填新的额度'; return; }
+    if (after < 0) { note.textContent = '额度不能是负数'; return; }
+    const delta = after - before;
+    note.textContent = delta === 0 ? '和现在一样' : '现在是 ' + money(before) + '，' + (delta > 0 ? '调高 ' : '调低 ') + money(Math.abs(delta));
+  }
+  function openBudget(button) {
+    const row = button.closest('tr');
+    // 没有 popover 的老浏览器：退回到「修改」弹窗，额度也在那里
+    if (!budgetPop || !budgetPop.showPopover) {
+      const dialog = document.getElementById(row.dataset.edit);
+      if (dialog) { showPage(dialog, 'basic'); dialog.showModal(); }
+      return;
+    }
+    closePop();
+    budgetRow = row;
+    budgetButton = button;
+    budgetForm.elements.key.value = row.dataset.key;
+    budgetPop.querySelector('[data-budget-who]').textContent = row.dataset.who;
+    const input = budgetForm.elements.budget;
+    input.value = String(Number(button.dataset.budget));
+    input.dataset.before = button.dataset.budget;
+    budgetForm.elements.note.value = '';
+    budgetPreview();
+    budgetPop.showPopover();
+    placePop(button, budgetPop);
+    input.focus();
+    input.select();
+  }
+  if (budgetPop && budgetForm) {
+    document.addEventListener('click', function (event) {
+      if (!(event.target instanceof Element)) return;
+      const button = event.target.closest('[data-budget-edit]');
+      if (button) openBudget(button);
+    });
+    budgetForm.elements.budget.addEventListener('input', budgetPreview);
+    budgetPop.addEventListener('toggle', function (event) {
+      if (event.newState === 'closed' && budgetButton && document.activeElement === document.body) budgetButton.focus();
+    });
+    budgetForm.addEventListener('submit', function (event) {
+      if (!window.fetch) return;   // 没有 fetch 就整页提交，服务端会跳回这一页
+      event.preventDefault();
+      const row = budgetRow;
+      const save = budgetForm.querySelector('[type=submit]');
+      save.disabled = true;
+      fetch(budgetForm.action, {
+        method: 'POST',
+        body: new FormData(budgetForm),
+        headers: { 'X-Requested-With': 'fetch' },
+        credentials: 'same-origin'
+      })
+        .then(function (response) { return response.json(); })
+        .then(function (result) {
+          window.appToast(result.tone, result.title, result.text, result.sub);
+          if (!result.ok || result.budget === undefined) return;
+          const cell = row.querySelector('[data-budget-text]');
+          cell.textContent = result.budget_text;
+          cell.closest('td').dataset.sort = String(result.budget);
+          row.querySelector('[data-budget-edit]').dataset.budget = String(result.budget);
+          // 「修改」弹窗里的额度跟着改，不然在那里点保存会把刚改的又改回去
+          const dialog = document.getElementById(row.dataset.edit);
+          const field = dialog ? dialog.querySelector('input[name="budget"]') : null;
+          if (field) field.value = String(result.budget);
+          closePop();
+        })
+        .catch(function () { window.appToast('error', '额度没有改', '页面可能已经过期，刷新后再试。'); })
+        .then(function () { save.disabled = false; });
+    });
+  }
+
   // ---------------------------------------------------- 整页提交回来停在原处
   // 开关、停用、保存都是「提交 → 跳回这一页」，回来时滚到提交前的位置，不用再往下找
   const SCROLL = 'accounts-scroll';
@@ -1335,6 +1502,12 @@
   // 带着错误和回填值，停在服务端指定的那一页——有错的第一页，或者刚测试的那一页
   const reopen = document.querySelector('dialog[data-reopen]');
   if (reopen) {
+    if (reopen.dataset.back) {
+      // 从账号页点「编辑」来的：没保存就关掉（取消、Esc、点外面），回账号页
+      let saving = false;
+      reopen.addEventListener('submit', function () { saving = true; });
+      reopen.addEventListener('close', function () { if (!saving) location.href = reopen.dataset.back; });
+    }
     reopen.showModal();
     const active = reopen.querySelector('.tab-page.is-active') || reopen;
     const tested = active.querySelector('.tg-result, .mail-result:not([hidden])');
@@ -1345,10 +1518,10 @@
       if (bad) bad.focus();
     }
   }
-  // 「?tags=1」只是让标签清单弹窗重新打开一次，别留在地址栏里，手动刷新时又弹出来
-  if (location.search.includes('tags=1')) {
+  // 「?tags=1」「?edit=…」只是让弹窗打开一次，别留在地址栏里，手动刷新时又弹出来
+  if (/[?&](tags|edit|back)=/.test(location.search)) {
     const url = new URL(location.href);
-    url.searchParams.delete('tags');
+    for (const name of ['tags', 'edit', 'back']) url.searchParams.delete(name);
     history.replaceState(null, '', url.pathname + url.search + url.hash);
   }
 })();

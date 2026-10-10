@@ -65,6 +65,8 @@ REQUIRED_COLUMNS = {
 #              不影响任何查询、汇总和告警。可选的标签在第二个工作表 LIFECYCLE 里
 #   AVATAR     头像用的表情；空着就用邮箱首字母
 #   AVATAR_COLOR 头像底色，0~7 选一组（见 avatars.py）；空着就按邮箱自动配
+#   CUSTOMER   这个账号属于哪个客户（客户编号 C001…）；空着 = 库存。见下面「客户」一节
+#   SETTLED    这个账号哪天结算的；空着 = 还没结算
 OPTIONAL_COLUMNS = {
     "TAG": "tag_spec",
     "ENABLED": "enabled",
@@ -80,6 +82,8 @@ OPTIONAL_COLUMNS = {
     "LIFECYCLE": "lifecycle",
     "AVATAR": "avatar_emoji",
     "AVATAR_COLOR": "avatar_color",
+    "CUSTOMER": "customer",
+    "SETTLED": "settled",
 }
 
 COLUMNS = {**REQUIRED_COLUMNS, **OPTIONAL_COLUMNS}
@@ -134,6 +138,110 @@ def split_lifecycle(value: object) -> tuple[str, ...]:
 
 def _canon_lifecycle(value: object) -> str:
     return ",".join(split_lifecycle(value))
+
+
+# ---------------------------------------------------------------- 客户
+# 每个账号属于一个客户（账号表的 CUSTOMER 列），一个客户可以有多个账号；没有客户的账号在库存里。
+# 客户本身放在工作表 CUSTOMERS，客户时间线上手动记的事放在 EVENTS，都和账号一起备份、一起拷走，
+# 也能直接在 Excel 里改。第一次在页面上建客户、记事件时才把这两张表建出来。
+#
+# 账号在客户名下的阶段不单独存，按台账算（见 customers.stage_of）：SETTLED 有日期是已结算；
+# 生命周期里有「结算」是待结算（被换下、额度用完），有「风控」是风控 · 待替换；其余是使用中。
+# 所以在账号管理里给账号打上 / 去掉这两个标签，客户页上的阶段跟着变。
+CUSTOMERS_SHEET = "CUSTOMERS"
+CUSTOMER_HEADER = ("ID", "NAME", "REGION", "AVATAR", "STATUS", "SINCE", "NOTE")
+EVENTS_SHEET = "EVENTS"
+# TYPE 是事件类别（customers.EVENT_TYPES 的 key）；AMOUNT / BEFORE 是金额（分配时的额度、额度改前改后、
+# 结算时的消费）；PEER 是替换时换上的新账号；SOURCE 是 manual（有人操作）或 auto——自动事件本身
+# 每次按数据算出来，不存，表里只存对它的改动：改了日期、删掉了（KEY 认是哪一条，DELETED 是删掉）。
+# CUSTOMER 空着的是账号在库存里时记的事（调额度、风控、停用 / 恢复），只在账号页的时间线上
+EVENT_HEADER = (
+    "ID", "DATE", "CUSTOMER", "ACCOUNT", "TYPE", "AMOUNT", "BEFORE", "PEER", "NOTE",
+    "SOURCE", "KEY", "DELETED", "CREATED_AT", "ACTOR",
+)
+# 客户状态：台账里写中文，读的时候认中英文
+CUSTOMER_STATUSES = {"on": "合作中", "pause": "暂停", "gone": "已流失"}
+_STATUS_WORDS = {**{label: key for key, label in CUSTOMER_STATUSES.items()},
+                 **{key: key for key in CUSTOMER_STATUSES}}
+# 插画头像的个数（static/avatars/c01.webp … c10.webp）；0 = 没选，用名字的第一个字
+CUSTOMER_AVATARS = 10
+# 客户流程会自动改的三个生命周期标签。清单里被删了也照样认（写的时候顺手加回清单里）
+TAG_NORMAL = "正常"
+TAG_SETTLE = "结算"
+TAG_RISK = "风控"
+_CUSTOMER_ID = re.compile(r"^C\d{3,}$")
+
+
+@dataclass
+class Customer:
+    id: str                       # C001、C002……
+    name: str
+    region: str = ""              # 国家 / 地区代码（customers.REGIONS），空着 = 没填
+    avatar: int = 0               # 1~10 是插画头像；0 = 没选，用名字的第一个字
+    status: str = "on"            # CUSTOMER_STATUSES 的 key
+    since: date | None = None     # 开始合作的日期
+    note: str = ""
+    row: int = 0
+
+    @property
+    def status_label(self) -> str:
+        return CUSTOMER_STATUSES.get(self.status, CUSTOMER_STATUSES["on"])
+
+
+@dataclass
+class CustomerEvent:
+    """时间线上手动记的一件事（或者对某条自动事件的改动，见 EVENT_HEADER 的注释）。"""
+
+    id: int
+    date: date
+    customer: str
+    account: str = ""             # 12 位账号 ID；整个客户的事（新客户、备注）是空的
+    type: str = "note"
+    amount: float | None = None
+    before: float | None = None
+    peer: str = ""                # 替换时换上的新账号
+    note: str = ""
+    source: str = "manual"        # manual / auto
+    key: str = ""                 # 自动事件的标识（source=auto 时才有）
+    deleted: bool = False
+    created_at: datetime | None = None
+    actor: str = ""
+    row: int = 0
+
+
+def _to_customer_id(value: object) -> str:
+    return _clean(value).upper()
+
+
+def _to_status(value: object) -> str:
+    return _STATUS_WORDS.get(_clean(value).lower(), _STATUS_WORDS.get(_clean(value), "on"))
+
+
+def _to_customer_avatar(value: object) -> int:
+    text = _clean(value)
+    if text.endswith(".0"):
+        text = text[:-2]
+    if text.isdecimal() and 0 <= int(text) <= CUSTOMER_AVATARS:
+        return int(text)
+    return 0
+
+
+def _to_amount(value: object) -> float | None:
+    if value is None or _clean(value) == "":
+        return None
+    return _to_number(value)
+
+
+def _to_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    text = _clean(value)
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
 
 # 必填列空着时的占位显示值。写回时要按同一套规则反推行身份，所以提成常量。
 NO_PARTNER = "(未填写上游)"
@@ -196,6 +304,9 @@ class Account:
     lifecycle: tuple[str, ...] = ()
     avatar_emoji: str = ""
     avatar_color: int | None = None
+    # 属于哪个客户（空着 = 库存）、哪天结算的
+    customer: str = ""
+    settled: date | None = None
 
     @property
     def label(self) -> str:
@@ -399,6 +510,79 @@ def _to_avatar_color(value: object) -> int | None:
     return None
 
 
+def _sheet_rows(workbook, name: str, header: tuple[str, ...]):
+    """按表头名读一张附属工作表（CUSTOMERS / EVENTS）：每行一个 {列名: 值}。没有这张表是空的。
+    表头大小写、顺序都不敏感，认不出的列忽略。"""
+    if name not in workbook.sheetnames:
+        return
+    rows = workbook[name].iter_rows(values_only=True)
+    try:
+        head = next(rows)
+    except StopIteration:
+        return
+    index = {}
+    for position, cell in enumerate(head or ()):
+        title = _clean(cell).upper()
+        if title in header and title not in index:
+            index[title] = position
+    for row_number, row in enumerate(rows, start=2):
+        if not row:
+            continue
+        values = {title: (row[position] if position < len(row) else None) for title, position in index.items()}
+        yield row_number, values
+
+
+def _read_customers(workbook) -> list[Customer]:
+    customers: dict[str, Customer] = {}
+    for row_number, values in _sheet_rows(workbook, CUSTOMERS_SHEET, CUSTOMER_HEADER):
+        ident = _to_customer_id(values.get("ID"))
+        name = _clean(values.get("NAME"))
+        if not ident or ident in customers:
+            continue
+        customers[ident] = Customer(
+            id=ident,
+            name=name or ident,
+            region=_clean(values.get("REGION")).upper(),
+            avatar=_to_customer_avatar(values.get("AVATAR")),
+            status=_to_status(values.get("STATUS")),
+            since=_to_date(values.get("SINCE")),
+            note=_clean(values.get("NOTE")),
+            row=row_number,
+        )
+    return list(customers.values())
+
+
+def _read_events(workbook) -> list[CustomerEvent]:
+    events = []
+    for row_number, values in _sheet_rows(workbook, EVENTS_SHEET, EVENT_HEADER):
+        when = _to_date(values.get("DATE"))
+        customer = _to_customer_id(values.get("CUSTOMER"))
+        account = _to_account_id(values.get("ACCOUNT"))
+        kind = _clean(values.get("TYPE")).lower()
+        ident = _to_number(values.get("ID"), 0.0)
+        # 库存里的账号记的事（调额度、风控、停用）没有客户，只有账号：账号页的时间线用
+        if when is None or not kind or not (customer or account):
+            continue
+        events.append(CustomerEvent(
+            id=int(ident) if ident > 0 else 0,
+            date=when,
+            customer=customer,
+            account=account,
+            type=kind,
+            amount=_to_amount(values.get("AMOUNT")),
+            before=_to_amount(values.get("BEFORE")),
+            peer=_to_account_id(values.get("PEER")),
+            note=_clean(values.get("NOTE")),
+            source="auto" if _clean(values.get("SOURCE")).lower() == "auto" else "manual",
+            key=_clean(values.get("KEY")),
+            deleted=_to_flag(values.get("DELETED")),
+            created_at=_to_datetime(values.get("CREATED_AT")),
+            actor=_clean(values.get("ACTOR")),
+            row=row_number,
+        ))
+    return events
+
+
 def _read_lifecycle(workbook) -> list[LifecycleTag]:
     """第二个工作表 LIFECYCLE（NAME、COLOR 两列）。没有这张表就是默认的三个。"""
     if LIFECYCLE_SHEET not in workbook.sheetnames:
@@ -415,13 +599,23 @@ def _read_lifecycle(workbook) -> list[LifecycleTag]:
 
 
 _cache_lock = threading.Lock()
-_cache: dict[str, object] = {"stamp": None, "accounts": [], "lifecycle": []}
+_cache: dict[str, object] = {"stamp": None, "accounts": [], "lifecycle": [], "customers": [], "events": []}
 
 
-def _read_workbook(path: Path) -> tuple[list[Account], list[LifecycleTag]]:
+@dataclass
+class _Ledger:
+    accounts: list[Account]
+    lifecycle: list[LifecycleTag]
+    customers: list[Customer]
+    events: list[CustomerEvent]
+
+
+def _read_workbook(path: Path) -> _Ledger:
     workbook = openpyxl.load_workbook(path, data_only=True, read_only=True)
     try:
         lifecycle = _read_lifecycle(workbook)
+        customers = _read_customers(workbook)
+        events = _read_events(workbook)
         sheet = workbook.worksheets[0]
         rows = sheet.iter_rows(values_only=True)
         try:
@@ -486,9 +680,11 @@ def _read_workbook(path: Path) -> tuple[list[Account], list[LifecycleTag]]:
                     lifecycle=split_lifecycle(cell(row, "lifecycle")),
                     avatar_emoji=_clean(cell(row, "avatar_emoji")),
                     avatar_color=_to_avatar_color(cell(row, "avatar_color")),
+                    customer=_to_customer_id(cell(row, "customer")),
+                    settled=_to_date(cell(row, "settled")),
                 )
             )
-        return accounts, lifecycle
+        return _Ledger(accounts, lifecycle, customers, events)
     finally:
         workbook.close()
 
@@ -499,6 +695,8 @@ def clear_cache() -> None:
         _cache["stamp"] = None
         _cache["accounts"] = []
         _cache["lifecycle"] = []
+        _cache["customers"] = []
+        _cache["events"] = []
 
 
 def load_accounts(force: bool = False, include_disabled: bool = False) -> list[Account]:
@@ -519,11 +717,14 @@ def load_accounts(force: bool = False, include_disabled: bool = False) -> list[A
             cached = list(_cache["accounts"])  # type: ignore[arg-type]
             return cached if include_disabled else [a for a in cached if a.enabled]
 
-    accounts, lifecycle = _read_workbook(path)
+    ledger = _read_workbook(path)
     with _cache_lock:
         _cache["stamp"] = stamp
-        _cache["accounts"] = accounts
-        _cache["lifecycle"] = lifecycle
+        _cache["accounts"] = ledger.accounts
+        _cache["lifecycle"] = ledger.lifecycle
+        _cache["customers"] = ledger.customers
+        _cache["events"] = ledger.events
+    accounts = ledger.accounts
     return list(accounts) if include_disabled else [a for a in accounts if a.enabled]
 
 
@@ -532,6 +733,20 @@ def load_lifecycle(force: bool = False) -> list[LifecycleTag]:
     load_accounts(force=force, include_disabled=True)
     with _cache_lock:
         return list(_cache["lifecycle"])  # type: ignore[arg-type]
+
+
+def load_customers(force: bool = False) -> list[Customer]:
+    """客户（工作表 CUSTOMERS），按编号排。和账号共用一次文件读取和缓存。"""
+    load_accounts(force=force, include_disabled=True)
+    with _cache_lock:
+        return list(_cache["customers"])  # type: ignore[arg-type]
+
+
+def load_events(force: bool = False) -> list[CustomerEvent]:
+    """客户时间线上手动记的事和对自动事件的改动（工作表 EVENTS），含删掉的（deleted）。"""
+    load_accounts(force=force, include_disabled=True)
+    with _cache_lock:
+        return list(_cache["events"])  # type: ignore[arg-type]
 
 
 def lifecycle_colors(tags: list[LifecycleTag] | None = None) -> dict[str, str]:
@@ -564,7 +779,7 @@ INTERNAL_TO_EXCEL = {internal: excel for excel, internal in COLUMNS.items()}
 EDITABLE = (
     "partner", "account", "budget", "tag_ratio", "untag_ratio", "tag_spec", "start_date",
     "tg_chat_ids", "mail_provider", "mail_address", "mail_server",
-    "email", "lifecycle", "avatar_emoji", "avatar_color",
+    "email", "lifecycle", "avatar_emoji", "avatar_color", "customer",
 )
 # 新建时还要额外收凭证
 CREATE_ONLY = ("ak", "sk")
@@ -588,6 +803,7 @@ _NORMALIZE = {
     "lifecycle": _canon_lifecycle,
     "avatar_emoji": _clean,
     "avatar_color": _to_avatar_color,
+    "customer": _to_customer_id,
 }
 
 
@@ -667,6 +883,7 @@ def validate(
     creating: bool,
     current: Account | None = None,
     lifecycle: list[LifecycleTag] | None = None,
+    customers: list[Customer] | None = None,
 ) -> tuple[dict, list[str]]:
     """把表单文本校验成可以写进台账的一行。
 
@@ -677,11 +894,21 @@ def validate(
     others 是「除自己以外的全部账号」，含已停用的：停用不等于账号 ID 可以被
     别人重用，否则恢复的时候就撞车了。current 是修改前的这个账号（新建时没有），
     用来判断邮箱密码能不能留空不改。lifecycle 是可选的标签清单；给了就只认清单里的
-    （外加这个账号身上本来就有的，免得手改过的老标签让整张表单存不进去）。
+    （外加这个账号身上本来就有的，免得手改过的老标签让整张表单存不进去）。customers 是客户清单，
+    给了就检查选的客户还在不在。
     """
     errors: list[str] = []
     data = {name: _clean(form.get(name)) for name in (*EDITABLE, *CREATE_ONLY)}
     data["mail_password"] = _clean(form.get("mail_password"))
+
+    # 客户：表单里没有这一项（别处来的表单）就当没改，不能当成「改成库存」
+    if "customer" in form:
+        chosen = _to_customer_id(form.get("customer"))
+        if chosen and customers is not None and chosen not in {c.id for c in customers}:
+            errors.append("选的客户不在了，刷新页面再选。")
+        data["customer"] = chosen
+    else:
+        data["customer"] = current.customer if current else ""
 
     # 账号邮箱：必填，两个账号不能是同一个（AWS 的 root 邮箱本来就不能重复）
     email = data["email"]
@@ -1015,10 +1242,16 @@ def _mutate(action, actor: str, *, backup: bool) -> str:
     return note
 
 
+def _plain(value: float) -> str:
+    """审计日志里的数：2000.0 写成 2000，一百万写成 1000000（不写成 1e+06），小数最多六位。"""
+    text = f"{value:f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
 def _show(value: object) -> str:
     """审计日志里的取值展示：2000.0 写成 2000，日期写成 2026-09-01，空值写成「空」。"""
     if isinstance(value, float):
-        return f"{value:g}"
+        return _plain(value)
     if isinstance(value, datetime):
         return value.date().isoformat()
     if isinstance(value, date):
@@ -1109,7 +1342,15 @@ def create_account(data: dict, actor: str = "") -> str:
         when = f"，启用日期 {started.isoformat()}" if started else "（未设启用日期）"
         tg = f"，TG 告警已打开（{len(chats)} 个群）" if chats else ""
         mail = f"，邮件告警已打开（{data['mail_address']}）" if mail_on else ""
-        return f"新增账号 {data['account']}（{data['partner']}），额度 {data['budget']:g}{when}{tg}{mail}"
+        # 新增时直接选了客户：客户时间线上记一条「分配账号」，日期取启用日期（没填就是今天）
+        owner = ""
+        if data.get("customer"):
+            _customer_row(sheet.parent, data["customer"])
+            _write_event(sheet.parent, when=started or date.today(), customer=data["customer"], kind="assign",
+                         account=data["account"], amount=data["budget"], actor=actor)
+            owner = f"，分给客户 {data['customer']}"
+        return (f"新增账号 {data['account']}（{data['partner']}），额度 {_plain(data['budget'])}"
+                f"{when}{tg}{mail}{owner}")
 
     return _mutate(action, actor, backup=True)
 
@@ -1123,9 +1364,13 @@ def update_account(key: str, data: dict, actor: str = "") -> str:
 
     def action(sheet, index) -> str:
         row = _locate(sheet, index, key)
+        before = _customer_fields(sheet, index, row)
         changes = _write_editable(sheet, index, row, data)
         for line in _write_mail_password(sheet, index, row, data):
             changes["mail_password"] = line
+        # 改了客户、额度、给账号打上 / 去掉「风控」：客户时间线上跟着记一笔（在同一次写入里）
+        if {"customer", "budget", "lifecycle"} & set(changes):
+            _log_account_change(sheet, index, row, before, actor)
         # 开关不归弹窗管，但群组 ID 全删光了开关还开着，就成了「开着却没处发」——
         # 顺手关掉。和表格里「没填群开不了」是同一条规矩
         if not data["tg_chat_ids"] and "tg_enabled" in index:
@@ -1195,15 +1440,44 @@ def set_mail_enabled(key: str, enabled: bool, actor: str = "") -> str:
     return _mutate(action, actor, backup=False)
 
 
+def set_account_budget(key: str, budget: float, actor: str = "", note: str = "") -> str:
+    """只改一个账号的额度（账号管理表格里点额度旁边的笔、账号页的「调整额度」）。
+
+    和客户页的「调整额度」一样记一条「调整额度」（改前 → 改后、谁、几点几分）：分给了客户的记在那个客户
+    名下，库存里的只记账号。额度没变返回空串，不写文件。
+    """
+    if budget != budget or budget in (float("inf"), float("-inf")):
+        raise ExcelSourceError("额度要填数字。")
+    if budget < 0:
+        raise ExcelSourceError("额度不能是负数。")
+
+    def action(sheet, index) -> str:
+        row = _locate(sheet, index, key)
+        fields = _customer_fields(sheet, index, row)
+        before = fields["budget"]
+        if before == budget:
+            return ""
+        sheet.cell(row=row, column=_ensure_column(sheet, index, "budget")).value = budget
+        _write_event(sheet.parent, when=date.today(), customer=fields["customer"], kind="budget",
+                     account=fields["account"], amount=budget, before=before, note=note, actor=actor)
+        return Note(f"修改账号 {fields['account']}：BUDGET {_plain(before)} → {_plain(budget)}", {"budget": ""})
+
+    return _mutate(action, actor, backup=True)
+
+
 def set_enabled(key: str, enabled: bool, actor: str = "") -> str:
-    """软删 / 恢复：只翻 ENABLED 这一格，行本身留在原地。"""
+    """软删 / 恢复：翻 ENABLED 这一格，行本身留在原地。时间线上记一条「停用」/「恢复启用」。"""
 
     def action(sheet, index) -> str:
         row = _locate(sheet, index, key)
         column = _ensure_column(sheet, index, "enabled")
         if _to_enabled(sheet.cell(row=row, column=column).value) == enabled:
             return ""
+        fields = _customer_fields(sheet, index, row)
         sheet.cell(row=row, column=column, value=bool(enabled))
+        if fields["account"] != NO_ACCOUNT:
+            _write_event(sheet.parent, when=date.today(), customer=fields["customer"],
+                         kind="enable" if enabled else "disable", account=fields["account"], actor=actor)
         return f"{'恢复' if enabled else '停用'}账号 {key.rpartition('#')[0]}"
 
     return _mutate(action, actor, backup=False)
@@ -1247,7 +1521,10 @@ def set_lifecycle(key: str, tags: list[str], actor: str = "") -> str:
             )
         if list(before) == clean:
             return ""
+        fields = _customer_fields(sheet, index, row)
         sheet.cell(row=row, column=column).value = ",".join(clean) or None
+        # 打上 / 去掉「风控」：客户时间线上记一笔
+        _log_account_change(sheet, index, row, fields, actor)
         return (f"账号 {key.rpartition('#')[0]} 的生命周期："
                 f"{'、'.join(before) or '空'} → {'、'.join(clean) or '空'}")
 
@@ -1322,5 +1599,479 @@ def remove_lifecycle(name: str, actor: str = "") -> str:
                     touched += 1
         extra = f"（{touched} 个账号上的一起去掉）" if touched else ""
         return f"删除生命周期标签「{name}」{extra}"
+
+    return _mutate(action, actor, backup=False)
+
+
+# ==================================================================== 客户：写入
+# 页面上的几个动作（新建 / 修改客户、分配、替换、标记风控、结算、调整额度、解绑、记一笔、改 / 删时间线上
+# 的事）都从这里走，和账号的写入共用同一条流水线（_mutate：加锁、原子替换、清缓存、记审计）。每个动作
+# 改账号和记事件在**同一次写入**里完成，不会出现「账号换了、时间线上没记」的半截状态。
+# 只有新建、修改客户和调整额度会先备份（改的是人填的资料和钱），其余和开关一样不备份。
+#
+# 每个动作在锁里当场读文件核对：账号还是不是这个客户的、是不是已经结算了、新账号是不是还在库存里——
+# 页面可能是几分钟前打开的，不信页面上看到的。
+
+def _sheet_with_header(book, name: str, header: tuple[str, ...]):
+    """拿到附属工作表；还没有就建一张。表头缺的列在右边补上（老表加了新列也能写）。"""
+    sheet = book[name] if name in book.sheetnames else book.create_sheet(name)
+    titles = [_clean(sheet.cell(row=1, column=c).value).upper() for c in range(1, sheet.max_column + 1)]
+    if not any(titles):
+        for column, title in enumerate(header, start=1):
+            sheet.cell(row=1, column=column, value=title)
+        return sheet
+    for title in header:
+        if title not in titles:
+            titles.append(title)
+            sheet.cell(row=1, column=len(titles), value=title)
+    return sheet
+
+
+def _titles(sheet, header: tuple[str, ...]) -> dict[str, int]:
+    """附属工作表的 表头 -> 列号（1 起）。"""
+    index: dict[str, int] = {}
+    for column in range(1, sheet.max_column + 1):
+        title = _clean(sheet.cell(row=1, column=column).value).upper()
+        if title in header and title not in index:
+            index[title] = column
+    return index
+
+
+def _next_free_row(sheet, index: dict[str, int]) -> int:
+    """最后一行有内容的行的下一行（只设过格式的空行不算）。"""
+    last = 1
+    for row in range(2, sheet.max_row + 1):
+        if any(_clean(sheet.cell(row=row, column=column).value) for column in index.values()):
+            last = row
+    return last + 1
+
+
+def _put(cell, value) -> None:
+    """写一格：字符串走 _put_text（「=」开头的不当公式），空串写成空格子。"""
+    if isinstance(value, str):
+        _put_text(cell, value)
+    else:
+        cell.value = value
+
+
+def _customer_row(book, cid: str) -> tuple[object, dict[str, int], int]:
+    """客户在 CUSTOMERS 表里的 (表, 表头, 行号)。没有这个客户就报错。"""
+    if CUSTOMERS_SHEET not in book.sheetnames:
+        raise ExcelSourceError(f"台账里没有客户 {cid}，请刷新页面后重试。")
+    sheet = book[CUSTOMERS_SHEET]
+    index = _titles(sheet, CUSTOMER_HEADER)
+    if "ID" in index:
+        for row in range(2, sheet.max_row + 1):
+            if _to_customer_id(sheet.cell(row=row, column=index["ID"]).value) == cid:
+                return sheet, index, row
+    raise ExcelSourceError(f"台账里没有客户 {cid}，请刷新页面后重试。")
+
+
+def _write_event(
+    book, *, when: date, customer: str, kind: str, account: str = "", amount: float | None = None,
+    before: float | None = None, peer: str = "", note: str = "", source: str = "manual", key: str = "",
+    deleted: bool = False, actor: str = "",
+) -> int:
+    """在 EVENTS 表末尾记一件事，返回它的编号。"""
+    sheet = _sheet_with_header(book, EVENTS_SHEET, EVENT_HEADER)
+    index = _titles(sheet, EVENT_HEADER)
+    taken = [_to_number(sheet.cell(row=row, column=index["ID"]).value, 0.0) for row in range(2, sheet.max_row + 1)]
+    ident = int(max(taken, default=0.0)) + 1
+    row = _next_free_row(sheet, index)
+    values = {
+        "ID": ident, "DATE": when, "CUSTOMER": customer, "ACCOUNT": account, "TYPE": kind,
+        "AMOUNT": amount, "BEFORE": before, "PEER": peer, "NOTE": note, "SOURCE": source, "KEY": key,
+        "DELETED": True if deleted else None, "CREATED_AT": datetime.now().replace(microsecond=0),
+        "ACTOR": actor,
+    }
+    for title, value in values.items():
+        _put(sheet.cell(row=row, column=index[title]), value)
+    return ident
+
+
+def _customer_fields(sheet, index: dict[str, int], row: int) -> dict:
+    """账号这一行和客户有关的几格，改之前、改之后各取一份比对用。"""
+    def value(name: str):
+        return sheet.cell(row=row, column=index[name]).value if name in index else None
+
+    return {
+        "account": _to_account_id(value("account")) or NO_ACCOUNT,
+        "customer": _to_customer_id(value("customer")),
+        "budget": _to_number(value("budget")),
+        "lifecycle": split_lifecycle(value("lifecycle")),
+        "settled": _to_date(value("settled")),
+        "enabled": _to_enabled(value("enabled")),
+        "start_date": _to_date(value("start_date")),
+    }
+
+
+def _log_account_change(sheet, index: dict[str, int], row: int, before: dict, actor: str) -> None:
+    """账号管理里改了客户、额度、「风控」标签：时间线上跟着记一笔。
+
+    分给了客户的记在那个客户名下（客户页、账号页的时间线上都有）；库存里的没有客户，只记账号——
+    账号页的时间线按账号看，换过几个客户、解绑过都追得回来。
+    """
+    after = _customer_fields(sheet, index, row)
+    book = sheet.parent
+    today = date.today()
+    number = after["account"]
+    if before["customer"] != after["customer"]:
+        if before["customer"]:
+            _write_event(book, when=today, customer=before["customer"], kind="unassign",
+                         account=before["account"], note="在账号管理里改了客户", actor=actor)
+        if after["customer"]:
+            _customer_row(book, after["customer"])
+            # 在账号管理里给老账号填客户（多半是上线那天归类）：分配日期记启用日期
+            started = after["start_date"]
+            _write_event(book, when=started if started and started < today else today, customer=after["customer"],
+                         kind="assign", account=number, amount=after["budget"], actor=actor)
+        # 换了客户：结算日期是上一个客户那边的事
+        if after["settled"] is not None:
+            sheet.cell(row=row, column=index["settled"]).value = None
+        return
+    owner = after["customer"]
+    if before["budget"] != after["budget"]:
+        _write_event(book, when=today, customer=owner, kind="budget", account=number,
+                     amount=after["budget"], before=before["budget"], actor=actor)
+    had, has = TAG_RISK in before["lifecycle"], TAG_RISK in after["lifecycle"]
+    if had != has:
+        _write_event(book, when=today, customer=owner, kind="risk" if has else "unrisk", account=number,
+                     actor=actor)
+
+
+def _ensure_listed(book, names) -> None:
+    """客户流程打上的标签不在清单里（被人删了）就加回去，免得账号管理里显示成清单外的灰标签。"""
+    defaults = dict(DEFAULT_LIFECYCLE)
+    if LIFECYCLE_SHEET not in book.sheetnames and all(name in defaults for name in names):
+        return   # 没有清单表 = 用默认的三个，本来就在
+    tags = _lifecycle_sheet(book)
+    present = {found for _, found in _sheet_tags(tags)}
+    for name in names:
+        if name not in present:
+            tags.append([name, defaults.get(name, "gray")])
+
+
+def _retag(sheet, index: dict[str, int], row: int, add=(), remove=()) -> None:
+    """改账号的生命周期：加上 add、去掉 remove，别的标签原样留着、顺序不动。"""
+    column = _ensure_column(sheet, index, "lifecycle")
+    before = split_lifecycle(sheet.cell(row=row, column=column).value)
+    after = [name for name in before if name not in remove]
+    for name in add:
+        if name not in after:
+            after.append(name)
+    if list(before) != after:
+        sheet.cell(row=row, column=column).value = ",".join(after) or None
+        _ensure_listed(sheet.parent, [name for name in add if name not in before])
+
+
+def _owned_row(sheet, index: dict[str, int], key: str, cid: str, *, allow_settled: bool = False) -> int:
+    """账号在台账里的行号，并核对它确实是这个客户的（还没结算）。"""
+    row = _locate(sheet, index, key)
+    fields = _customer_fields(sheet, index, row)
+    if fields["customer"] != cid:
+        raise LedgerConflict(f"账号 {fields['account']} 已经不是这个客户的了，请刷新页面后重试。")
+    if fields["settled"] is not None and not allow_settled:
+        raise LedgerConflict(f"账号 {fields['account']} 已经结算了，请刷新页面后重试。")
+    return row
+
+
+_CUSTOMER_NORMALIZE = {
+    "ID": _to_customer_id,
+    "NAME": _clean,
+    "REGION": lambda v: _clean(v).upper(),
+    "AVATAR": _to_customer_avatar,
+    "STATUS": lambda v: CUSTOMER_STATUSES[_to_status(v)],
+    "SINCE": _to_date,
+    "NOTE": _clean,
+}
+
+
+def _write_customer(sheet, index: dict[str, int], row: int, ident: str, data: dict) -> dict[str, str]:
+    """写客户的一行，返回改了的项 {表头: 审计里的那半句}。"""
+    values = {
+        "ID": ident,
+        "NAME": data["name"],
+        "REGION": (data.get("region") or "").upper(),
+        "AVATAR": int(data.get("avatar") or 0),
+        "STATUS": CUSTOMER_STATUSES.get(data.get("status") or "on", CUSTOMER_STATUSES["on"]),
+        "SINCE": data.get("since"),
+        "NOTE": data.get("note") or "",
+    }
+    changes: dict[str, str] = {}
+    for title, value in values.items():
+        cell = sheet.cell(row=row, column=index[title])
+        if _CUSTOMER_NORMALIZE[title](cell.value) == value:
+            continue
+        changes[title] = f"{title} {_show(cell.value)} → {_show(value)}"
+        # 头像 0 = 没选，格子留空
+        _put(cell, None if title == "AVATAR" and not value else value)
+    return changes
+
+
+def create_customer(data: dict, actor: str = "") -> str:
+    """新建一个客户，返回它的编号（C001、C002……按顺序往下排）。data 是 customers.validate_customer 校验过的。"""
+    made: dict[str, str] = {}
+
+    def action(sheet, index) -> str:
+        customers = _sheet_with_header(sheet.parent, CUSTOMERS_SHEET, CUSTOMER_HEADER)
+        cindex = _titles(customers, CUSTOMER_HEADER)
+        numbers = [
+            int(text[1:]) for text in (
+                _to_customer_id(customers.cell(row=row, column=cindex["ID"]).value)
+                for row in range(2, customers.max_row + 1)
+            ) if _CUSTOMER_ID.match(text)
+        ]
+        ident = f"C{max(numbers, default=0) + 1:03d}"
+        _write_customer(customers, cindex, _next_free_row(customers, cindex), ident, data)
+        made["id"] = ident
+        return f"新建客户 {ident}（{data['name']}）"
+
+    _mutate(action, actor, backup=True)
+    return made.get("id", "")
+
+
+def update_customer(cid: str, data: dict, actor: str = "") -> str:
+    """改客户资料。什么都没变就返回空串，不写文件。"""
+
+    def action(sheet, index) -> str:
+        customers, cindex, row = _customer_row(sheet.parent, cid)
+        changes = _write_customer(customers, cindex, row, cid, data)
+        if not changes:
+            return ""
+        return Note(f"修改客户 {cid}：" + "；".join(changes.values()), [title.lower() for title in changes])
+
+    return _mutate(action, actor, backup=True)
+
+
+def assign_accounts(cid: str, keys: list[str], when: date, actor: str = "") -> str:
+    """把库存里的账号分给客户：写上客户编号、生命周期换成「正常」，每个账号记一条「分配账号」。"""
+    if not keys:
+        raise ExcelSourceError("先选要分配的账号。")
+
+    def action(sheet, index) -> str:
+        book = sheet.parent
+        _customer_row(book, cid)
+        column = _ensure_column(sheet, index, "customer")
+        numbers = []
+        for key in keys:
+            row = _locate(sheet, index, key)
+            fields = _customer_fields(sheet, index, row)
+            if fields["customer"]:
+                raise LedgerConflict(f"账号 {fields['account']} 已经分给客户 {fields['customer']} 了，不在库存里。")
+            _put(sheet.cell(row=row, column=column), cid)
+            if "settled" in index:
+                sheet.cell(row=row, column=index["settled"]).value = None
+            _retag(sheet, index, row, add=(TAG_NORMAL,), remove=(TAG_RISK, TAG_SETTLE))
+            _write_event(book, when=when, customer=cid, kind="assign", account=fields["account"],
+                         amount=fields["budget"], actor=actor)
+            numbers.append(fields["account"])
+        return f"把账号 {'、'.join(numbers)} 分给客户 {cid}"
+
+    return _mutate(action, actor, backup=False)
+
+
+def unassign_account(cid: str, key: str, when: date, actor: str = "", note: str = "") -> str:
+    """解绑：账号回到库存（客户编号和结算日期清掉），客户时间线上记一条「解绑」。生命周期不动。"""
+
+    def action(sheet, index) -> str:
+        row = _owned_row(sheet, index, key, cid, allow_settled=True)
+        fields = _customer_fields(sheet, index, row)
+        sheet.cell(row=row, column=index["customer"]).value = None
+        if "settled" in index:
+            sheet.cell(row=row, column=index["settled"]).value = None
+        _write_event(sheet.parent, when=when, customer=cid, kind="unassign", account=fields["account"],
+                     note=note, actor=actor)
+        return f"账号 {fields['account']} 和客户 {cid} 解绑，回到库存"
+
+    return _mutate(action, actor, backup=False)
+
+
+def mark_risk(cid: str, key: str, when: date, actor: str = "", spent: float | None = None,
+              note: str = "") -> str:
+    """标记风控：生命周期加上「风控」、去掉「正常」，记一条「标记风控」。已经是风控的返回空串。"""
+
+    def action(sheet, index) -> str:
+        row = _owned_row(sheet, index, key, cid)
+        fields = _customer_fields(sheet, index, row)
+        if TAG_RISK in fields["lifecycle"]:
+            return ""
+        _retag(sheet, index, row, add=(TAG_RISK,), remove=(TAG_NORMAL,))
+        _write_event(sheet.parent, when=when, customer=cid, kind="risk", account=fields["account"],
+                     amount=spent, note=note, actor=actor)
+        return f"账号 {fields['account']}（客户 {cid}）标记风控"
+
+    return _mutate(action, actor, backup=False)
+
+
+def clear_risk(cid: str, key: str, when: date, actor: str = "") -> str:
+    """取消风控（标错了）：去掉「风控」、换回「正常」，记一条「取消风控」。"""
+
+    def action(sheet, index) -> str:
+        row = _owned_row(sheet, index, key, cid)
+        fields = _customer_fields(sheet, index, row)
+        if TAG_RISK not in fields["lifecycle"]:
+            return ""
+        add = () if TAG_SETTLE in fields["lifecycle"] else (TAG_NORMAL,)
+        _retag(sheet, index, row, add=add, remove=(TAG_RISK,))
+        _write_event(sheet.parent, when=when, customer=cid, kind="unrisk", account=fields["account"], actor=actor)
+        return f"账号 {fields['account']}（客户 {cid}）取消风控"
+
+    return _mutate(action, actor, backup=False)
+
+
+def replace_account(cid: str, old_key: str, new_key: str, reason: str, when: date, actor: str = "",
+                    spent: float | None = None, risky: bool = False) -> str:
+    """替换：旧账号进入待结算（加「结算」，risky 时连「风控」一起），库存里的新账号分给这个客户。
+
+    记一条「替换账号」（旧 → 新、原因、新账号的额度）；risky 而旧账号还没标过风控的，先补一条「标记风控」。
+    """
+
+    def action(sheet, index) -> str:
+        book = sheet.parent
+        old_row = _owned_row(sheet, index, old_key, cid)
+        new_row = _locate(sheet, index, new_key)
+        old = _customer_fields(sheet, index, old_row)
+        new = _customer_fields(sheet, index, new_row)
+        if new_row == old_row:
+            raise ExcelSourceError("新账号和旧账号是同一个。")
+        if new["customer"]:
+            raise LedgerConflict(f"账号 {new['account']} 已经分给客户 {new['customer']} 了，不在库存里。")
+        if risky and TAG_RISK not in old["lifecycle"]:
+            _write_event(book, when=when, customer=cid, kind="risk", account=old["account"], amount=spent,
+                         actor=actor)
+        _retag(sheet, index, old_row, add=(TAG_RISK, TAG_SETTLE) if risky else (TAG_SETTLE,), remove=(TAG_NORMAL,))
+        _put(sheet.cell(row=new_row, column=_ensure_column(sheet, index, "customer")), cid)
+        if "settled" in index:
+            sheet.cell(row=new_row, column=index["settled"]).value = None
+        _retag(sheet, index, new_row, add=(TAG_NORMAL,), remove=(TAG_RISK, TAG_SETTLE))
+        _write_event(book, when=when, customer=cid, kind="replace", account=old["account"], peer=new["account"],
+                     amount=new["budget"], before=spent, note=reason, actor=actor)
+        return f"客户 {cid}：账号 {old['account']} 换成 {new['account']}（{reason or '没写原因'}）"
+
+    return _mutate(action, actor, backup=False)
+
+
+def settle_account(cid: str, key: str, when: date, actor: str = "", spent: float | None = None,
+                   disable: bool = False, note: str = "") -> str:
+    """结算：写上结算日期、生命周期加「结算」，记一条「结算」（这个账号最后的消费）。disable 时顺手停用。"""
+
+    def action(sheet, index) -> str:
+        row = _owned_row(sheet, index, key, cid)
+        fields = _customer_fields(sheet, index, row)
+        sheet.cell(row=row, column=_ensure_column(sheet, index, "settled")).value = when
+        _retag(sheet, index, row, add=(TAG_SETTLE,), remove=(TAG_NORMAL,))
+        off = ""
+        if disable and fields["enabled"]:
+            sheet.cell(row=row, column=_ensure_column(sheet, index, "enabled")).value = False
+            off = "，同时停用"
+        _write_event(sheet.parent, when=when, customer=cid, kind="settle", account=fields["account"],
+                     amount=spent, note=note, actor=actor)
+        if off:
+            _write_event(sheet.parent, when=when, customer=cid, kind="disable", account=fields["account"],
+                         actor=actor)
+        return f"客户 {cid}：账号 {fields['account']} 结算{off}"
+
+    return _mutate(action, actor, backup=False)
+
+
+def set_budget(cid: str, key: str, budget: float, when: date, actor: str = "", note: str = "",
+               revive: bool = False) -> str:
+    """调整账号额度（加额度），记一条「调整额度」（改前 → 改后）。
+
+    revive：这个账号是因为额度用完才进的待结算，加完额度又够用了——去掉「结算」、换回「正常」，
+    回到使用中（由调用方按消费判断，这里只管改标签）。
+    """
+    if budget < 0:
+        raise ExcelSourceError("额度不能是负数。")
+
+    def action(sheet, index) -> str:
+        row = _owned_row(sheet, index, key, cid)
+        fields = _customer_fields(sheet, index, row)
+        if fields["budget"] == budget:
+            return ""
+        sheet.cell(row=row, column=index["budget"]).value = budget
+        if revive and TAG_RISK not in fields["lifecycle"]:
+            _retag(sheet, index, row, add=(TAG_NORMAL,), remove=(TAG_SETTLE,))
+        _write_event(sheet.parent, when=when, customer=cid, kind="budget", account=fields["account"],
+                     amount=budget, before=fields["budget"], note=note, actor=actor)
+        return f"客户 {cid}：账号 {fields['account']} 的额度 {_plain(fields['budget'])} → {_plain(budget)}"
+
+    return _mutate(action, actor, backup=True)
+
+
+def add_customer_event(cid: str, kind: str, when: date, actor: str = "", account: str = "",
+                       note: str = "") -> str:
+    """时间线上手动记一笔（备注、手动标的开始上量 / 上量终止 / 恢复上量）。"""
+
+    def action(sheet, index) -> str:
+        _customer_row(sheet.parent, cid)
+        ident = _write_event(sheet.parent, when=when, customer=cid, kind=kind, account=account, note=note,
+                             actor=actor)
+        return f"客户 {cid} 的时间线记一笔（#{ident} {kind}）"
+
+    return _mutate(action, actor, backup=False)
+
+
+def _event_row(sheet, index: dict[str, int], cid: str, ident: int) -> int:
+    for row in range(2, sheet.max_row + 1):
+        if (int(_to_number(sheet.cell(row=row, column=index["ID"]).value, 0.0)) == ident
+                and _to_customer_id(sheet.cell(row=row, column=index["CUSTOMER"]).value) == cid):
+            return row
+    raise LedgerConflict("时间线上已经没有这条了，请刷新页面后重试。")
+
+
+def _override_row(sheet, index: dict[str, int], cid: str, key: str) -> int | None:
+    """对某条自动事件的改动记在哪一行（同一条只留一行改动）。"""
+    for row in range(2, sheet.max_row + 1):
+        if (_clean(sheet.cell(row=row, column=index["SOURCE"]).value).lower() == "auto"
+                and _clean(sheet.cell(row=row, column=index["KEY"]).value) == key
+                and _to_customer_id(sheet.cell(row=row, column=index["CUSTOMER"]).value) == cid):
+            return row
+    return None
+
+
+def change_customer_event(cid: str, ident: str, actor: str = "", *, when: date | None = None,
+                          delete: bool = False, auto_kind: str = "", auto_account: str = "",
+                          auto_date: date | None = None) -> str:
+    """改时间线上一件事的日期，或者删掉它。
+
+    ident 是手动事件的编号（"12"），或者自动事件的标识（"auto:…"）。手动的直接改那一行（删掉是打上
+    DELETED，行留着）；自动的本身不存，记一行改动：改了日期、删掉了——删掉的以后不会再自动生成。
+    auto_kind / auto_account / auto_date 是自动事件原来的类别、账号、日期，记在改动那一行里方便人看。
+    """
+    if not delete and when is None:
+        raise ExcelSourceError("没有给新的日期。")
+
+    def action(sheet, index) -> str:
+        book = sheet.parent
+        _customer_row(book, cid)
+        events = _sheet_with_header(book, EVENTS_SHEET, EVENT_HEADER)
+        eindex = _titles(events, EVENT_HEADER)
+        if ident.startswith("auto:"):
+            key = ident[len("auto:"):]
+            row = _override_row(events, eindex, cid, key)
+            if row is None:
+                _write_event(book, when=when or auto_date or date.today(), customer=cid, kind=auto_kind or "auto",
+                             account=auto_account, source="auto", key=key, deleted=delete, actor=actor)
+            else:
+                if when is not None:
+                    events.cell(row=row, column=eindex["DATE"]).value = when
+                events.cell(row=row, column=eindex["DELETED"]).value = True if delete else None
+                _put(events.cell(row=row, column=eindex["ACTOR"]), actor)
+            what = "删掉" if delete else f"改到 {when.isoformat()}"
+            return f"客户 {cid} 的时间线：自动事件 {key} {what}"
+        if not ident.isdigit():
+            raise ExcelSourceError(f"认不出这条事件：{ident}")
+        row = _event_row(events, eindex, cid, int(ident))
+        if delete:
+            if _to_flag(events.cell(row=row, column=eindex["DELETED"]).value):
+                return ""
+            events.cell(row=row, column=eindex["DELETED"]).value = True
+            return f"客户 {cid} 的时间线：删掉 #{ident}"
+        before = _to_date(events.cell(row=row, column=eindex["DATE"]).value)
+        if before == when:
+            return ""
+        events.cell(row=row, column=eindex["DATE"]).value = when
+        return f"客户 {cid} 的时间线：#{ident} 的日期 {_show(before)} → {when.isoformat()}"
 
     return _mutate(action, actor, backup=False)

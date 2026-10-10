@@ -162,7 +162,8 @@ class TestEntry:
     def test_switched_on_it_is_in_the_sidebar_and_marked_current(self, board):
         items = nav_items(page(board))
         assert [(href, title) for href, title, _ in items] == [
-            ("/", "概览"), ("/ops/", "运营看板"), ("/account/", "账号"), ("/accounts/", "账号管理"),
+            ("/", "概览"), ("/customers/", "客户"), ("/ops/", "运营看板"), ("/account/", "账号"), ("/accounts/", "账号管理"),
+            ("/settings/", "设置"),
         ]
         assert [title for _, title, on in items if on] == ["运营看板"]
 

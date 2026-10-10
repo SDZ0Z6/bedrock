@@ -23,7 +23,7 @@ from flask import (
 )
 from werkzeug.security import check_password_hash
 
-from . import config
+from . import config, login_log
 
 bp = Blueprint("auth", __name__)
 
@@ -76,12 +76,24 @@ def clear_failures(ip: str | None = None) -> None:
             _attempts.pop(ip, None)
 
 
+def _same(expected: str, given: str) -> bool:
+    """定时比较。按 UTF-8 字节比：str 直接比遇到非 ASCII（有人在框里输了中文）会抛 TypeError，登录页就 500 了。"""
+    return hmac.compare_digest(expected.encode("utf-8"), given.encode("utf-8"))
+
+
 def password_matches(candidate: str) -> bool:
     if config.AUTH_PASSWORD_HASH:
         return check_password_hash(config.AUTH_PASSWORD_HASH, candidate)
     if not config.AUTH_PASSWORD:
         return False
-    return hmac.compare_digest(config.AUTH_PASSWORD, candidate)
+    return _same(config.AUTH_PASSWORD, candidate)
+
+
+def safe_next(target: str | None, default: str) -> str:
+    """登录后、改完东西后跳去哪：只认本站路径。「//别的站」和反斜杠开头的，浏览器会当成另一个网站，不认。"""
+    if target and target.startswith("/") and not target.startswith(("//", "/\\")):
+        return target
+    return default
 
 
 def login_required(view):
@@ -109,7 +121,7 @@ def csrf_token() -> str:
 
 def csrf_ok() -> bool:
     expected = session.get("csrf") or ""
-    return bool(expected) and hmac.compare_digest(expected, request.form.get("csrf") or "")
+    return bool(expected) and _same(expected, request.form.get("csrf") or "")
 
 
 def csrf_protect(view):
@@ -132,24 +144,27 @@ def login():
 
     ip = client_ip()
     if request.method == "POST":
+        # 每次提交都记一行（设置页的「登录记录」）：不记密码；用户名照记，失败的也记输了什么
+        agent = request.headers.get("User-Agent", "")
+        username = (request.form.get("username") or "").strip()
         remaining = lockout_remaining(ip)
         if remaining:
+            login_log.record("locked", user=username, ip=ip, agent=agent)
             flash(f"登录失败次数过多，请在 {remaining} 秒后重试。", "error")
             return render_template("login.html"), 429
 
-        username = (request.form.get("username") or "").strip()
         password = request.form.get("password") or ""
-        if hmac.compare_digest(config.AUTH_USERNAME, username) and password_matches(password):
+        right_user = _same(config.AUTH_USERNAME, username)
+        if right_user and password_matches(password):
             clear_failures(ip)
+            login_log.record("ok", user=username, ip=ip, agent=agent)
             session.permanent = True
             session["user"] = username
-            target = request.form.get("next") or url_for("main.index")
             # 只允许跳回本站路径，避免开放重定向
-            if not target.startswith("/"):
-                target = url_for("main.index")
-            return redirect(target)
+            return redirect(safe_next(request.form.get("next"), url_for("main.index")))
 
         record_failure(ip)
+        login_log.record("fail" if right_user else "user", user=username, ip=ip, agent=agent)
         flash("用户名或密码错误。", "error")
         # 返回 401 而不是 200：这样 Nginx 的访问日志里失败登录是可识别的，
         # fail2ban 才能据此封 IP。不带 WWW-Authenticate，所以浏览器不会弹
@@ -161,5 +176,7 @@ def login():
 
 @bp.route("/logout")
 def logout():
+    if session.get("user"):
+        login_log.record("logout", user=session["user"], ip=client_ip(), agent=request.headers.get("User-Agent", ""))
     session.clear()
     return redirect(url_for("auth.login"))

@@ -104,6 +104,7 @@ class CardRow:
         self.email = account.email
         self.avatar = account.avatar
         self.lifecycle = account.lifecycle
+        self.customer = account.customer
         self.label = account.label
         self.key = account.key
         self.order = order

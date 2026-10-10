@@ -28,9 +28,9 @@ bedrock-cost = "bedrock_cost.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-# static 下不只有 css：图标、logo、loading.mp4 都得跟着包走；
+# static 下不只有 css：图标、logo、loading.mp4、客户头像（static/avatars）都得跟着包走；
 # fonts 是画告警卡片用的字体（和各自的 OFL 许可证）
-bedrock_cost = ["templates/*.html", "static/*", "fonts/*"]
+bedrock_cost = ["templates/*.html", "static/*", "static/avatars/*", "fonts/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

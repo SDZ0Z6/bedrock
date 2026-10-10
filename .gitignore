@@ -13,8 +13,12 @@ alert-state.json
 alert-events.jsonl
 # 每个账号最近一次查询成功的累计消费（查询失败时顶上，见 last_known.py）
 last-known-costs.json
+# 客户页存下来的每个账号每天的消费（停用账号的历史、查询失败时顶上，见 cost_history.py）
+customer-costs.json
 # 邮件告警的收信进度和去重记录（见 mail_alerts.py）
 mail-state.json
+# 登录记录（设置页的「登录记录」，见 login_log.py）
+login-events.jsonl
 
 # Python
 __pycache__/

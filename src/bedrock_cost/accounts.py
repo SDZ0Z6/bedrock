@@ -36,8 +36,10 @@ from .auth import (
     login_required,
     password_matches,
     record_failure,
+    safe_next,
 )
 from .excel_source import Account, ExcelSourceError, load_accounts
+from .filters import money, money0
 from .views import flash_result, page_meta
 
 bp = Blueprint("accounts", __name__, url_prefix="/accounts")
@@ -63,6 +65,7 @@ FIELD_NAMES = {
     "mail_password": "邮箱密码",
     "mail_server": "IMAP 服务器",
     "tg_chat_ids": "TG 群组",
+    "customer": "客户",
 }
 
 
@@ -127,6 +130,29 @@ def _form_values(form) -> dict:
     # 邮箱密码不回填：和 SK 一样，只在提交的那一下经过服务器，不再写回页面
     values.pop("mail_password", None)
     return values
+
+
+def _customers() -> list[excel_source.Customer]:
+    """客户清单（弹窗里的「客户」下拉、表格的「客户」列）。读不了就当没有。"""
+    try:
+        return excel_source.load_customers()
+    except Exception:
+        return []
+
+
+def _budget_log() -> dict[str, list[excel_source.CustomerEvent]]:
+    """每个账号调过的额度，新的在前（号码 -> 「调整额度」事件）。修改弹窗的额度框下面写上一次是哪天、谁、
+    从多少调到多少——分给过客户的、在库存里调的都算，解绑以后也还在。读不了就当没有。"""
+    try:
+        events = excel_source.load_events()
+    except Exception:
+        return {}
+    log: dict[str, list[excel_source.CustomerEvent]] = {}
+    for event in sorted(events, key=lambda e: (e.date, e.id), reverse=True):
+        if (event.type == "budget" and event.source == "manual" and not event.deleted and event.account
+                and event.amount is not None and event.before is not None):
+            log.setdefault(event.account, []).append(event)
+    return log
 
 
 def _lifecycle() -> list[excel_source.LifecycleTag]:
@@ -199,6 +225,14 @@ def _render(**extra):
         # 某一行编辑失败时的回填值
         "edit_key": "",
         "edit_form": {},
+        # 从账号页点「编辑」过来：打开这一行的修改弹窗（值是台账里的），改完、取消都回账号页
+        "open_edit": "",
+        "edit_back": "",
+        # 客户：弹窗里的下拉、表格里的「客户」列和筛选
+        "customers": [] if fatal else _customers(),
+        "customer_names": {} if fatal else {c.id: c.name for c in _customers()},
+        # 每个账号调过的额度（修改弹窗里额度框下面那行）
+        "budget_log": {} if fatal else _budget_log(),
         # 删除时密码没对上：重新打开那一行的删除确认窗，写明原因
         "delete_key": "",
         "delete_error": "",
@@ -218,7 +252,9 @@ def _render(**extra):
 @bp.route("/")
 @login_required
 def index():
-    return _render()
+    # 账号页的「编辑」：/accounts/?edit=<key>&back=<账号页的网址>
+    return _render(open_edit=(request.args.get("edit") or "").strip(),
+                   edit_back=safe_next(request.args.get("back"), ""))
 
 
 @bp.route("/create", methods=["POST"])
@@ -231,7 +267,8 @@ def create():
         return redirect(url_for("accounts.index"))
 
     # 查重要带上已停用的账号：停用不等于账号 ID 可以被别人占用
-    data, errors = excel_source.validate(request.form, existing, creating=True, lifecycle=_lifecycle())
+    data, errors = excel_source.validate(request.form, existing, creating=True, lifecycle=_lifecycle(),
+                                         customers=_customers())
     if errors:
         return _render(errors=errors, create_form=_form_values(request.form), open_create=True), 400
 
@@ -270,19 +307,20 @@ def update():
     others = [a for a in existing if a.key != key]
     current = next(a for a in existing if a.key == key)
     data, errors = excel_source.validate(
-        request.form, others, creating=False, current=current, lifecycle=_lifecycle()
+        request.form, others, creating=False, current=current, lifecycle=_lifecycle(), customers=_customers()
     )
+    back = safe_next(request.form.get("next"), "")
     if errors:
-        return _render(errors=errors, edit_key=key, edit_form=_form_values(request.form)), 400
+        return _render(errors=errors, edit_key=key, edit_form=_form_values(request.form), edit_back=back), 400
 
     try:
         note = excel_source.update_account(key, data, actor=_actor())
     except ExcelSourceError as exc:
-        return _render(errors=[str(exc)], edit_key=key, edit_form=_form_values(request.form)), 409
+        return _render(errors=[str(exc)], edit_key=key, edit_form=_form_values(request.form), edit_back=back), 409
 
     if not note:
         flash_result("没有改动", _who(current), "填的和台账里一样，什么都没写。", tone="info")
-        return redirect(url_for("accounts.index"))
+        return redirect(back or url_for("accounts.index"))
     # 按行号找：这次可能连账号 ID 一起改了，key 里的号码就对不上了
     row = key.rpartition("#")[2]
     after = _find(lambda a: str(a.row) == row)
@@ -296,7 +334,7 @@ def update():
     flash_result("已保存", _who(after, data["email"] or data["account"]),
                  _changed(getattr(note, "fields", ())) + told)
     _warn(problems)
-    return redirect(url_for("accounts.index"))
+    return redirect(back or url_for("accounts.index"))
 
 
 @bp.route("/tg-test", methods=["POST"])
@@ -526,6 +564,58 @@ def delete():
     gone = next(a for a in existing if a.key == key)
     flash_result("已删除账号", _who(gone), "台账里这一行已经清空。")
     return redirect(url_for("accounts.index"))
+
+
+@bp.route("/budget", methods=["POST"])
+@login_required
+@csrf_protect
+def budget():
+    """只改额度：账号管理表格里点额度旁边的笔（填新的额度），账号页的「调整额度」（填加多少，减写负数）。
+
+    表格里用 fetch 调，回 JSON，那一格原地更新；账号页是普通提交，改完回 next（账号页）。时间线上记一条
+    「调整额度」（改前 → 改后、谁、几点几分），分给了客户的客户页上也看得到。
+    """
+    key = (request.form.get("key") or "").strip()
+    back = safe_next(request.form.get("next"), "")
+    note = (request.form.get("note") or "").strip()[:200]
+
+    def done(tone: str, title: str, who: str = "", text: str = "", status: int = 200, after: float | None = None):
+        if _wants_json():
+            payload: dict = {"ok": tone != "error", "tone": tone, "title": title, "sub": who, "text": text}
+            if after is not None:
+                payload.update(budget=after, budget_text=money(after))
+            return jsonify(payload), status
+        flash_result(title, who, text, tone=tone)
+        return redirect(back or url_for("accounts.index"))
+
+    failed = "额度没有改"
+    existing, fatal = _load_all()
+    if fatal:
+        return done("error", failed, text=fatal, status=500)
+    current = next((a for a in existing if a.key == key), None)
+    if current is None:
+        return done("error", failed, text="这个账号已经不在台账里了，页面可能已过期，刷新后再试。", status=409)
+    if request.form.get("add") is not None:
+        add = excel_source._strict_number(request.form.get("add") or "")
+        if add is None or add == 0:
+            return done("error", failed, _who(current), "调整多少要填一个不是 0 的数，比如 300000，减额度写负数。", status=400)
+        after = current.budget + add
+    else:
+        after = excel_source._strict_number(request.form.get("budget") or "")
+        if after is None:
+            return done("error", failed, _who(current), "额度要填数字，比如 300000。", status=400)
+    if after < 0:
+        return done("error", failed, _who(current), f"改完额度是 {money0(after)}，不能是负数。", status=400)
+    try:
+        changed = excel_source.set_account_budget(key, after, actor=_actor(), note=note)
+    except ExcelSourceError as exc:
+        return done("error", failed, _who(current), str(exc), status=409)
+    if not changed:
+        return done("info", "没有改动", _who(current), "额度和台账里一样。", after=after)
+    delta = after - current.budget
+    return done("ok", "已调整额度", _who(current),
+                f"{money0(current.budget)} → {money0(after)}（{'+' if delta >= 0 else '−'}{money0(abs(delta))}），"
+                "时间线上记了一笔。", after=after)
 
 
 @bp.route("/lifecycle", methods=["POST"])

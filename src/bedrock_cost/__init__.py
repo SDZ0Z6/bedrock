@@ -17,13 +17,18 @@
     chart           堆叠柱状图（SVG），图表色板的唯一来源
     dates           日期区间解析与快捷项
     auth / views    Web 层：登录蓝图与概览
-    account_pages   账号页：一个账号的摘要 / 成本 / 用量 / 配额 / 预估五个页签
+    account_pages   账号页：一个账号的摘要 / 成本 / 用量 / 预估 / 时间线 / 配额六个页签
     ops             运营看板：经营汇总（收入、AWS 原价、毛利）、风险与告警、模型与用量
     ops_report      运营看板的数据拼装
     dashboard       概览、账号页、看板共用的数据拼装（卡片、图表、报错弹窗）
+    customers       客户：账号在客户名下的阶段、客户的钱、时间线、月度对账单
+    customer_pages  客户页：客户列表、客户详情和详情页上的动作（分配、替换、结算……）
+    cost_history    客户页要的每天消费，存一份在磁盘上（停用账号的历史、查询失败时顶着）
     activity        各账号的用量状态（活跃 / 已中断 / 无调用）
     events          发出去的告警流水（看板的「最近告警」）
     accounts        账号管理页：台账的增 / 改 / 停用、生命周期标签
+    settings_pages  设置：操作日志（台账的每次改动）、登录记录
+    login_log       登录记录（成功、失败、锁定、退出），设置页读它
     filters         Jinja 过滤器与全局
 """
 
@@ -38,8 +43,10 @@ from . import config
 from .account_pages import bp as account_bp
 from .accounts import bp as accounts_bp
 from .auth import bp as auth_bp
+from .customer_pages import bp as customers_bp
 from .filters import register_filters
 from .ops import bp as ops_bp
+from .settings_pages import bp as settings_bp
 from .views import bp as views_bp
 
 __all__ = ["create_app", "__version__"]
@@ -81,9 +88,11 @@ def create_app(**overrides: object) -> Flask:
     register_filters(app)
     app.register_blueprint(auth_bp)
     app.register_blueprint(views_bp)
+    app.register_blueprint(customers_bp)
     app.register_blueprint(account_bp)
     if app.config["OPS_DASHBOARD"]:
         app.register_blueprint(ops_bp)
     app.register_blueprint(accounts_bp)
+    app.register_blueprint(settings_bp)
     app.after_request(_security_headers)
     return app

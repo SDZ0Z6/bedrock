@@ -1,0 +1,330 @@
+{% extends "shell.html" %}
+{% from "_macros.html" import refresh_link %}
+{% from "_customer_macros.html" import cicon, cust_avatar, status_pill, customer_fields with context %}
+{% block title %}客户 · Bedrock 成本监控{% endblock %}
+{% block page_title %}客户{% endblock %}
+{% block loading_label %}正在汇总客户的数{% endblock %}
+
+{% block page_sub -%}
+  {%- if cards -%}
+    {{ cards | length }} 个客户 · 合作中 {{ status_counts['on'] }} · 暂停 {{ status_counts['pause'] }} · 已流失 {{ status_counts['gone'] }}
+  {%- endif -%}
+{%- endblock %}
+
+{% block page_actions %}
+  <button class="btn btn-primary" type="button" data-open="dlg-create">{{ cicon('plus') }}新建客户</button>
+{% endblock %}
+
+{# 卡片上「最近一件事」的图标和颜色，和时间线一样 #}
+{% macro last_line(view) -%}
+  {%- set item = view.last_item -%}
+  {%- if item -%}
+    <p class="cust-last" style="--k: var(--k-{{ item.color }})">
+      <span class="tl-ico">{{ cicon(item.icon, '') }}</span>
+      <span>{{ item.date.strftime('%m-%d') }} {{ item.title }}
+        {%- set acct = view.accounts_by_number.get(item.account) -%}
+        {%- if acct %} · {{ acct.email or acct.account }}{% endif %}</span>
+    </p>
+  {%- endif -%}
+{%- endmacro %}
+
+{% block content %}
+
+{% if fatal %}
+  <div class="alert alert-error"><div><strong>读不了客户：</strong>{{ fatal }}</div></div>
+{% elif not cards %}
+  <div class="alert"><div>
+    <strong>还没有客户。</strong>点右上角「新建客户」建第一个，然后在客户页里把库存的账号分给它。
+    {% if stock_count %}现在库存里有 {{ stock_count }} 个账号。{% endif %}
+  </div></div>
+{% else %}
+
+  <!-- ------------------------------------------------ 三张图：近 30 天消费、快用完的客户、按区域 -->
+  <section class="bento" aria-label="全部客户的图表">
+    <article class="viz-card span-2" data-reveal>
+      <div class="viz-head">
+        <div>
+          <h2 class="viz-title">近 30 天消费</h2>
+          <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 每天一根柱，按客户分色 · 折算后</p>
+        </div>
+      </div>
+      <div>
+        <p class="viz-big" data-countup>{{ trend.total | money0 }}</p>
+        <p class="viz-meta">日均 <strong>{{ trend.average | money }}</strong></p>
+      </div>
+      <div class="viz-chart" id="cust-trend" data-tip-src="cust-trend-data">{{ trend.chart.svg | safe }}</div>
+      <div class="legend-toggles" data-legend-for="cust-trend" role="group" aria-label="只看某个客户">
+        {% for item in trend.chart.legend %}
+          <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
+                  title="{{ item.name }} 近 30 天 {{ item.total | money }}">
+            <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
+        {% endfor %}
+      </div>
+      <script id="cust-trend-data" type="application/json">{{ trend.chart.tooltip | tojson }}</script>
+    </article>
+
+    <article class="viz-card" data-reveal>
+      <div class="viz-head">
+        <div>
+          <h2 class="viz-title">快用完的客户</h2>
+          <p class="viz-sub">余额 ÷ 近 7 天日均</p>
+        </div>
+      </div>
+      {% if soon %}
+        <ul class="rank-list">
+          {% for view in soon %}
+            <li class="rank-item">
+              {{ cust_avatar(view.customer, 30) }}
+              <span class="rank-name"><a href="{{ url_for('customers.detail', cid=view.customer.id) }}"
+                data-loading="正在读这个客户">{{ view.customer.name }}</a></span>
+              <span class="rank-val {% if view.days_left < 14 %}tone-danger{% endif %}">约 {{ view.days_left | int }} 天</span>
+              <span class="rank-sub">
+                <span>余额 {{ view.balance | money0 }} · 日均 {{ view.avg7 | money0 }}</span>
+                <span class="meter tone-{{ view.level }}" aria-hidden="true"><i style="width: {{ [view.usage_pct or 0, 100] | min }}%; --delay: {{ 300 + loop.index0 * 120 }}ms"></i></span>
+              </span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="viz-empty">最近 7 天没有哪个客户在用，算不出来。</p>
+      {% endif %}
+    </article>
+
+    <article class="viz-card" data-reveal>
+      <div class="viz-head">
+        <div>
+          <h2 class="viz-title">按区域</h2>
+          <p class="viz-sub">近 30 天消费</p>
+        </div>
+      </div>
+      {% if by_region %}
+        <div class="region-rows">
+          {% for code, value in by_region %}
+            <div class="region-row">
+              {{ flag(code) | safe }}<span>{{ region_name(code) or '没填地区' }}</span><b>{{ value | money0 }}</b>
+              <span class="meter" aria-hidden="true"><i style="width: {{ (value / region_top * 100) | round(1) }}%; --delay: {{ 300 + loop.index0 * 120 }}ms"></i></span>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="viz-empty">近 30 天还没有消费。</p>
+      {% endif %}
+    </article>
+  </section>
+
+  <!-- ------------------------------------------------ 筛选：搜索、区域、状态 -->
+  <div class="list-tools" id="cust-tools">
+    <label class="search-pill">
+      {{ cicon('search', '') }}
+      <span class="sr-only">搜客户</span>
+      <input id="cust-q" type="search" placeholder="搜客户名字或编号" autocomplete="off">
+    </label>
+    <details class="range-picker region-picker" id="region-picker">
+      <summary><span id="region-summary">{{ cicon('globe', '') }}区域：全部</span></summary>
+      <div class="range-pop" role="listbox" aria-label="区域">
+        <button class="range-opt" type="button" role="option" data-region="" aria-selected="true">
+          全部区域<span class="count">{{ cards | length }}</span></button>
+        {% for code, label, number in used_regions %}
+          <button class="range-opt" type="button" role="option" data-region="{{ code }}" aria-selected="false">
+            {{ flag(code) | safe }}{{ label }}<span class="count">{{ number }}</span></button>
+        {% endfor %}
+      </div>
+    </details>
+    <div class="seg" role="group" aria-label="按状态筛选" id="status-seg">
+      <button class="seg-item is-on" type="button" data-status="" aria-pressed="true">全部 <span class="seg-val">{{ cards | length }}</span></button>
+      {% for key, label in statuses.items() %}
+        <button class="seg-item" type="button" data-status="{{ key }}" aria-pressed="false">{{ label }}
+          <span class="seg-val">{{ status_counts[key] }}</span></button>
+      {% endfor %}
+    </div>
+    <span class="list-count" id="cust-count" aria-live="polite">共 {{ cards | length }} 个</span>
+    {{ refresh_link(url_for('customers.index', refresh=1), '跳过缓存，重新查每个账号每天的消费', '正在重新查 Cost Explorer', pill=true) }}
+  </div>
+  {% if stock_count %}
+    <p class="cust-stock">库存里还有 {{ stock_count }} 个账号没分给客户，在客户页的「分配账号」里挑。</p>
+  {% endif %}
+
+  <!-- ------------------------------------------------ 客户卡片 -->
+  <section class="acct-grid" id="cust-grid" aria-label="客户">
+    {% for view in cards %}
+      {% set c = view.customer %}
+      {% set counts = view.counts %}
+      <article class="acct-card cust-card" data-name="{{ c.name | lower }}" data-id="{{ c.id | lower }}"
+               data-region="{{ c.region or 'OTHER' }}" data-status="{{ c.status }}" data-reveal>
+        <div class="acct-body">
+          <div class="cust-top">
+            {{ cust_avatar(c, 56) }}
+            <div class="cust-ident">
+              <h2 class="cust-name" title="{{ c.name }}">{{ c.name }}</h2>
+              <span class="cust-meta">{% if c.region %}{{ flag(c.region) | safe }}{{ region_name(c.region) }} · {% endif %}{{ c.id }}</span>
+            </div>
+            {{ status_pill(c) }}
+          </div>
+
+          <dl class="cust-counts">
+            <div><dt>账号</dt><dd>{{ counts.total }}</dd></div>
+            <div><dt><i class="state-dot k-active" aria-hidden="true"></i>正常</dt><dd>{{ counts.use }}</dd></div>
+            <div><dt><i class="state-dot k-error" aria-hidden="true"></i>异常</dt><dd>{{ counts.bad }}</dd></div>
+            <div><dt><i class="state-dot k-idle" aria-hidden="true"></i>已结算</dt><dd>{{ counts.settled }}</dd></div>
+          </dl>
+
+          {{ last_line(view) }}
+
+          <div class="acct-usage">
+            {% if view.budget > 0 %}
+              <div class="meter tone-{{ view.level }}" aria-hidden="true"><i style="width: {{ [view.usage_pct or 0, 100] | min }}%"></i></div>
+              <div class="acct-usage-row">
+                <span>使用率 <strong>{{ view.usage_pct | pct }}</strong></span>
+                <span>余额 <strong class="{% if view.balance < 0 %}tone-danger{% endif %}">{{ view.balance | money }}</strong></span>
+              </div>
+            {% else %}
+              <div class="meter tone-none" aria-hidden="true"><i style="width: 0"></i></div>
+              <div class="acct-usage-row">
+                <span>{{ '没有使用中的账号' if counts.total else '还没有账号' }}</span>
+                <span>余额 <strong>{{ 0 | money }}</strong></span>
+              </div>
+            {% endif %}
+          </div>
+        </div>
+
+        {# 和账号卡片一样：左边是累计的数（这里是历史消费），右边一个去处，点卡片哪里都能进 #}
+        <div class="acct-bottom">
+          <div>
+            <div class="acct-amount">{{ view.lifetime | money }}</div>
+            <div class="acct-amount-sub">历史消费 · 预算 {{ view.budget | money }}</div>
+          </div>
+          <a class="btn btn-dark acct-go" href="{{ url_for('customers.detail', cid=c.id) }}" data-loading="正在读这个客户"
+             aria-label="查看 {{ c.name }} 的详情">查看详情</a>
+        </div>
+      </article>
+    {% endfor %}
+    <p class="acct-empty" id="cust-empty" hidden>没有符合筛选条件的客户。</p>
+  </section>
+{% endif %}
+
+<footer class="meta">
+  <span>Cost Explorer</span>
+  <span>缓存 {{ cache_label }}</span>
+  <span>生成于 {{ generated_at }}</span>
+</footer>
+
+<!-- ------------------------------------------------ 新建客户 -->
+<dialog class="modal" id="dlg-create" {% if open_create %}data-reopen{% endif %}>
+  <form method="post" action="{{ url_for('customers.create') }}" data-loading="正在保存">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <header class="modal-head">
+      <h2>新建客户</h2>
+      <span class="modal-sub">编号会是 {{ new_id }}</span>
+      <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+    </header>
+    <div class="modal-body">
+      {% if errors %}
+        <div class="alert alert-error form-errors"><ul>{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul></div>
+      {% endif %}
+      {{ customer_fields(new_id, form or {}, today) }}
+    </div>
+    <footer class="modal-foot">
+      <span class="card-note">存进台账的「CUSTOMERS」表</span>
+      <div class="modal-btns">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn btn-primary" type="submit">新建客户</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
+<script>
+(function () {
+  // ---- 弹窗：打开、关闭、点外面关；提交失败回来的直接打开
+  // showModal 默认聚焦右上角的 ×，这里落到名字输入框上
+  function open(dialog) {
+    dialog.showModal();
+    const first = dialog.querySelector('[data-name-input]');
+    if (first) first.focus();
+  }
+  document.addEventListener('click', function (event) {
+    if (!(event.target instanceof Element)) return;
+    const opener = event.target.closest('[data-open]');
+    if (opener) {
+      const dialog = document.getElementById(opener.getAttribute('data-open'));
+      if (dialog) open(dialog);
+      return;
+    }
+    const closer = event.target.closest('[data-close]');
+    if (closer) { closer.closest('dialog').close(); return; }
+  });
+  for (const dialog of document.querySelectorAll('dialog.modal')) {
+    dialog.addEventListener('click', function (event) { if (event.target === dialog) dialog.close(); });
+  }
+  const reopen = document.querySelector('dialog[data-reopen]');
+  if (reopen) open(reopen);
+
+  // ---- 头像里「名字的第一个字」跟着名字变
+  document.addEventListener('input', function (event) {
+    if (!event.target.matches('[data-name-input]')) return;
+    const preview = event.target.closest('form').querySelector('[data-letter-preview]');
+    if (!preview) return;
+    const ch = Array.from(event.target.value.trim())[0] || '?';
+    preview.textContent = /[a-z]/i.test(ch) ? ch.toUpperCase() : ch;
+  });
+
+  // ---- 筛选：搜名字或编号、区域、状态，三个同时满足
+  const grid = document.getElementById('cust-grid');
+  if (!grid) return;
+  const cards = [...grid.querySelectorAll('.cust-card')];
+  const empty = document.getElementById('cust-empty');
+  const count = document.getElementById('cust-count');
+  const picker = document.getElementById('region-picker');
+  const summary = document.getElementById('region-summary');
+  const picked = { q: '', region: '', status: '' };
+
+  function apply() {
+    let shown = 0;
+    for (const card of cards) {
+      const ok = (!picked.q || card.dataset.name.includes(picked.q) || card.dataset.id.includes(picked.q))
+        && (!picked.region || card.dataset.region === picked.region)
+        && (!picked.status || card.dataset.status === picked.status);
+      card.hidden = !ok;
+      if (ok) shown += 1;
+    }
+    empty.hidden = shown > 0;
+    count.textContent = shown === cards.length ? '共 ' + cards.length + ' 个' : '显示 ' + shown + ' / ' + cards.length + ' 个';
+  }
+
+  document.getElementById('cust-q').addEventListener('input', function (event) {
+    picked.q = event.target.value.trim().toLowerCase();
+    apply();
+  });
+  picker.addEventListener('click', function (event) {
+    const option = event.target.closest('[data-region]');
+    if (!option) return;
+    picked.region = option.dataset.region;
+    for (const other of picker.querySelectorAll('[data-region]')) {
+      other.setAttribute('aria-selected', String(other === option));
+    }
+    // 按钮上换成选中的那个（国旗 + 名字）；名字是服务端写好的文字，克隆节点不拼 HTML
+    summary.replaceChildren(...[...option.childNodes].filter(function (node) {
+      return !(node.nodeType === 1 && node.classList.contains('count'));
+    }).map(function (node) { return node.cloneNode(true); }));
+    summary.prepend('区域：');
+    picker.open = false;
+    apply();
+  });
+  document.addEventListener('click', function (event) {
+    if (picker.open && !picker.contains(event.target)) picker.open = false;
+  });
+  const seg = document.getElementById('status-seg');
+  seg.addEventListener('click', function (event) {
+    const button = event.target.closest('[data-status]');
+    if (!button) return;
+    picked.status = button.dataset.status;
+    for (const other of seg.querySelectorAll('[data-status]')) {
+      const on = other === button;
+      other.classList.toggle('is-on', on);
+      other.setAttribute('aria-pressed', String(on));
+    }
+    apply();
+  });
+})();
+</script>
+{% endblock %}

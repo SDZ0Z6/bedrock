@@ -11,7 +11,8 @@ systemd timer（小时告警 / 日报、邮件告警）。整份读出来、改�
 
 **只留最近的**：超过 MAX_LINES 行就重写一遍，只留最新的 KEEP_LINES 行（临时文件 + 原子替换，
 和其他状态文件一样）。重写的那一瞬间另一个进程恰好追加的那一条会丢——看板上的流水，不值得为它
-上跨进程的文件锁。
+上跨进程的文件锁。风控类的 AWS 邮件告警（滥用、盗用、暂停，KEEP_KINDS）例外，再旧也留着：它们很少，
+客户时间线上要一直看得到（见 customers）。
 
 **记不下来不碍事**：告警已经发出去了，流水只是给人看的。写文件出任何错都只记一条日志、不往外抛，
 更不能让发出去的告警算成失败。读的时候文件没有、有坏行（写到一半断电、手改坏了）都跳过。
@@ -39,6 +40,8 @@ MAX_LINES = 2500     # 超过这么多行就裁一次
 KEEP_LINES = 2000    # 裁完留最新的这么多行
 MAX_TEXT = 200       # 一句话最长多少字，再长截断补省略号
 TONES = ("error", "warn", "ok", "info")
+# 裁的时候也留着的几类：风控类的 AWS 邮件（客户时间线上的「AWS 邮件」）
+KEEP_KINDS = ("mail-abuse", "mail-compromised", "mail-suspended")
 
 _lock = threading.Lock()
 _log = logging.getLogger(__name__)
@@ -149,14 +152,16 @@ def _append(path: Path, event: Event) -> None:
 
 
 def _trim(path: Path) -> None:
-    """只留最新的 KEEP_LINES 行。临时文件 + 原子替换：写到一半断电，旧文件还是完整的。"""
+    """只留最新的 KEEP_LINES 行，外加更早的风控类邮件告警（KEEP_KINDS）。
+    临时文件 + 原子替换：写到一半断电，旧文件还是完整的。"""
     lines = path.read_bytes().splitlines(keepends=True)
     if len(lines) <= MAX_LINES:
         return
+    older = [line for line in lines[:-KEEP_LINES] if _kept(line)]
     handle, temp = tempfile.mkstemp(prefix=".alert-events-", suffix=".jsonl", dir=path.parent)
     try:
         with os.fdopen(handle, "wb") as stream:
-            stream.writelines(lines[-KEEP_LINES:])
+            stream.writelines(older + lines[-KEEP_LINES:])
         os.replace(temp, path)
     except BaseException:
         try:
@@ -164,6 +169,11 @@ def _trim(path: Path) -> None:
         except OSError:
             pass
         raise
+
+
+def _kept(line: bytes) -> bool:
+    event = _parse(line.decode("utf-8", errors="replace"))
+    return event is not None and event.kind in KEEP_KINDS
 
 
 def _parse(line: str) -> Event | None:

@@ -31,18 +31,27 @@
    不开 JS 也能选；开了 JS 由 static/app.js 换成按钮 + 弹层。
    href 给了（里面的 __ID__ 换成账号号码）就是「跳到那个账号的页面」，没给就是改
    select 的值、交给所在的表单提交。 #}
-{% macro account_picker(accounts, selected, label_id, href='') -%}
+{# caption 给了（比如「当前账户」）：按钮是两行的大样子，上面一行是 caption，下面一行是邮箱前缀 · 号码 #}
+{% macro account_picker(accounts, selected, label_id, href='', caption='') -%}
   {%- set current = (accounts | selectattr('key', 'equalto', selected) | first) or (accounts | first) -%}
   {%- set active = accounts | selectattr('enabled') | list -%}
   {%- set off = accounts | rejectattr('enabled') | list -%}
   <div class="acct-picker" data-picker {% if href %}data-href="{{ href }}"{% endif %}>
     <select id="account" name="account" aria-labelledby="{{ label_id }}">{{ account_options(accounts, selected) }}</select>
     {% if current %}
-      <button class="acct-picker-btn" type="button" aria-haspopup="listbox" aria-expanded="false"
-              aria-labelledby="{{ label_id }} acct-picker-current" hidden>
+      <button class="acct-picker-btn{% if caption %} is-big{% endif %}" type="button" aria-haspopup="listbox"
+              aria-expanded="false" aria-labelledby="{{ label_id }} acct-picker-current" hidden>
         {{ avatar(current.avatar, small=true) }}
-        <span class="acct-picker-name" id="acct-picker-current">{{ current.email or current.account }}</span>
-        {% if current.email %}<span class="acct-picker-sub">{{ current.account }}</span>{% endif %}
+        {% if caption %}
+          <span class="acct-picker-text">
+            <span class="acct-picker-cap">{{ caption }}</span>
+            <span class="acct-picker-sub" id="acct-picker-current">
+              {%- if current.email %}{{ current.email.split('@')[0] }} · {% endif %}{{ current.account }}</span>
+          </span>
+        {% else %}
+          <span class="acct-picker-name" id="acct-picker-current">{{ current.email or current.account }}</span>
+          {% if current.email %}<span class="acct-picker-sub">{{ current.account }}</span>{% endif %}
+        {% endif %}
       </button>
       <div class="acct-picker-pop" hidden>
         <input class="acct-picker-search" type="search" placeholder="搜邮箱、ID 或上游" autocomplete="off"

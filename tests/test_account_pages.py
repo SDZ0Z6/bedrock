@@ -41,7 +41,8 @@ from .test_web import (  # noqa: F401  page_env / usage_states 是 autouse，imp
 )
 
 ALPHA, BETA, GAMMA = "111111111111", "222222222222", "333333333333"
-TABS = [("", "摘要"), ("cost", "成本"), ("usage", "用量"), ("quota", "配额"), ("estimate", "预估")]
+# 配额放最后（第一次要拉 45 秒左右，也最少看）
+TABS = [("", "摘要"), ("cost", "成本"), ("usage", "用量"), ("estimate", "预估"), ("timeline", "时间线"), ("quota", "配额")]
 STATIC = Path(config.__file__).parent / "static"
 
 
@@ -67,7 +68,7 @@ def fake_estimate(monkeypatch):
 
 @pytest.fixture
 def pages(logged_in, book, fake_costs, fake_cloudwatch, fake_service_quotas, fake_estimate):
-    """五个页签都能打开的客户端。"""
+    """六个页签都能打开的客户端。"""
     return logged_in
 
 
@@ -91,9 +92,9 @@ def spy(monkeypatch, module, name) -> list:
 
 
 def hero(html: str) -> str:
-    """页头左边：头像、号码、状态、邮箱、上游、启用日期、生命周期（不含右边切换账号的下拉）。"""
+    """标题下面的账号资料：头像、号码、状态、邮箱、上游、启用日期、客户、生命周期（换账号的下拉在标题那一排）。"""
     start = html.index('<header class="acct-hero">')
-    return html[start : html.index('<div class="acct-hero-actions">', start)]
+    return html[start : html.index("</header>", start)]
 
 
 def date_inputs(html: str) -> dict[str, str]:
@@ -112,6 +113,15 @@ def range_label(html: str) -> str:
 
 # ====================================================================== 页头和页签
 class TestHeader:
+    def test_the_page_has_a_title_like_the_other_pages(self, pages):
+        """和别的页面一样有标题「账号」；右边一排是「当前账户」、调整额度、编辑资料。"""
+        html = get(pages, f"/account/{ALPHA}/")
+        head = re.search(r'<header class="page-head acct-page-head">(.*?)</header>', html, re.S).group(1)
+        assert scrape(re.search(r"<h1>(.*?)</h1>", head).group(1)) == "账号"
+        actions = head[head.index('class="acct-actions"'):]
+        assert actions.index("当前账户") < actions.index("调整额度") < actions.index("编辑资料")
+        assert html.count("<h1") == 1                       # 邮箱那一行是 h2
+
     @pytest.mark.parametrize("tab, label", TABS)
     def test_header_says_whose_page_this_is(self, pages, tab, label):
         html = get(pages, f"/account/{BETA}/{tab}")
@@ -126,7 +136,7 @@ class TestHeader:
         assert re.search(r'<nav class="crumbs"[^>]*>\s*<a href="/">概览</a>', html)
 
     @pytest.mark.parametrize("tab, label", TABS)
-    def test_five_tabs_and_the_current_one(self, pages, tab, label):
+    def test_six_tabs_and_the_current_one(self, pages, tab, label):
         html = get(pages, f"/account/{ALPHA}/{tab}")
         nav = re.search(r'<nav class="acct-tabs"[^>]*>(.*?)</nav>', html, re.S).group(1)
         links = re.findall(r'<a class="acct-tab[^"]*" href="([^"]+)"\s*(aria-current="page")?[^>]*>(.*?)</a>', nav, re.S)
@@ -149,21 +159,29 @@ class TestHeader:
     def test_the_email_is_the_title_and_the_number_comes_next(self, pages):
         """主行是邮箱（号码一眼认不出是谁），号码在下面那行的最前面。"""
         html = hero(get(pages, f"/account/{BETA}/"))
-        assert scrape(re.search(r"<h1[^>]*>(.*?)</h1>", html, re.S).group(1)) == "beta@example.com"
+        assert scrape(re.search(r'<h2 class="acct-hero-name[^"]*">(.*?)</h2>', html, re.S).group(1)) == "beta@example.com"
         sub = scrape(re.search(r'<p class="acct-hero-sub">(.*?)</p>', html, re.S).group(1))
-        assert sub.startswith(f"{BETA} · BETA ·")
+        assert sub.startswith(f"{BETA} · 上游 BETA ·")
+
+    def test_header_is_two_lines_who_it_is_and_whose_it_is(self, pages, book):
+        """不挤在一排：第一行是账号自己的（号码、上游、启用多久），第二行是归谁、走到哪一步（客户、生命周期）。"""
+        lines = re.findall(r'<p class="acct-hero-sub">(.*?)</p>', hero(get(pages, f"/account/{BETA}/")), re.S)
+        assert len(lines) == 2
+        assert scrape(lines[0]).startswith(f"{BETA} · 上游 BETA · {RANGE_START.isoformat()} 启用")
+        assert scrape(lines[1]) == "客户 库存 · 生命周期 风控"
 
     def test_without_an_email_the_number_is_the_title(self, pages, book):
         rewrite(book, book_rows(EMAIL={BETA: ""}))
         html = hero(get(pages, f"/account/{BETA}/"))
-        assert scrape(re.search(r"<h1[^>]*>(.*?)</h1>", html, re.S).group(1)) == BETA
+        assert scrape(re.search(r'<h2 class="acct-hero-name[^"]*">(.*?)</h2>', html, re.S).group(1)) == BETA
         assert scrape(re.search(r'<p class="acct-hero-sub">(.*?)</p>', html, re.S).group(1)).startswith("未填账号邮箱")
 
     def test_the_picker_puts_the_email_first(self, pages):
         html = get(pages, f"/account/{ALPHA}/")
-        button = re.search(r'<button class="acct-picker-btn".*?</button>', html, re.S).group(0)
-        assert [scrape(text) for text in re.findall(r'<span class="acct-picker-(?:name|sub)"[^>]*>(.*?)</span>', button)] == [
-            "alpha@example.com", ALPHA,
+        button = re.search(r'<button class="acct-picker-btn[^"]*".*?</button>', html, re.S).group(0)
+        # 标题那一排的「当前账户」：上面一行是「当前账户」，下面一行是邮箱前缀 · 号码
+        assert [scrape(text) for text in re.findall(r'<span class="acct-picker-(?:cap|sub)"[^>]*>(.*?)</span>', button)] == [
+            "当前账户", f"alpha · {ALPHA}",
         ]
         options = re.findall(r'<span class="acct-opt-name[^"]*">(.*?)</span>\s*<span class="acct-opt-sub[^"]*">(.*?)</span>', html)
         assert options == [("alpha@example.com", ALPHA), ("beta@example.com", BETA), ("gamma@example.com", GAMMA)]
@@ -184,7 +202,12 @@ class TestHeader:
         assert (chip.group(1), scrape(chip.group(2))) == ("error", "异常")
 
     def test_edit_link_opens_this_row_in_account_management(self, pages):
-        assert f'href="/accounts/?edit={BETA}%233"' in get(pages, f"/account/{BETA}/")
+        html = get(pages, f"/account/{BETA}/")
+        # 「编辑资料」：账号管理打开这一行的修改弹窗，改完、取消都回到这一页
+        assert f'href="/accounts/?edit={BETA}%233&amp;back=/account/{BETA}/"' in html
+        # 和别的页面页头上的按钮一个样子：深色的主按钮，图标 + 字
+        assert re.search(r'<a class="btn btn-primary"[^>]*>\s*<svg class="icon"[^>]*>.*?</svg>编辑资料</a>', html, re.S)
+        assert re.search(r'<button class="btn" type="button" data-open-budget>\s*<svg class="icon"', html)
 
     def test_disabled_accounts_are_still_viewable(self, pages):
         html = get(pages, f"/account/{GAMMA}/cost")

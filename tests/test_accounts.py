@@ -284,7 +284,7 @@ def test_停用的账号在页面上仍然可见并可一键恢复(admin, ledger
     (attrs, cells), _ = table_rows(html)
     assert attrs["data-who"] == "acct-one@example.com"
     assert attrs["class"] == "row-off" and attrs["data-state"] == "off"
-    assert text(cells[3]) == "停用"
+    assert text(cells[4]) == "停用"
     # 恢复是安全可逆的，不再拦一道确认：它是操作格里的一个直接提交表单
     actions = cells[-1]
     assert 'action="/accounts/toggle"' in actions and 'name="enabled" value="1"' in actions
@@ -757,7 +757,7 @@ class TestStartDate:
         assert "启用日期" in column_heads(html)
         assert 'name="start_date"' in html
         (_, cells), _ = table_rows(html)
-        assert '<span class="tab-num">2026-08-01</span>' in cells[4]
+        assert '<span class="tab-num">2026-08-01</span>' in cells[5]
 
     def test_unset_is_called_out(self, admin, ledger):
         """没填不是「空着好看」——概览页会拿 CE 最早可查日兜底，要让人知道去填。"""
@@ -765,7 +765,7 @@ class TestStartDate:
         write_ledger(ledger, header=header, rows=rows)
         excel_source.clear_cache()
         (_, cells), _ = table_rows(page(admin))
-        assert text(cells[4]) == "未设置"
+        assert text(cells[5]) == "未设置"
 
     def test_can_be_changed(self, admin, ledger):
         response = _edit(admin, by_account("111111111111"), start_date="2026-05-06")
@@ -1271,7 +1271,7 @@ class TestTable:
 
     def test_columns(self, admin, ledger):
         heads = column_heads(page(admin))
-        assert heads == ["账号", "上游", "生命周期", "状态", "启用日期", "额度", "比率", "TG 告警", "邮件告警", "操作"]
+        assert heads == ["账号", "上游", "客户", "生命周期", "状态", "启用日期", "额度", "比率", "TG 告警", "邮件告警", "操作"]
         assert "AK" not in heads and "TAG" not in heads
 
     def test_every_row_has_a_cell_per_column(self, admin, ledger):
@@ -1286,7 +1286,7 @@ class TestTable:
         head = html[html.index("<thead>") : html.index("</thead>")]
         sortable = [text(name) for cls, name in re.findall(r'<th class="([^"]*)"[^>]*>(.*?)</th>', head, re.S)
                     if "sortable" in cls.split()]
-        assert sortable == ["账号", "上游", "状态", "启用日期", "额度"]
+        assert sortable == ["账号", "上游", "客户", "状态", "启用日期", "额度"]
 
     def test_rows_carry_what_the_filters_need(self, admin, ledger):
         _edit(admin, by_account("111111111111"), tg_chat_ids=self.CHAT, lifecycle=["正常", "风控"])
@@ -1308,7 +1308,7 @@ class TestTable:
 
     def test_the_state_cell_keeps_the_masked_ak_in_its_title(self, admin, ledger):
         (_, cells), _ = table_rows(page(admin))
-        state = cells[3]
+        state = cells[4]
         assert text(state) == "启用"
         assert 'title="AK AKIAFAKE…0000（只读，要换请停用后新建）"' in state
         assert "缺凭证" not in state
@@ -1318,37 +1318,39 @@ class TestTable:
         rows[1][LEDGER_HEADER.index("AK")] = rows[1][LEDGER_HEADER.index("SK")] = None
         rewrite_ledger(ledger, rows=rows, EMAIL=[EMAILS["111111111111"], EMAILS["222222222222"]])
         _, (_, cells) = table_rows(page(admin))
-        assert text(cells[3]) == "启用 缺凭证"
-        assert "title=\"AK " not in cells[3]
+        assert text(cells[4]) == "启用 缺凭证"
+        assert "title=\"AK " not in cells[4]
 
     def test_the_ratio_cell_keeps_the_tag_in_its_title(self, admin, ledger):
         (_, cells), _ = table_rows(page(admin))
-        ratio_cell = cells[6]
+        ratio_cell = cells[7]
         assert text(ratio_cell) == "1 / 1.05"
         assert "TAG 比率 1 · UNTAG 比率 1.05" in ratio_cell and "标签：map-migrated=migALPHA" in ratio_cell
 
     def test_budget_and_partner(self, admin, ledger):
         (_, cells), _ = table_rows(page(admin))
         assert text(cells[1]) == "ALPHA"
-        assert text(cells[5]) == "$500,000.00"
+        assert text(cells[6]) == "$500,000.00"
 
     def test_the_lifecycle_cell(self, admin, ledger):
         _edit(admin, by_account("111111111111"), lifecycle=["正常", "风控"])
         (_, first), (_, second) = table_rows(page(admin))
-        assert text(first[2]) == "正常 风控"
-        assert first[2].count('class="life-tag"') == 2
-        assert text(second[2]) == "未标记"
+        assert text(first[3]) == "正常 风控"
+        assert first[3].count('class="life-tag"') == 2
+        assert text(second[3]) == "未标记"
         for cells, number in ((first, "111111111111"), (second, "222222222222")):
-            assert "data-life-edit" in cells[2]                  # 铅笔：打开整页共用的那个小弹层
-            assert f'aria-label="改 {EMAILS[number]} 的生命周期"' in cells[2]
+            assert "data-life-edit" in cells[3]                  # 铅笔：打开整页共用的那个小弹层
+            assert f'aria-label="改 {EMAILS[number]} 的生命周期"' in cells[3]
+        assert text(first[2]) == "库存"                          # 还没分给客户
 
     def test_toolbar(self, admin, ledger):
         html = page(admin)
         tools = html[html.index('id="acct-tools"') : html.index('class="table-tools tools-life"')]
-        assert re.findall(r'data-filter="(\w+)"', tools) == ["q", "partner", "state", "alert"]
+        assert re.findall(r'data-filter="(\w+)"', tools) == ["q", "partner", "customer", "state", "alert"]
         assert 'type="search"' in tools
         assert re.findall(r'<option value="([^"]*)"', tools) == [
             "", "ALPHA", "BETA",            # 上游：台账里有的，排好序
+            "", "__stock__",                # 客户：库存 + 每个客户（这里还没有客户）
             "", "on", "off",                # 状态
             "", "tg", "mail", "none",       # 告警
         ]
