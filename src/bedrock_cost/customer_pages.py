@@ -234,7 +234,7 @@ def detail(cid: str, **extra):
     stamps, per_account = view.daily(30)
     names = {h.number: h.account.label for h in view.holdings}
     trend = _spend_chart(per_account, stamps, names, height=230, width=760)
-    runway = chart.render_runway(view.balance_history(21), view.avg7, fmt=money, axis=customers.short_money)
+    runway = chart.render_runway(view.balance_history(21), view.burn, fmt=money, axis=customers.short_money)
 
     by_number = {a.account: a for a in accounts}
     timeline = _timeline_payload(view, by_number)

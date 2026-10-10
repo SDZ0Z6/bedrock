@@ -77,7 +77,8 @@
               {{ cust_avatar(view.customer, 30) }}
               <span class="rank-name"><a href="{{ url_for('customers.detail', cid=view.customer.id) }}"
                 data-loading="正在读这个客户">{{ view.customer.name }}</a></span>
-              <span class="rank-val {% if view.days_left < 14 %}tone-danger{% endif %}">约 {{ view.days_left | int }} 天</span>
+              <span class="rank-val {% if view.days_left < 14 %}tone-danger{% endif %}">
+                {%- if view.long_runway %}一年以上{% else %}约 {{ view.days_left | int }} 天{% endif %}</span>
               <span class="rank-sub">
                 <span>余额 {{ view.balance | money0 }} · 日均 {{ view.avg7 | money0 }}</span>
                 <span class="meter tone-{{ view.level }}" aria-hidden="true"><i style="width: {{ [view.usage_pct or 0, 100] | min }}%; --delay: {{ 300 + loop.index0 * 120 }}ms"></i></span>
