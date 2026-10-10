@@ -531,7 +531,10 @@ def timeline(number: str):
             who = {"number": item.customer, "label": item.customer, "av": {"text": "?", "css": "av-7"}}
         text = _other_account(item, account, by_number)
         entry = customers.item_payload(item)
-        entry.update(text=text, who=who, none="" if who else "库存", keys=[])
+        # editable：点开能在这里改日期、删掉（「记一笔」那几类，和在库存里时记的）
+        entry.update(text=text, who=who, none="" if who else "库存", keys=[],
+                     editable=not item.auto and item.ident.isdigit()
+                     and excel_source.account_page_editable(item.kind, item.customer))
         payload.append(entry)
         rows.append(SimpleNamespace(item=item, text=text, owner=owner, cid=item.customer))
     rows.reverse()       # 表格最近的在上面
@@ -548,7 +551,6 @@ def timeline(number: str):
         # 「记一笔」：和客户页一样的几类；「标记风控」只在还没打风控、也没结算的时候能选
         note_kinds=[(kind, customers.EVENT_TYPES[kind][0]) for kind in customers.NOTE_KINDS],
         markable=excel_source.TAG_RISK not in account.lifecycle and not (account.customer and account.settled),
-        editable_kinds=list(excel_source.NOTE_TYPES),
         owner=owner,
         today=today,
     )

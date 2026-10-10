@@ -297,7 +297,8 @@ def test_账号页_连着钱和阶段的不在这里改(admin, fake_costs):
     [assign] = events("assign")
     post(admin, f"/account/{ALPHA_NO}/events/change", id=str(assign.id), action="delete")
     assert not events("assign")[0].deleted
-    assert 'data-editable-kinds="note rampup stop resume"' in tab(admin, ALPHA_NO)
+    [card] = [item for item in items(tab(admin, ALPHA_NO)) if item["kind"] == "assign"]
+    assert card["editable"] is False
 
 
 def test_账号页_别的账号的那一条不让改(admin, fake_costs):
