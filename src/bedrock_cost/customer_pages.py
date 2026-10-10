@@ -273,7 +273,9 @@ def detail(cid: str, **extra):
         holdings_data=holdings_data,
         currency=config.CURRENCY_SYMBOL,
         reasons=REPLACE_REASONS,
-        manual_kinds=[(kind, customers.EVENT_TYPES[kind][0]) for kind in customers.MANUAL_KINDS],
+        manual_kinds=[(kind, customers.EVENT_TYPES[kind][0]) for kind in customers.NOTE_KINDS],
+        stage_names=customers.STAGE_SHORT,
+        stage_rank=customers.TABLE_ORDER,
         today=today,
         toasts=_toasts([view]),
         form=extra.pop("form", None),
@@ -407,22 +409,34 @@ def risk(cid: str):
     if holding is None:
         flash_result("没有改动", text="这个账号已经不是这个客户的了，刷新页面再试。", tone="error")
         return _back(cid)
+    if not clear:
+        return _mark_risk(cid, holding, _when(request.form.get("date"), today), request.form.get("note"))
     try:
-        if clear:
-            note = excel_source.clear_risk(cid, key, today, actor=_actor())
-        else:
-            note = excel_source.mark_risk(cid, key, _when(request.form.get("date"), today), actor=_actor(),
-                                          spent=holding.spent if holding.has_numbers else None,
-                                          note=(request.form.get("note") or "").strip()[:200])
+        note = excel_source.clear_risk(cid, key, today, actor=_actor())
     except ExcelSourceError as exc:
         flash_result("没有改动", _who(holding.account), str(exc), tone="error")
         return _back(cid)
     if not note:
         flash_result("没有改动", _who(holding.account), "本来就是这样。", tone="info")
-    elif clear:
-        flash_result("已取消风控", _who(holding.account), "回到使用中，额度重新算进余额。")
     else:
-        flash_result("已标记风控", _who(holding.account), "从今天起不算进余额，记得替换账号。")
+        flash_result("已取消风控", _who(holding.account), "回到使用中，额度重新算进余额。")
+    return _back(cid)
+
+
+def _mark_risk(cid: str, holding, when: date, note: str | None):
+    """标记风控（名下账号的「更多」、记一笔选「标记风控」都走这里）：生命周期换成风控，从这天起不算进余额。"""
+    try:
+        changed = excel_source.mark_risk(cid, holding.key, when, actor=_actor(),
+                                         spent=holding.spent if holding.has_numbers else None,
+                                         note=(note or "").strip()[:200])
+    except ExcelSourceError as exc:
+        flash_result("没有改动", _who(holding.account), str(exc), tone="error")
+        return _back(cid)
+    if not changed:
+        flash_result("没有改动", _who(holding.account), "这个账号本来就是风控。", tone="info")
+    else:
+        since = "今天" if when == date.today() else when.isoformat()
+        flash_result("已标记风控", _who(holding.account), f"从{since}起不算进余额，记得替换账号。")
     return _back(cid)
 
 
@@ -517,7 +531,7 @@ def unassign(cid: str):
 @csrf_protect
 def add_event(cid: str):
     kind = request.form.get("kind") or "note"
-    if kind not in customers.MANUAL_KINDS:
+    if kind not in customers.NOTE_KINDS:
         kind = "note"
     note = (request.form.get("note") or "").strip()
     number = (request.form.get("account") or "").strip()
@@ -528,6 +542,17 @@ def add_event(cid: str):
     if len(note) > 200:
         flash_result("没有记下来", text="说明最多 200 个字。", tone="error")
         return _back(cid)
+    if kind == "risk":
+        # 和名下账号里的「标记风控」一样：要选账号，生命周期跟着改
+        if not number:
+            flash_result("没有记下来", text="标记风控要选是哪个账号。", tone="error")
+            return _back(cid)
+        _, view, _, fatal = _detail_context(cid)
+        holding = next((h for h in view.holdings if h.number == number), None) if view else None
+        if holding is None:
+            flash_result("没有记下来", text="这个账号不在这个客户名下，刷新页面再选。", tone="error")
+            return _back(cid)
+        return _mark_risk(cid, holding, _when(request.form.get("date"), today), note)
     accounts, _, _, _ = _ledger()
     if number and not any(a.account == number and a.customer == cid for a in accounts):
         flash_result("没有记下来", text="这个账号不在这个客户名下，刷新页面再选。", tone="error")

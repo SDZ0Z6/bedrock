@@ -31,29 +31,31 @@
     {%- endif %}<span>{{ account.label }}</span>
   </nav>
 
-  {# 页头：和别的页面一样，左边是标题；右边是换账号（「当前账户」）、调整额度、编辑资料 #}
+  {# 页头：和别的页面一样，左边是标题，右边是这一页的按钮。
+     调整额度：就在这一页改（时间线上记一笔）；编辑资料：去账号管理打开这个账号的「修改」弹窗，改完、取消都回来。
+     按钮和别的页面页头上的一个样子（账号管理的「生命周期标签」「新增账号」）：图标 + 字，深色的是主按钮 #}
   <header class="page-head acct-page-head">
     <div>
       <h1>账号</h1>
       <p class="page-sub">一个账号一页：消费、用量、预估、时间线和配额。网址里就是号码，能收藏、发给别人</p>
     </div>
-    <div class="acct-actions">
-      {# 切换账号：跳到另一个账号的同一个页签。不开 JS 时是个普通的下拉 + 提交 #}
-      <form method="get" action="{{ url_for('account.switch') }}">
-        <input type="hidden" name="tab" value="{{ tab }}">
-        <span class="sr-only" id="switch-label">切换账号</span>
-        {% for key, name, endpoint, hint in TABS if key == tab %}
-          {{ account_picker(accounts, account.key, 'switch-label', href=url_for(endpoint, number='__ID__'), caption='当前账户') }}
-        {% endfor %}
-        <noscript><button class="btn btn-sm" type="submit">切换</button></noscript>
-      </form>
-      {# 调整额度：就在这一页改（时间线上记一笔）；编辑资料：去账号管理打开这个账号的「修改」弹窗，改完、取消都回来。
-         按钮和别的页面页头上的一个样子（账号管理的「生命周期标签」「新增账号」）：图标 + 字，深色的是主按钮 #}
+    <div class="page-actions">
       <button class="btn" type="button" data-open-budget>{{ cicon('budget') }}调整额度</button>
       <a class="btn btn-primary" href="{{ url_for('accounts.index', edit=account.key, back=here) }}"
          data-loading="正在读台账">{{ cicon('pencil') }}编辑资料</a>
     </div>
   </header>
+
+  {# 切换账号（「当前账户」）：标题下面，跳到另一个账号的同一个页签。不开 JS 时是个普通的下拉 + 提交 #}
+  <form class="acct-switch" method="get" action="{{ url_for('account.switch') }}">
+    <input type="hidden" name="tab" value="{{ tab }}">
+    <span class="sr-only" id="switch-label">切换账号</span>
+    {% for key, name, endpoint, hint in TABS if key == tab %}
+      {{ account_picker(accounts, account.key, 'switch-label', href=url_for(endpoint, number='__ID__'), caption='当前账户',
+                        colors=lifecycle_colors) }}
+    {% endfor %}
+    <noscript><button class="btn btn-sm" type="submit">切换</button></noscript>
+  </form>
 
   <header class="acct-hero">
     {{ avatar(account.avatar, large=true) }}

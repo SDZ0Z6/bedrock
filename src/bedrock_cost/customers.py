@@ -35,6 +35,7 @@ from .dates import cumulative_range, parse_date
 from .excel_source import (
     CUSTOMER_AVATARS,
     CUSTOMER_STATUSES,
+    NOTE_TYPES,
     TAG_RISK,
     TAG_SETTLE,
     Account,
@@ -254,6 +255,10 @@ STAGES = {
     "settled": ("已结算", "none"),
 }
 STAGE_ORDER = {"risk": 0, "pending": 1, "use": 2, "settled": 3}
+# 客户页「名下账号」表格：使用中的在上面（STAGE_ORDER 是别处用的：替换弹窗默认选中风控的那个）
+TABLE_ORDER = {"use": 0, "risk": 1, "pending": 2, "settled": 3}
+# 表格上面按阶段筛选的签
+STAGE_SHORT = {"use": "使用中", "risk": "风控", "pending": "待结算", "settled": "已结算"}
 
 
 def stage_of(account: Account, spent: float | None = None) -> str:
@@ -430,7 +435,10 @@ EVENT_TYPES = {
 }
 CATEGORIES = [("acct", "账号"), ("use", "用量"), ("risk", "风控"), ("money", "结算、额度"), ("misc", "其他")]
 # 「记一笔」能记的几类
-MANUAL_KINDS = ("note", "rampup", "stop", "resume")
+MANUAL_KINDS = NOTE_TYPES
+# 「记一笔」弹窗里的类型：上面几类只是记下来；「标记风控」和名下账号里的「标记风控」一样，生命周期换成风控、
+# 从这天起不算进余额（所以一定要选账号）
+NOTE_KINDS = MANUAL_KINDS + ("risk",)
 # 「还能用几天」：日均不到半分钱就当最近没有消费；超过一年的不写具体天数和日期。账号刚风控、只剩零星
 # 几分钱的时候，余额 ÷ 日均是天文数字，加到今天上连日期都放不下（线上出过 OverflowError）
 MIN_DAILY = 0.005
@@ -659,6 +667,17 @@ class FeedItem:
 
 # ---------------------------------------------------------------- 一个客户
 @dataclass
+class MonthLine:
+    """对账单「按月」点开一个月以后的一行：一个账号这个月的进出。"""
+    number: str
+    added: float = 0.0
+    delta: float = 0.0
+    used: float = 0.0
+    out: float = 0.0
+    why: str = ""
+
+
+@dataclass
 class MonthRow:
     month: str                  # 2026-09
     start: float = 0.0
@@ -671,6 +690,10 @@ class MonthRow:
     out_accounts: list = field(default_factory=list)        # [(号码, 金额, 原因)]
     end: float = 0.0
     current: bool = False
+    lines: dict = field(default_factory=dict)               # 号码 -> MonthLine，按「名下账号」表格的顺序
+
+    def line(self, number: str) -> MonthLine:
+        return self.lines.setdefault(number, MonthLine(number))
 
     @property
     def label(self) -> str:
@@ -699,6 +722,11 @@ class CustomerView:
     @property
     def in_use(self) -> list[Holding]:
         return [h for h in self.holdings if h.stage == "use"]
+
+    @property
+    def listed(self) -> list[Holding]:
+        """「名下账号」表格的默认顺序：使用中、风控、待结算、已结算，同一档里先分配的在前。"""
+        return sorted(self.holdings, key=lambda h: (TABLE_ORDER[h.stage], h.joined or date.min))
 
     @property
     def counts(self) -> dict[str, int]:
@@ -844,15 +872,17 @@ class CustomerView:
     # ------------------------------------------------------------ 月度对账单
     @property
     def months(self) -> list[str]:
-        """对账单的月份：从开始合作（或者最早有账号、有消费的那个月）到这个月。"""
+        """对账单的月份：从最早分到账号、或者最早有消费的那个月，到这个月。
+
+        不从「开始合作」算：合作了几个月才分账号的，前面那几个月一行全是 0，只是占地方。
+        """
         firsts = [self.today]
-        if self.customer.since:
-            firsts.append(self.customer.since)
         for holding in self.holdings:
             if holding.joined:
                 firsts.append(holding.joined)
-            if holding.series.dates:
-                firsts.append(date.fromisoformat(holding.series.dates[0]))
+            spent = next((day for day, value in zip(holding.series.dates, holding.series.marked) if value), None)
+            if spent:
+                firsts.append(date.fromisoformat(spent))
         cursor = min(firsts).replace(day=1)
         out = []
         while cursor <= self.today:
@@ -881,23 +911,31 @@ class CustomerView:
             month = (day or self.today).isoformat()[:7]
             return min(max(month, first), last)
 
-        for holding in self.holdings:
+        for holding in self.listed:
             changes = sum(delta for _, delta in holding.budget_changes)
             initial = holding.account.budget - changes
             row = rows[bucket(holding.joined)]
             row.added += initial
             row.added_accounts.append((holding.number, initial))
+            row.line(holding.number).added += initial
             for when, delta in holding.budget_changes:
                 row = rows[bucket(when)]
                 row.delta += delta
                 row.delta_accounts.append((holding.number, delta))
+                row.line(holding.number).delta += delta
             for month, (marked, _) in self.monthly(holding).items():
-                rows[min(max(month, first), last)].used += marked
+                row = rows[min(max(month, first), last)]
+                row.used += marked
+                if abs(marked) >= 0.005:
+                    row.line(holding.number).used += marked
             if holding.stage != "use":
                 row = rows[bucket(holding.left)]
                 rest = holding.remaining
                 row.out += rest
                 row.out_accounts.append((holding.number, rest, holding.left_why))
+                line = row.line(holding.number)
+                line.out += rest
+                line.why = holding.left_why
         balance = 0.0
         for month in months:
             row = rows[month]

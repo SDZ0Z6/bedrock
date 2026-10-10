@@ -868,6 +868,8 @@ a.fchip:hover { text-decoration: none; }
 .fchip[aria-current="true"] .fchip-count { color: rgba(250, 249, 245, .72); }
 .fchip .tag-dot,
 .fchip .state-dot { margin-right: 1px; }
+/* 概览筛选条最上面的搜索框：和筛选签一样高、一样圆 */
+.overview-filters .search-pill { flex: 0 1 300px; height: 32px; border-color: var(--line); border-radius: 999px; }
 
 /* ------------------------------------------------------- 头像
  * 外面一圈白底细边，里面一个浅色圆：默认是邮箱首字母，台账里填了表情就用表情。
@@ -1254,7 +1256,8 @@ a.fchip:hover { text-decoration: none; }
 .acct-opt-name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .acct-opt-sub { font-size: 12.5px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
 .acct-opt-sub.tone-warn { color: var(--warn); }
-.acct-opt-side { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: 0 0 auto; font-size: 12px; color: var(--text-mute); }
+/* 右边是生命周期（风控、结算……），两个以上就折行 */
+.acct-opt-side { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; flex: 0 1 auto; max-width: 150px; font-size: 12px; color: var(--text-mute); }
 .acct-opt-check { width: 16px; height: 16px; flex: 0 0 16px; fill: none; stroke: var(--text); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; visibility: hidden; }
 .acct-opt[aria-selected="true"] .acct-opt-check { visibility: visible; }
 .acct-picker-group { padding: 10px 8px 4px; font-size: 12px; color: var(--text-mute); }
@@ -2094,9 +2097,10 @@ svg.is-zoomed.is-panning { cursor: grabbing; }
 .crumbs { display: flex; align-items: center; gap: 6px; margin: -6px 0 14px; font-size: 13px; color: var(--text-mute); }
 .crumbs a { color: var(--text-dim); }
 .crumbs a:hover { color: var(--text); }
-/* 标题那一排：右边是「当前账户」、调整额度、编辑资料（和标题垂直居中，不贴底） */
-.acct-page-head { align-items: center; margin-bottom: 18px; }
-.acct-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
+/* 标题那一排：右边是调整额度、编辑资料（和别的页面一样）；「当前账户」在标题下面单独一行 */
+.acct-page-head { margin-bottom: 16px; }
+/* flex：「当前账户」按自己的宽度（340），弹层也就是 440 宽，不铺满整行 */
+.acct-switch { display: flex; margin: 0 0 18px; }
 .acct-hero { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
 .avatar-lg { width: 60px; height: 60px; }
 .avatar-lg > span { width: 46px; height: 46px; font-size: 20px; }
@@ -2275,10 +2279,9 @@ svg.is-zoomed.is-panning { cursor: grabbing; }
   .metric-cards { grid-template-columns: minmax(0, 1fr); }
   .info-grid { grid-template-columns: minmax(0, 1fr); }
   .acct-hero-name { font-size: 24px; }
-  /* 「当前账户」本来 340 宽，手机上和两个按钮一起放不下：它占一整行，按钮换到下一行 */
-  .acct-actions { flex: 1 1 100%; }
-  .acct-actions > form { flex: 1 1 100%; min-width: 0; }
-  .acct-actions .acct-picker-btn { width: 100%; }
+  /* 「当前账户」本来 340 宽，手机上占满一整行 */
+  .acct-switch .acct-picker { flex: 1 1 auto; min-width: 0; }
+  .acct-switch .acct-picker-btn { width: 100%; }
 }
 
 /* ------------------------------------------------------- 运营看板
@@ -2567,14 +2570,24 @@ a.event-who:hover { color: var(--accent-dim); }
 .bal-sub { margin-top: 5px; font-size: 12px; color: var(--text-mute); }
 .bal-note { display: flex; flex-direction: column; gap: 4px; margin: auto 0 0; padding-top: 12px; border-top: 1px solid var(--line-soft);
             font-size: 12px; color: var(--text-mute); }
-.bal-note span { display: flex; align-items: center; gap: 6px; }
-.bal-note .mini-av { width: 14px; height: 14px; font-size: 8px; }
+/* 只管每一行（> span）：写成 .bal-note span 会连小头像（也是 span）一起变成 flex，字母就不居中了。
+   一行字太长会折行，头像对着第一行 */
+.bal-note > span { display: flex; align-items: flex-start; gap: 6px; line-height: 18px; }
+.bal-note .mini-av { width: 14px; height: 14px; margin-top: 2px; font-size: 8px; }
 
 /* ---- 详情：时间线（页面脚本按数据画：横向、可拖、可筛） */
 .tl-box { margin-bottom: 18px; }
 .tl-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
 .tl-tools .fchips { gap: 6px; }
 .tl-tools .fchip { height: 30px; padding: 0 12px; }
+/* 按账号筛的下拉（能搜邮箱、ID）：和旁边的筛选签一样高。
+   别叫 .tl-acct：那是卡片里「哪个账号」那一行，带着 overflow: hidden，会把弹层裁掉 */
+.tl-acct-filter { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* 最宽 320，手机上放不下就跟着缩，不把页面撑出横向滚动 */
+.tl-acct-filter .acct-picker { min-width: 0; }
+.tl-acct-filter .acct-picker-btn { width: 320px; max-width: 100%; height: 30px; padding-left: 10px; gap: 8px; }
+.tl-acct-filter .acct-picker-btn .mini-av[hidden] { display: none; }
+.tl-acct-filter .acct-picker-sub:empty { display: none; }
 .tl-scroll { position: relative; overflow-x: auto; overflow-y: hidden; margin: 0 -22px; padding: 0 22px; cursor: grab;
              scrollbar-width: thin; overscroll-behavior-x: contain;
              -webkit-mask-image: linear-gradient(to right, transparent 0, #000 26px, #000 calc(100% - 26px), transparent 100%);
@@ -2582,9 +2595,10 @@ a.event-who:hover { color: var(--accent-dim); }
 .tl-scroll.is-drag { cursor: grabbing; user-select: none; }
 .tl-track { position: relative; height: 344px; }
 .tl-axis { position: absolute; left: 0; right: 0; top: 171px; height: 2px; border-radius: 2px; background: var(--line); overflow: hidden; }
-/* 第一件事之前、今天之后：虚线（还没开始 / 还没发生）；中间是实线 */
+/* 第一件事之前、今天之后：虚线（还没开始 / 还没发生）；中间是实线。
+   一段虚线是一块 12px 的图，横着铺：动画里整块往右挪 12px，正好接上，看不出接缝 */
 .tl-axis.is-before,
-.tl-axis.is-after { border-radius: 0; background: repeating-linear-gradient(90deg, var(--line-strong) 0 6px, transparent 6px 12px); }
+.tl-axis.is-after { border-radius: 0; background: linear-gradient(90deg, var(--line-strong) 50%, transparent 0) 0 0 / 12px 100% repeat-x; }
 .tl-ev { position: absolute; top: 0; bottom: 0; width: 0; }
 .tl-ev.k-acct { --k: var(--k-acct); --kt: var(--kt-acct); }
 .tl-ev.k-up { --k: var(--k-up); --kt: var(--kt-up); }
@@ -2648,6 +2662,12 @@ a.event-who:hover { color: var(--accent-dim); }
   :root:not([data-sidebar="collapsed"]) .cust-cols { grid-template-columns: minmax(0, 1fr); }
 }
 .cust-cols .viz-card .table-scroll { margin: 0 -22px; border-top: 1px solid var(--line); }
+/* 名下账号上面的筛选：左边按阶段，右边搜邮箱或 ID */
+.holding-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 12px; margin: 0 0 14px; }
+.holding-tools .search-pill { flex: 0 1 220px; height: 32px; }
+.holding-table tr[hidden],
+.holding-table.is-sorted .group-row { display: none; }
+.holding-none td { padding-top: 22px; padding-bottom: 22px; color: var(--text-mute); text-align: center; }
 .holding-table td { vertical-align: middle; white-space: nowrap; }
 .holding-table th, .holding-table td { padding-left: 12px; padding-right: 12px; }
 .holding-table th:first-child, .holding-table td:first-child { padding-left: 22px; }
@@ -2709,6 +2729,23 @@ a.event-who:hover { color: var(--accent-dim); }
 .stmt .cur, .stmt .who { display: block; color: var(--text-mute); font-weight: 400; font-size: 11.5px; }
 .stmt .who { margin-top: 2px; }
 .stmt .end { font-weight: 600; }
+/* 按月：一个月一行，数下面一行小字「几个账号」；点月份展开每个账号的那几行 */
+.stmt .cnt { display: block; margin-top: 2px; color: var(--text-mute); font-weight: 400; font-size: 11.5px; }
+.stmt tr[hidden] { display: none; }
+.stmt-toggle { display: inline-flex; align-items: center; gap: 5px; margin: -2px 0 -2px -4px; padding: 2px 6px 2px 4px; border: 0;
+               border-radius: 6px; background: none; color: var(--text); font: inherit; font-weight: 500; cursor: pointer; }
+.stmt-toggle:hover { background: var(--hover-strong); }
+.stmt-toggle:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 1px; }
+.stmt-chev { width: 12px; height: 12px; flex: 0 0 12px; fill: none; stroke: var(--text-mute); stroke-width: 1.8; stroke-linecap: round;
+             stroke-linejoin: round; transition: transform .15s ease; }
+.stmt-toggle[aria-expanded="true"] .stmt-chev { transform: rotate(90deg); }
+/* 没有可展开的月份：字和能展开的对齐（让出箭头的位置） */
+.stmt-label { display: inline-block; padding-left: 17px; font-weight: 500; }
+.stmt-month .cur { padding-left: 17px; }
+.stmt-line td { padding-top: 8px; padding-bottom: 8px; background: var(--panel-2); font-size: 12.5px; color: var(--text-dim); }
+.stmt-line td:first-child { padding-left: 39px; }
+.stmt-who { display: inline-flex; align-items: center; gap: 7px; }
+.stmt-line .why { margin-left: 6px; padding: 1px 6px; border-radius: 5px; background: var(--panel-3); font-size: 11px; color: var(--text-mute); }
 .stmt-formula { margin: 0; padding: 12px 22px; border-top: 1px solid var(--line-soft); font-size: 12.5px; color: var(--text-mute); }
 .stmt-formula b { color: var(--text-dim); font-weight: 600; }
 .stmt-view[hidden] { display: none; }
@@ -2785,7 +2822,8 @@ a.event-who:hover { color: var(--accent-dim); }
   /* 时间线：从最近的那件开始，一张张浮上来 */
   /* 时间线从以前流到现在：先淡出左边的虚线，实线从左往右画过去，事件跟着一件件从左边滑进来，
      最后亮出「今天」和后面的虚线；实线上一直有一道光从以前流向现在 */
-  .tl-axis.is-before { animation: tl-fade .4s ease backwards; }
+  /* 两头的虚线也一直往右走（从以前流向以后），和实线上那道光一个方向 */
+  .tl-axis.is-before { animation: tl-fade .4s ease backwards, tl-march 1.2s linear .4s infinite; }
   .tl-axis.is-flow { transform-origin: 0 50%; animation: tl-draw 1s cubic-bezier(.4, 0, .2, 1) .1s backwards; }
   .tl-axis.is-flow::after {
     content: ""; position: absolute; inset: 0;
@@ -2793,13 +2831,14 @@ a.event-who:hover { color: var(--accent-dim); }
     background-size: 22% 100%;
     animation: tl-flow 3.6s linear 1.2s infinite backwards;
   }
-  .tl-axis.is-after { animation: tl-fade .5s ease 1s backwards; }
+  .tl-axis.is-after { animation: tl-fade .5s ease 1s backwards, tl-march 1.2s linear 1.5s infinite; }
   .tl-today { animation: tl-fade .4s ease .95s backwards; }
   .tl-ev { animation: tl-slide .55s cubic-bezier(.2, .7, .2, 1) backwards; animation-delay: calc(.15s + var(--i, 0) * 70ms); }
   @keyframes tl-draw { from { transform: scaleX(0); } }
   @keyframes tl-fade { from { opacity: 0; } }
   @keyframes tl-slide { from { opacity: 0; transform: translateX(-24px); } }
   @keyframes tl-flow { from { background-position: -30% 0; } to { background-position: 130% 0; } }
+  @keyframes tl-march { to { background-position: 12px 0; } }
   .tl-ev.is-new .tl-card { animation: tl-pop .5s cubic-bezier(.34, 1.56, .64, 1); }
   @keyframes tl-pop { from { transform: scale(.86); opacity: 0; } }
 }
