@@ -8,7 +8,7 @@ from pathlib import Path
 
 from flask import Flask
 
-from . import chart, config
+from . import chart, config, customers
 from .auth import csrf_token
 
 # 等待动效的素材。webm 优先——带 alpha 通道的版本只能是 webm（mp4 的 alpha
@@ -87,6 +87,16 @@ def register_filters(app: Flask) -> None:
     app.jinja_env.globals["heat_ramp"] = chart.HEAT_RAMP
     # 表单里的隐藏域直接调它，不用每个视图都往模板塞一遍
     app.jinja_env.globals["csrf_token"] = csrf_token
+    # 客户：头像（插画或首字母）、国旗、地区名、按编号找客户——客户页、概览卡片、账号页都要画
+    app.jinja_env.globals.update(
+        avatar_info=customers.avatar_info,
+        letter_of=customers.letter_of,
+        tone_of=customers.tone_of,
+        flag=customers.flag_svg,
+        region_name=customers.region_name,
+        customer_of=customers.customer_of,
+        short_money=customers.short_money,
+    )
 
     # 等待动效在 shell.html 里，每个页面都要用，所以走 context_processor
     # 而不是让每个视图各传一遍。弹窗上的时间同理

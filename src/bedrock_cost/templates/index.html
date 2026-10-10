@@ -23,7 +23,7 @@
 {# 出不了报表时没有筛选条（也没有报错弹窗），刷新只能放在页头 #}
 {% block page_actions %}{% if not report %}{{ refresh_button() }}{% endif %}{% endblock %}
 
-{# 卡片三列小标签前面的图标：上游（一栋楼）、启用日期（日历）、已启用（钟） #}
+{# 卡片小标签前面的图标：上游（一栋楼）、启用日期（日历）、已启用（钟）、客户（两个人） #}
 {% macro stat_icon(name) -%}
   <svg class="stat-icon" viewBox="0 0 16 16" aria-hidden="true">
   {%- if name == 'partner' -%}
@@ -33,6 +33,9 @@
     <rect x="2" y="3" width="12" height="11" rx="2"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3"/>
   {%- elif name == 'clock' -%}
     <circle cx="8" cy="8" r="6"/><path d="M8 4.8V8l2.2 1.4"/>
+  {%- elif name == 'customer' -%}
+    <circle cx="6" cy="5.4" r="2.4"/><path d="M1.8 13.4c0-2.4 1.9-4.1 4.2-4.1s4.2 1.7 4.2 4.1"/>
+    <path d="M10.6 3.3a2.3 2.3 0 1 1 .3 4.5M12.1 9.5c1.4.5 2.2 1.8 2.2 3.7"/>
   {%- endif -%}
   </svg>
 {%- endmacro %}
@@ -152,6 +155,21 @@
               未标记 <span class="fchip-count">{{ unlabeled }}</span></button>
           {% endif %}
         </div>
+        {% if customer_chips %}
+          <div class="fchips" role="group" aria-label="按客户筛选" data-group="customer">
+            <span class="fchips-label">客户</span>
+            <button class="fchip" type="button" data-value="" aria-pressed="true">
+              全部 <span class="fchip-count">{{ report.rows | length }}</span></button>
+            {% for item in customer_chips %}
+              <button class="fchip" type="button" data-value="{{ item.id }}" aria-pressed="false">{{ item.name }}
+                <span class="fchip-count">{{ item.count }}</span></button>
+            {% endfor %}
+            {% if stock_cards %}
+              <button class="fchip" type="button" data-value="__stock__" aria-pressed="false">库存
+                <span class="fchip-count">{{ stock_cards }}</span></button>
+            {% endif %}
+          </div>
+        {% endif %}
         <div class="fchips" role="group" aria-label="按状态筛选" data-group="state">
           <span class="fchips-label">状态</span>
           <button class="fchip" type="button" data-value="" aria-pressed="true">
@@ -171,15 +189,15 @@
   <section class="acct-grid" id="acct-grid" aria-label="账号">
     {# 顺序是服务端排好的：异常的在前，然后是用量中断的，同一档里使用率高的在前 #}
     {% for row in report.rows %}
-      <article class="acct-card" data-life="{{ row.lifecycle | join('|') }}" data-state="{{ row.state }}">
+      {% set owner = customer_of(row.customer) %}
+      <article class="acct-card" data-life="{{ row.lifecycle | join('|') }}" data-state="{{ row.state }}"
+               data-customer="{{ owner.id if owner else '__stock__' }}">
         <div class="acct-body">
         <div class="acct-top">
           {{ avatar(row.avatar) }}
-          {# 状态是名字上面一行带色点的小字；主行是邮箱（一眼认得出是谁），副行是号码。
-             没填邮箱时号码当主行。状态不占右上角，邮箱就能用满整行宽度 #}
+          {# 主行是邮箱（一眼认得出是谁），副行是号码，再下面一排是生命周期。没填邮箱时号码当主行。
+             右上角是「查看详情」，状态在右下角 #}
           <div class="acct-ident">
-            <p class="acct-status k-{{ row.state }}">
-              <i class="state-dot k-{{ row.state }}" aria-hidden="true"></i>{{ row.state_label }}</p>
             {% if row.email %}
               <p class="acct-name" title="{{ row.email }}">{{ row.email }}</p>
               <p class="acct-sub">{{ row.account }}</p>
@@ -187,10 +205,23 @@
               <p class="acct-name tab-num">{{ row.account }}</p>
               <p class="acct-sub tone-warn">未填账号邮箱</p>
             {% endif %}
+            {% if row.lifecycle %}
+              <div class="acct-life">
+                {% for name in row.lifecycle %}
+                  <span class="pill pill-sm"><i class="tag-dot" style="--tag: {{ lifecycle_colors.get(name, '#87867f') }}"></i>{{ name }}</span>
+                {% endfor %}
+              </div>
+            {% endif %}
           </div>
+          {# 卡片里唯一的链接，它的 ::after 盖住整张卡片：点哪里都是进这个账号的页面。
+             卡片窄的时候（一行三四张）只剩箭头 #}
+          <a class="btn btn-sm acct-go" href="{{ url_for('account.summary', number=row.account) }}"
+             data-loading="正在读这个账号" title="查看详情"
+             aria-label="查看 {{ row.email or row.account }}{% if row.email %}（{{ row.account }}）{% endif %} 的详情"
+             ><span class="acct-go-text">查看详情</span><svg class="acct-go-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 11 11 5M6.5 5H11v4.5"/></svg></a>
         </div>
 
-        {# 上游、启用日期、天数：三列，小字标签在上、数在下 #}
+        {# 上游、启用日期、天数：三列，小字标签在上、数在下；下面一排是客户，同一个样子 #}
         <dl class="acct-stats">
           <div class="acct-stat">
             <dt>{{ stat_icon('partner') }}上游</dt>
@@ -211,15 +242,20 @@
             <dt>{{ stat_icon('clock') }}已启用</dt>
             <dd>{% if row.start_date %}<span class="tab-num">{{ row.days_active }}</span> 天{% else %}—{% endif %}</dd>
           </div>
-        </dl>
-
-        {% if row.lifecycle %}
-          <div class="acct-pills">
-            {% for name in row.lifecycle %}
-              <span class="pill"><i class="tag-dot" style="--tag: {{ lifecycle_colors.get(name, '#87867f') }}"></i>{{ name }}</span>
-            {% endfor %}
+          {# 属于哪个客户：小头像 + 名字（卡片整张是一个链接，这里只是字）；还没分给客户的写「库存」 #}
+          <div class="acct-stat acct-stat-wide">
+            <dt>{{ stat_icon('customer') }}客户</dt>
+            {% if owner %}
+              {% set av = avatar_info(owner) %}
+              <dd class="acct-owner" title="{{ owner.name }}">
+                {%- if av.image %}<img class="cimg owner-av" src="{{ url_for('static', filename=av.image) }}" alt="" width="18" height="18">
+                {%- else %}<span class="cimg cletter owner-av lt-{{ av.tone }}" aria-hidden="true">{{ av.letter }}</span>{% endif -%}
+                <span>{{ owner.name }}</span></dd>
+            {% else %}
+              <dd class="tone-muted">库存</dd>
+            {% endif %}
           </div>
-        {% endif %}
+        </dl>
 
         <div class="acct-activity">
           <div class="acct-activity-text">
@@ -259,10 +295,8 @@
               <div class="acct-amount-sub">没有查到消费 · 额度 {{ row.budget | money }}</div>
             {% endif %}
           </div>
-          {# 卡片里唯一的链接，它的 ::after 盖住整张卡片：点哪里都是进这个账号的页面 #}
-          <a class="btn btn-dark acct-go" href="{{ url_for('account.summary', number=row.account) }}"
-             data-loading="正在读这个账号"
-             aria-label="查看 {{ row.email or row.account }}{% if row.email %}（{{ row.account }}）{% endif %} 的详情">查看详情</a>
+          {# 状态：活跃、已中断、无调用、异常（用量读不到、消费查询失败都算异常，见 dashboard.STATES） #}
+          <span class="acct-chip k-{{ row.state }}"><i class="state-dot k-{{ row.state }}" aria-hidden="true"></i>{{ row.state_label }}</span>
         </div>
       </article>
     {% endfor %}
@@ -287,7 +321,7 @@
   const empty = document.getElementById('acct-empty');
   if (!grid) return;
   const cards = [...grid.querySelectorAll('.acct-card')];
-  const picked = { life: new Set(), state: new Set() };
+  const picked = { life: new Set(), state: new Set(), customer: new Set() };
 
   // ---- 筛选：组内任选其一（或），组间同时满足（且）
   function apply() {
@@ -297,7 +331,8 @@
       const okLife = !picked.life.size || life.some(v => picked.life.has(v))
         || (picked.life.has('__none__') && !life.length);
       const okState = !picked.state.size || picked.state.has(card.dataset.state);
-      card.hidden = !(okLife && okState);
+      const okCustomer = !picked.customer.size || picked.customer.has(card.dataset.customer);
+      card.hidden = !(okLife && okState && okCustomer);
       if (!card.hidden) shown += 1;
     }
     empty.hidden = shown > 0;

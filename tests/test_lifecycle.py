@@ -586,7 +586,7 @@ class TestOnThePage:
         rewrite_ledger(ledger, **emails(LIFECYCLE=["老标签", None]))
         html = page(admin)
         (_, cells), _ = table_rows(html)
-        assert text(cells[2]) == "老标签" and f"--tag: {GRAY}" in cells[2]
+        assert text(cells[3]) == "老标签" and f"--tag: {GRAY}" in cells[3]
         assert filter_chips(html) == ["", "正常", "结算", "风控", "老标签", "__none__"]
         assert "老标签" not in listed_tags(html)                     # 清单里没有它，也就没有删除按钮
 

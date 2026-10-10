@@ -1,29 +1,64 @@
-{# 一个账号的页面：面包屑 + 页头（头像、邮箱、号码、状态、切换账号、编辑）+ 五个页签。
-   五个页签都继承这一页，页头在页签之间不变。各页签只填 tab_content。
+{# 一个账号的页面：面包屑 + 标题「账号」（右边是换账号、调整额度、编辑资料）+ 账号资料（头像、邮箱、号码、
+   状态、客户、生命周期）+ 六个页签。
+   六个页签都继承这一页，页头在页签之间不变。各页签只填 tab_content。
    看的是哪个账号写在网址里（/account/<号码>/…），能直接收藏或发给别人。 #}
 {% extends "shell.html" %}
 {% from "_macros.html" import avatar, account_picker %}
 {% block title %}{{ account.label }} · {{ tab_label }} · Bedrock 成本监控{% endblock %}
 
+{# 配额放最后：第一次要拉 45 秒左右，也最少看 #}
 {% set TABS = [
-     ('summary',  '摘要', 'account.summary',  '正在读这个账号'),
-     ('cost',     '成本', 'account.cost',     '正在查各维度消费'),
-     ('usage',    '用量', 'account.usage',    '正在拉 CloudWatch 指标'),
-     ('quota',    '配额', 'account.quota',    '正在拉四个区的配额'),
-     ('estimate', '预估', 'account.estimate', '正在拉用量和单价'),
+     ('summary',  '摘要',   'account.summary',  '正在读这个账号'),
+     ('cost',     '成本',   'account.cost',     '正在查各维度消费'),
+     ('usage',    '用量',   'account.usage',    '正在拉 CloudWatch 指标'),
+     ('estimate', '预估',   'account.estimate', '正在拉用量和单价'),
+     ('timeline', '时间线', 'account.timeline', '正在读这个账号的事'),
+     ('quota',    '配额',   'account.quota',    '正在拉四个区的配额'),
    ] %}
 
 {% block page_header %}
+  {# 分给了客户的账号：面包屑从客户走（客户 › 星河智能 › 账号）；库存里的从概览走 #}
+  {% set owner = customer_of(account.customer) %}
+  {# 这一页的网址（带着查询参数）：改完额度、在账号管理改完都回到这里 #}
+  {% set here = request.full_path.rstrip('?') %}
   <nav class="crumbs" aria-label="位置">
-    <a href="{{ url_for('main.index') }}">概览</a><span aria-hidden="true">›</span><span>{{ account.label }}</span>
+    {%- if owner %}
+      <a href="{{ url_for('customers.index') }}" data-loading="正在汇总客户的数">客户</a><span aria-hidden="true">›</span>
+      <a href="{{ url_for('customers.detail', cid=owner.id) }}" data-loading="正在读这个客户">{{ owner.name }}</a><span aria-hidden="true">›</span>
+    {%- else %}
+      <a href="{{ url_for('main.index') }}">概览</a><span aria-hidden="true">›</span>
+    {%- endif %}<span>{{ account.label }}</span>
   </nav>
+
+  {# 页头：和别的页面一样，左边是标题；右边是换账号（「当前账户」）、调整额度、编辑资料 #}
+  <header class="page-head acct-page-head">
+    <div>
+      <h1>账号</h1>
+      <p class="page-sub">一个账号一页：消费、用量、预估、时间线和配额。网址里就是号码，能收藏、发给别人</p>
+    </div>
+    <div class="acct-actions">
+      {# 切换账号：跳到另一个账号的同一个页签。不开 JS 时是个普通的下拉 + 提交 #}
+      <form method="get" action="{{ url_for('account.switch') }}">
+        <input type="hidden" name="tab" value="{{ tab }}">
+        <span class="sr-only" id="switch-label">切换账号</span>
+        {% for key, name, endpoint, hint in TABS if key == tab %}
+          {{ account_picker(accounts, account.key, 'switch-label', href=url_for(endpoint, number='__ID__'), caption='当前账户') }}
+        {% endfor %}
+        <noscript><button class="btn btn-sm" type="submit">切换</button></noscript>
+      </form>
+      {# 调整额度：就在这一页改（时间线上记一笔）；编辑资料：去账号管理打开这个账号的「修改」弹窗，改完、取消都回来 #}
+      <button class="btn btn-pill" type="button" data-open-budget>调整额度</button>
+      <a class="btn btn-pill btn-dark" href="{{ url_for('accounts.index', edit=account.key, back=here) }}"
+         data-loading="正在读台账">编辑资料</a>
+    </div>
+  </header>
 
   <header class="acct-hero">
     {{ avatar(account.avatar, large=true) }}
     <div class="acct-hero-main">
       <div class="acct-hero-title">
         {# 主行是邮箱（号码一眼认不出是谁），号码放在下面那行的最前面。没填邮箱时号码当主行 #}
-        <h1 {% if not account.email %}class="tab-num"{% endif %}>{{ account.email or account.account }}</h1>
+        <h2 class="acct-hero-name{% if not account.email %} tab-num{% endif %}">{{ account.email or account.account }}</h2>
         {% if activity %}
           {# 和概览卡片同一套：用量读不到、消费查询失败都算异常（见 dashboard.STATES） #}
           {% set state = 'error' if activity.kind == 'unknown' or query_failed else activity.kind %}
@@ -32,28 +67,33 @@
         {% endif %}
         {% if not account.enabled %}<span class="acct-chip">已停用</span>{% endif %}
       </div>
+      {# 两行，不挤在一排：第一行是账号自己的（号码、上游、启用多久），第二行是它归谁、走到哪一步（客户、生命周期） #}
       <p class="acct-hero-sub">
         {%- if account.email %}<span class="tab-num">{{ account.account }}</span>{% else %}<span class="tone-warn">未填账号邮箱</span>{% endif %}
-        <span class="dot-sep" aria-hidden="true">·</span><span>{{ account.partner }}</span>
+        <span class="dot-sep" aria-hidden="true">·</span><span class="hero-pair"><span class="hero-k">上游</span>{{ account.partner }}</span>
         <span class="dot-sep" aria-hidden="true">·</span>
         {%- if account.start_date %}<span title="启用日期 {{ account.start_date.isoformat() }}">{{ account.start_date.isoformat() }} 启用 · 第 {{ days_active }} 天</span>
         {%- else %}<span class="tone-warn">未填启用日期</span>{% endif %}
-        {% for name in account.lifecycle %}
-          <span class="pill pill-sm"><i class="tag-dot" style="--tag: {{ lifecycle_colors.get(name, '#87867f') }}"></i>{{ name }}</span>
-        {% endfor %}
       </p>
-    </div>
-    <div class="acct-hero-actions">
-      {# 切换账号：跳到另一个账号的同一个页签。不开 JS 时是个普通的下拉 + 提交 #}
-      <form method="get" action="{{ url_for('account.switch') }}">
-        <input type="hidden" name="tab" value="{{ tab }}">
-        <span class="sr-only" id="switch-label">切换账号</span>
-        {% for key, name, endpoint, hint in TABS if key == tab %}
-          {{ account_picker(accounts, account.key, 'switch-label', href=url_for(endpoint, number='__ID__')) }}
-        {% endfor %}
-        <noscript><button class="btn btn-sm" type="submit">切换</button></noscript>
-      </form>
-      <a class="btn" href="{{ url_for('accounts.index', edit=account.key) }}" data-loading="正在读台账">编辑</a>
+      <p class="acct-hero-sub">
+        <span class="hero-pair"><span class="hero-k">客户</span>
+        {%- if owner %}
+          <a class="owner-link" href="{{ url_for('customers.detail', cid=owner.id) }}" data-loading="正在读这个客户">
+            {%- set av = avatar_info(owner) -%}
+            {%- if av.image %}<img class="cimg owner-av" src="{{ url_for('static', filename=av.image) }}" alt="" width="18" height="18">
+            {%- else %}<span class="cimg cletter owner-av lt-{{ av.tone }}" aria-hidden="true">{{ av.letter }}</span>{% endif -%}
+            {{ owner.name }}</a>
+        {%- else %}
+          <span class="tone-muted" title="还没分给任何客户">库存</span>
+        {%- endif %}</span>
+        <span class="dot-sep" aria-hidden="true">·</span>
+        <span class="hero-pair"><span class="hero-k">生命周期</span>
+        {%- for name in account.lifecycle %}
+          <span class="pill pill-sm"><i class="tag-dot" style="--tag: {{ lifecycle_colors.get(name, '#87867f') }}"></i>{{ name }}</span>
+        {%- else %}
+          <span class="tone-muted">没打标签</span>
+        {%- endfor %}</span>
+      </p>
     </div>
   </header>
 
@@ -63,6 +103,68 @@
          {% if key == tab %}aria-current="page"{% endif %} data-loading="{{ hint }}">{{ name }}</a>
     {% endfor %}
   </nav>
+
+  {# 调整额度：填加多少（减写负数），和客户页的「调整额度」一样。改完回这一页 #}
+  <dialog class="modal modal-sm" id="dlg-acct-budget">
+    <form method="post" action="{{ url_for('accounts.budget') }}" data-loading="正在保存">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="key" value="{{ account.key }}">
+      <input type="hidden" name="next" value="{{ here }}">
+      <div class="modal-head">
+        <h2>调整额度</h2><span class="modal-sub">{{ account.email or account.account }}</span>
+        <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="field field-full"><label for="acct-budget-add">调整多少</label>
+            <input id="acct-budget-add" name="add" inputmode="decimal" required autocomplete="off"
+                   placeholder="比如 300000；减额度写负数" data-budget-add data-before="{{ account.budget }}"
+                   data-currency="{{ config.CURRENCY_SYMBOL }}">
+            <span class="form-hint" data-budget-preview>现在是 {{ account.budget | money0 }}。</span></div>
+          <div class="field field-full"><label for="acct-budget-note">说明（可选）</label>
+            <input id="acct-budget-note" name="note" maxlength="200" autocomplete="off" placeholder="比如：客户补了 30 万"></div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <span class="card-note">时间线上记一条「调整额度」{% if owner %}，{{ owner.name }}的客户页上也看得到{% endif %}</span>
+        <div class="modal-btns">
+          <button class="btn" type="button" data-close>取消</button>
+          <button class="btn btn-primary" type="submit">保存</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+  <script>
+  (function () {
+    const dialog = document.getElementById('dlg-acct-budget');
+    const input = dialog.querySelector('[data-budget-add]');
+    const note = dialog.querySelector('[data-budget-preview]');
+    const symbol = input.dataset.currency || '$';
+    const before = Number(input.dataset.before);
+    const money = function (value) {
+      return (value < 0 ? '-' : '') + symbol + Math.abs(value).toLocaleString('en-US', { maximumFractionDigits: 0 });
+    };
+    document.addEventListener('click', function (event) {
+      if (!(event.target instanceof Element)) return;
+      if (event.target.closest('[data-open-budget]')) {
+        input.value = '';
+        note.textContent = '现在是 ' + money(before) + '。';
+        dialog.showModal();
+        input.focus();
+      } else if (event.target.closest('#dlg-acct-budget [data-close]')) {
+        dialog.close();
+      }
+    });
+    dialog.addEventListener('click', function (event) { if (event.target === dialog) dialog.close(); });
+    // 边填边算改完是多少
+    input.addEventListener('input', function () {
+      const add = Number(input.value.replace(/[,\s]/g, '').replace(symbol, ''));
+      if (!input.value.trim() || isNaN(add)) { note.textContent = '现在是 ' + money(before) + '。'; return; }
+      const after = before + add;
+      note.textContent = after < 0 ? '减完额度变成负数了。' : money(before) + ' → ' + money(after) + '。';
+    });
+  })();
+  </script>
 {% endblock %}
 
 {% block content %}{% block tab_content %}{% endblock %}{% endblock %}

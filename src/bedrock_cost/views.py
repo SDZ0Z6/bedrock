@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from types import SimpleNamespace
 
 from flask import Blueprint, flash, redirect, render_template, request, session, url_for
 
@@ -23,7 +24,7 @@ from . import (
 )
 from .auth import login_required
 from .dates import earliest_queryable
-from .excel_source import ExcelSourceError, load_accounts, load_lifecycle
+from .excel_source import ExcelSourceError, load_accounts, load_customers, load_lifecycle
 from .report import build_report
 
 bp = Blueprint("main", __name__)
@@ -97,7 +98,15 @@ def index():
         slots = dashboard.account_slots(cards)
         trend = dashboard.cost_trend(accounts, today, slots, refresh=refresh)
         pct = report.total_usage_pct
+        # 筛选签上的「客户」：有账号的客户各一个签，没分给客户的算库存
+        owners = {c.id: c for c in load_customers()}
+        customer_chips = [
+            SimpleNamespace(id=cid, name=owners[cid].name, count=sum(1 for card in cards if card.customer == cid))
+            for cid in owners if any(card.customer == cid for card in cards)
+        ]
         context = dict(
+            customer_chips=customer_chips,
+            stock_cards=sum(1 for card in cards if card.customer not in owners),
             lifecycle_counts=dashboard.lifecycle_counts(cards, tags),
             state_counts=dashboard.state_counts(cards),
             lifecycle_colors={tag.name: tag.hex for tag in tags},

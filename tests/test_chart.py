@@ -232,8 +232,10 @@ class TestRender:
         long_report.series[0].raw = [1.0] * len(long_dates)
         long_report.series[0].marked = [1.0] * len(long_dates)
         rendered = chart.render_stacked_areas(long_report)
-        shown = rendered.svg.count('text-anchor="middle"')
-        assert shown < len(long_dates)
+        # 每个桶的字都画了（放大以后要用），没放大时只显示隔开的那些
+        assert rendered.svg.count('data-i="') == len(long_dates)
+        shown = len(re.findall(r'data-i="\d+">', rendered.svg))
+        assert 1 < shown < len(long_dates)
 
     def test_escapes_series_and_label_text(self):
         report = make_report([[100.0] * 17])
@@ -976,9 +978,19 @@ class TestBars:
     def test_x_labels_are_thinned(self):
         labels = [f"{i:02d}" for i in range(60)]
         rendered = chart.render_bars(labels, [bar("x", [1.0] * 60)])
-        shown = re.findall(r">(\d\d)</text>", group(rendered.svg, "chart-xaxis"))
+        axis = group(rendered.svg, "chart-xaxis")
+        # 每一格的字都画了（放大以后放得下就多显示几个），没放大时隔几格才显示一个
+        assert len(re.findall(r">(\d\d)</text>", axis)) == 60
+        shown = re.findall(r'data-i="\d+">(\d\d)</text>', axis)
         assert shown[0] == "00"
         assert 1 < len(shown) < 60
+
+    def test_bars_say_where_the_plot_is_for_zooming(self):
+        """放大、拖动（app.js）要知道绘图区的左右边界、几格、一格多宽、字之间至少隔多宽。"""
+        rendered = chart.render_bars([f"{i:02d}" for i in range(30)], [bar("x", [1.0] * 30)], width=560)
+        attrs = dict(re.findall(r'(data-zoom[\w-]*)="([^"]*)"', rendered.svg))
+        assert attrs["data-zoom"] == "48.0,554.0" and attrs["data-zoom-n"] == "30" and attrs["data-zoom-gap"] == "44"
+        assert float(attrs["data-zoom-band"]) == pytest.approx((554 - 48) / 30, abs=1e-3)
 
     def test_escapes_text(self):
         rendered = chart.render_bars(["<b>"], [bar("<i>", [1.0])])

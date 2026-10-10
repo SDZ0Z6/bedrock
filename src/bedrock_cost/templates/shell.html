@@ -7,6 +7,7 @@
    当前页还不知道要去哪，所以文案挂在链接上，由下面的宏按 key 查表带出去。 #}
 {% set LOADING_HINTS = {
      'overview':       ('正在查 Cost Explorer', ''),
+     'customers':      ('正在汇总客户的数', '第一次要查每个账号每天的消费'),
      'account':        ('正在读这个账号', ''),
      'ops':            ('正在汇总各账号的数', '第一次要查 Cost Explorer 和 CloudWatch，十几秒'),
      'cost_usage':     ('正在查各维度消费', ''),
@@ -14,6 +15,7 @@
      'model_quota':    ('正在拉四个区的配额', '首次约 45 秒，Service Quotas 限流；之后走缓存'),
      'cost_estimate':  ('正在拉用量和单价', ''),
      'accounts':       ('正在读台账', ''),
+     'settings':       ('正在读记录', ''),
    } %}
 
 {% macro nav_item(endpoint, key, label, icon) -%}
@@ -78,15 +80,21 @@
       </button>
     </div>
 
-    {# 四个入口：概览看全部账号的卡片；运营看板看收入、毛利、风险和用量；「账号」是某一个
-       账号的页面（摘要、成本、用量、配额、预估五个页签），点进去是上次看的那个账号；
-       账号管理改台账。 #}
+    {# 入口：概览看全部账号的卡片；客户看每个客户名下的账号、钱和时间线；运营看板看收入、毛利、
+       风险和用量；「账号」是某一个账号的页面（摘要、成本、用量、预估、时间线、配额六个页签），点进去是
+       上次看的那个账号；账号管理改台账。设置（操作日志、登录记录）在最下面。 #}
     <nav class="side-nav">
       {{ nav_item('main.index', 'overview', '概览',
          '<rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1"/>
           <rect x="9" y="1.5" width="5.5" height="5.5" rx="1"/>
           <rect x="1.5" y="9" width="5.5" height="5.5" rx="1"/>
           <rect x="9" y="9" width="5.5" height="5.5" rx="1"/>') }}
+      {{ nav_item('customers.index', 'customers', '客户',
+         '<circle cx="6" cy="5.4" r="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M1.6 13.6c0-2.5 2-4.3 4.4-4.3s4.4 1.8 4.4 4.3" fill="none" stroke="currentColor"
+                stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M10.6 3.2a2.4 2.4 0 1 1 .3 4.7M12.2 9.6c1.5.5 2.4 1.9 2.4 3.9" fill="none"
+                stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>') }}
       {# 运营看板先下线：.env 里 OPS_DASHBOARD=1 才有这个入口（见 config.py） #}
       {% if config.OPS_DASHBOARD %}
       {{ nav_item('ops.index', 'ops', '运营看板',
@@ -106,7 +114,12 @@
     </nav>
 
     <div class="side-foot">
-      <span class="who" title="{{ session.get('user') }}">{{ session.get('user') }}</span>
+      {# 设置：平台自己的记录（操作日志、登录记录），和上面看数的页面分开放 #}
+      {{ nav_item('settings.index', 'settings', '设置',
+         '<path d="M2 4.5h7.2M12.8 4.5H14M2 11.5h1.2M6.8 11.5H14" fill="none" stroke="currentColor" stroke-width="1.5"
+                stroke-linecap="round"/>
+          <circle cx="11" cy="4.5" r="1.8" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="5" cy="11.5" r="1.8" fill="none" stroke="currentColor" stroke-width="1.5"/>') }}
       {# 复用 nav-item：收起时和上面两个入口一样只剩图标 #}
       <a class="nav-item side-exit" href="{{ url_for('auth.logout') }}" title="退出登录">
         <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true">

@@ -188,6 +188,16 @@ class TestTrim:
         assert len(lines()) <= 5
         assert recent()[0].text == "7"
 
+    def test_risk_mails_survive_the_trim(self):
+        """风控类的 AWS 邮件告警再旧也留着：客户时间线上要一直看得到。"""
+        record("mail-suspended", "账号暂停", "old", when=T0)
+        record("mail-case", "工单", "old case", when=T0 + timedelta(minutes=1))
+        for n in range(8):
+            record("test", "t", str(n), when=T0 + timedelta(minutes=2 + n))
+        kinds = [e.kind for e in recent(limit=50)]
+        assert "mail-suspended" in kinds and "mail-case" not in kinds
+        assert len(lines()) <= 5 + 1
+
     def test_no_temp_file_left_behind(self):
         for n in range(7):
             record("test", "t", str(n), when=T0 + timedelta(minutes=n))
@@ -200,6 +210,12 @@ class TestConfig:
         root = Path(__file__).resolve().parents[1]
         assert "alert-events.jsonl" in (root / ".gitignore").read_text(encoding="utf-8").split()
         assert "ALERT_EVENTS_PATH=alert-events.jsonl" in (root / ".env.example").read_text(encoding="utf-8")
+
+    def test_customer_costs_stay_out_of_git(self):
+        """客户页存下来的每天消费也是运行时的文件，不进版本库。"""
+        root = Path(__file__).resolve().parents[1]
+        assert "customer-costs.json" in (root / ".gitignore").read_text(encoding="utf-8").split()
+        assert "CUSTOMER_COSTS_PATH=customer-costs.json" in (root / ".env.example").read_text(encoding="utf-8")
 
     def test_tests_never_touch_the_real_file(self, tmp_path):
         assert config.ALERT_EVENTS_PATH == tmp_path / "alert-events.jsonl"

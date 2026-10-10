@@ -1,0 +1,112 @@
+{# 设置：平台自己的记录。两个页签：操作日志（台账的每一次改动）、登录记录。只读本地文件，不调 AWS #}
+{% extends "shell.html" %}
+{% from "_customer_macros.html" import cicon %}
+{% block title %}设置 · {{ '操作日志' if tab == 'audit' else '登录记录' }} · Bedrock 成本监控{% endblock %}
+{% block page_title %}设置{% endblock %}
+{% block page_sub %}平台自己的记录：谁改过台账、谁登录过。只读本地文件，不调 AWS{% endblock %}
+{% block loading_label %}正在读记录{% endblock %}
+
+{% block content %}
+<nav class="acct-tabs" aria-label="设置">
+  {% for href, name, on, hint in tabs %}
+    <a class="acct-tab {% if on %}is-on{% endif %}" href="{{ href }}" {% if on %}aria-current="page"{% endif %}
+       data-loading="{{ hint }}">{{ name }}</a>
+  {% endfor %}
+</nav>
+
+{% if tab == 'audit' %}
+<!-- ------------------------------------------------ 操作日志 -->
+<section class="card" aria-labelledby="audit-title">
+  <div class="card-head">
+    <div class="card-title">
+      <h2 id="audit-title">操作日志</h2>
+      <span class="card-note">台账的每一次改动：谁、什么时候、改了什么（账号管理、客户页上的操作都在）。原件是台账旁边的
+        {{ audit_name }}，凭证的值从来不写进去</span>
+    </div>
+  </div>
+  <form class="log-tools" method="get" action="{{ url_for('settings.audit') }}" role="search">
+    <label class="search-pill">
+      {{ cicon('search', '') }}
+      <span class="sr-only">搜操作日志</span>
+      <input type="search" name="q" value="{{ query }}" placeholder="搜账号号码、客户编号、谁、改了什么" autocomplete="off">
+    </label>
+    {% if kind %}<input type="hidden" name="kind" value="{{ kind }}">{% endif %}
+    <div class="fchips" aria-label="按类别筛选">
+      <a class="fchip" href="{{ url_for('settings.audit', q=query or none) }}"
+         {% if not kind %}aria-current="true"{% endif %}>全部<span class="fchip-count">{{ total }}</span></a>
+      {% for name in kinds if counts[name] %}
+        <a class="fchip" href="{{ url_for('settings.audit', q=query or none, kind=name) }}"
+           {% if kind == name %}aria-current="true"{% endif %}>{{ name }}<span class="fchip-count">{{ counts[name] }}</span></a>
+      {% endfor %}
+    </div>
+  </form>
+  {% if lines %}
+    <div class="table-scroll">
+      <table class="log-table">
+        <thead><tr><th>时间</th><th>谁</th><th>类别</th><th>做了什么</th></tr></thead>
+        <tbody>
+          {% for line in lines %}
+            <tr>
+              <td class="tab-num log-when">{{ line.when }}</td>
+              <td class="log-who">{{ line.actor }}</td>
+              <td><span class="log-kind">{{ line.kind }}</span></td>
+              {# 说明里的 12 位号码点进去是那个账号的时间线 #}
+              <td class="log-note">
+                {%- for text, number in line.parts -%}
+                  {%- if number %}<a class="tab-num" href="{{ url_for('account.timeline', number=number) }}"
+                       title="{{ number }} 的时间线" data-loading="正在读这个账号的事">{{ text }}</a>
+                  {%- else %}{{ text }}{% endif -%}
+                {%- endfor -%}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="log-foot">
+      {%- if query or kind %}对得上的 {{ matched }} 条{% else %}共 {{ total }} 条{% endif %}
+      {%- if matched > lines | length %}，只列了最近的 {{ lines | length }} 条，更早的用搜索找{% endif %}
+      {%- if total >= tail_limit %}。只读日志最后 {{ tail_limit }} 行，再早的看原件{% endif %}</p>
+  {% else %}
+    <p class="empty">{% if query or kind %}没有对得上的记录。{% else %}还没有操作日志：在账号管理、客户页上改过台账才会有。{% endif %}</p>
+  {% endif %}
+</section>
+
+{% else %}
+<!-- ------------------------------------------------ 登录记录 -->
+<section class="login-stats" aria-label="近 30 天">
+  <div class="login-stat"><span>近 30 天登录成功</span><strong class="tab-num">{{ summary.ok }}</strong></div>
+  <div class="login-stat"><span>近 30 天登录失败</span>
+    <strong class="tab-num {% if summary.failed %}tone-danger{% endif %}">{{ summary.failed }}</strong></div>
+  <div class="login-stat"><span>近 30 天登录过的 IP</span><strong class="tab-num">{{ summary.ips }}</strong></div>
+</section>
+<section class="card" aria-labelledby="logins-title">
+  <div class="card-head">
+    <div class="card-title">
+      <h2 id="logins-title">登录记录</h2>
+      <span class="card-note">每次登录成功、失败、被锁定、退出，最近的在上面。不记密码；登录失败的那一行写着输进来的用户名</span>
+    </div>
+  </div>
+  {% if entries %}
+    <div class="table-scroll">
+      <table class="log-table">
+        <thead><tr><th>时间</th><th>结果</th><th>用户</th><th>IP</th><th>浏览器</th></tr></thead>
+        <tbody>
+          {% for entry in entries %}
+            <tr>
+              <td class="tab-num log-when">{{ entry.when.astimezone().strftime('%Y-%m-%d %H:%M:%S') }}</td>
+              <td><span class="login-kind k-{{ entry.tone }}"><i class="state-dot" aria-hidden="true"></i>{{ entry.label }}</span></td>
+              <td class="log-who {% if entry.failed %}tone-danger{% endif %}">{{ entry.user or '—' }}</td>
+              <td class="tab-num">{{ entry.ip or '—' }}{% if entry.ip and entry.ip == my_ip %}<span class="me-tag">你现在的 IP</span>{% endif %}</td>
+              <td class="log-agent" title="{{ entry.agent }}">{{ entry.browser }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="empty">还没有登录记录：下次登录起开始记。</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

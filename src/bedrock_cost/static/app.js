@@ -79,6 +79,29 @@
     for (const link of document.querySelectorAll('[data-refresh].is-busy')) link.classList.remove('is-busy');
   });
 
+  // ------------------------------------------------------------ 滚进屏幕才放进场动画
+  // 带 data-reveal 的卡片（客户页）：里面的进场动画先停在第一帧（CSS 暂停），卡片滚进屏幕时
+  // 加上 .in 再放；数字从 0 数上来也等到那时候。没有 IntersectionObserver 的浏览器直接放
+  const revealWaits = new Map();   // 卡片 -> 滚进来时要做的事
+  const revealIo = 'IntersectionObserver' in window ? new IntersectionObserver(function (entries) {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      entry.target.classList.add('in');
+      revealIo.unobserve(entry.target);
+      for (const run of revealWaits.get(entry.target) || []) run();
+      revealWaits.delete(entry.target);
+    }
+  }, { threshold: 0.12 }) : null;
+  for (const box of document.querySelectorAll('[data-reveal]')) {
+    if (revealIo) revealIo.observe(box); else box.classList.add('in');
+  }
+  function whenRevealed(el, run) {
+    const box = el.closest('[data-reveal]');
+    if (!box || box.classList.contains('in') || !revealIo) { run(); return; }
+    if (!revealWaits.has(box)) revealWaits.set(box, []);
+    revealWaits.get(box).push(run);
+  }
+
   // ------------------------------------------------------------ 数字从 0 数上来
   // 额度仪表中间的大数字和使用率，跟着弧一起动（同样 1.2 秒、同一条缓动）。只在系统没开
   // 「减弱动画」时做；最后一帧换回服务端写好的原文，格式一个字都不差
@@ -94,18 +117,20 @@
       const format = function (value) {
         return parts[1] + value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits }) + parts[4];
       };
-      const begin = performance.now() + 100;   // 和 CSS 里的 .1s 延迟对齐
-      const step = function (now) {
-        const t = Math.max(0, Math.min(1, (now - begin) / 1200));
-        if (t < 1) {
-          el.textContent = format(target * ease(t));
-          requestAnimationFrame(step);
-        } else {
-          el.textContent = final;
-        }
-      };
       el.textContent = format(0);
-      requestAnimationFrame(step);
+      whenRevealed(el, function () {
+        const begin = performance.now() + 100;   // 和 CSS 里的 .1s 延迟对齐
+        const step = function (now) {
+          const t = Math.max(0, Math.min(1, (now - begin) / 1200));
+          if (t < 1) {
+            el.textContent = format(target * ease(t));
+            requestAnimationFrame(step);
+          } else {
+            el.textContent = final;
+          }
+        };
+        requestAnimationFrame(step);
+      });
     }
   }
 
@@ -343,12 +368,14 @@
     const number = function (v) { return Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 }); };
     let current = -1;
 
+    // 放大了（见下面的「沿横轴放大、拖动」）：时间点的位置跟着换算
+    const zx = function (x) { return svg.zoomX ? svg.zoomX(x) : x; };
     const nearest = function (clientX) {
       const box = svg.getBoundingClientRect();
       const x = (clientX - box.left) * svg.viewBox.baseVal.width / (box.width || 1);
       let best = 0, gap = Infinity;
       data.x.forEach(function (value, i) {
-        const d = Math.abs(value - x);
+        const d = Math.abs(zx(value) - x);
         if (d < gap) { gap = d; best = i; }
       });
       return best;
@@ -356,7 +383,7 @@
 
     const show = function (index) {
       current = index;
-      const x = data.x[index];
+      const x = zx(data.x[index]);
       cross.setAttribute('transform', 'translate(' + x + ',0)');
       cross.style.opacity = '1';
       const rows = data.series.map(function (s) { return { name: s.name, color: s.color, value: s.v[index], y: s.y[index] }; });
@@ -459,6 +486,231 @@
       }
     });
   }
+
+  // ------------------------------------------------------------ 图：沿横轴放大、拖动
+  // 带时间轴的图（柱子、折线、面积、还能用几天）在 svg 上写了 data-zoom="左,右"（绘图区的横向范围，
+  // viewBox 单位，见 chart._zoom_attrs）。放大只拉横轴：纵轴、字的大小都不变，柱子变宽、线拉长，
+  // 横轴的字跟着挪，放得下就多显示几个。重新算的是每个图形的横坐标（不是整体缩放），所以线不会变粗、
+  // 圆点不会变扁。怎么用：鼠标划到图上滚滚轮，往上放大、往下缩小（以鼠标为中心；缩到全貌还往下滚、
+  // 放到最大还往上滚，就照常滚页面）；手机上双指捏合；放大以后按住拖、或者横着滑，左右看；双击回到全貌。
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const calm = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let zoomSeq = 0;
+
+  function mapPath(d, map) {
+    let isX = true;
+    // chart.py 画的路径只有绝对坐标的 M / L / Q / C / Z，数字两两一组（横、纵）
+    return d.replace(/[A-Za-z]|-?\d*\.?\d+(?:e[-+]?\d+)?/g, function (token) {
+      if (/^[A-Za-z]$/.test(token)) { isX = true; return token; }
+      const out = isX ? map(Number(token)).toFixed(2) : token;
+      isX = !isX;
+      return out;
+    });
+  }
+  function mapPoints(points, map) {
+    return points.replace(/(-?\d*\.?\d+),(-?\d*\.?\d+)/g, function (all, x, y) {
+      return map(Number(x)).toFixed(2) + ',' + y;
+    });
+  }
+
+  function zoomable(svg) {
+    const edges = svg.dataset.zoom.split(',').map(Number);
+    const x0 = edges[0], x1 = edges[1], span = x1 - x0;
+    if (!(span > 0)) return;
+    const count = Number(svg.dataset.zoomN) || 1;
+    const band = Number(svg.dataset.zoomBand) || 0;
+    const gap = Number(svg.dataset.zoomGap) || 0;
+    const kMax = Math.max(2, Math.min(24, count / 4));
+    const state = { k: 1, off: 0 };          // 放大倍数；往左拖过去多少（viewBox 单位，0 ~ span·(k−1)）
+    const map = function (x) { return x0 + (x - x0) * state.k - state.off; };
+    svg.zoomX = function (x) { return state.k === 1 ? x : map(x); };
+
+    // 记下每个要挪的图形原来的横坐标。纵轴和横线不动；折线图的准线、焦点由悬浮脚本按 zoomX 放
+    const grid = svg.querySelector('.chart-grid');
+    const items = [];
+    for (const el of svg.querySelectorAll('rect, path, polyline, polygon, circle, line, text')) {
+      if ((grid && grid.contains(el)) || el.closest('defs, .chart-cursor')) continue;
+      const tag = el.tagName.toLowerCase();
+      const item = { el: el, tag: tag };
+      if (tag === 'rect') item.attrs = ['x', 'width'];
+      else if (tag === 'path') item.attrs = ['d'];
+      else if (tag === 'polyline' || tag === 'polygon') item.attrs = ['points'];
+      else if (tag === 'circle') item.attrs = ['cx'];
+      else if (tag === 'line') item.attrs = ['x1', 'x2'];
+      else item.attrs = ['x', 'display'];
+      item.orig = item.attrs.map(function (name) { return el.getAttribute(name); });
+      item.axis = !!el.closest('.chart-xaxis');
+      item.ends = !!el.closest('.chart-endlabels');
+      item.index = el.dataset.i === undefined ? null : Number(el.dataset.i);
+      items.push(item);
+    }
+    // 画图的那几层放大时裁到绘图区里（纵轴、横轴的字不裁）
+    const layers = [...svg.children].filter(function (child) {
+      return !child.matches('defs, .chart-grid, .chart-xaxis, title, desc');
+    });
+    const clipId = 'zoom-clip-' + (++zoomSeq);
+    let defs = svg.querySelector('defs');
+    if (!defs) { defs = document.createElementNS(SVG_NS, 'defs'); svg.prepend(defs); }
+    const clip = document.createElementNS(SVG_NS, 'clipPath');
+    clip.id = clipId;
+    const clipRect = document.createElementNS(SVG_NS, 'rect');
+    clipRect.setAttribute('x', x0 - 1);
+    clipRect.setAttribute('y', 0);
+    clipRect.setAttribute('width', span + 2);
+    clipRect.setAttribute('height', svg.viewBox.baseVal.height);
+    clip.append(clipRect);
+    defs.append(clip);
+
+    function draw() {
+      const zoomed = state.k > 1.0001;
+      const stride = band > 0 && gap > 0 ? Math.max(1, Math.ceil(gap / (band * state.k))) : 0;
+      for (const it of items) {
+        const el = it.el;
+        if (!zoomed) {                       // 回到全貌：原样放回服务端画的
+          it.attrs.forEach(function (name, i) {
+            if (it.orig[i] === null) el.removeAttribute(name); else el.setAttribute(name, it.orig[i]);
+          });
+          if (it.tag === 'line') el.style.display = '';
+          continue;
+        }
+        if (it.tag === 'rect') {
+          el.setAttribute('x', map(Number(it.orig[0])).toFixed(2));
+          el.setAttribute('width', (Number(it.orig[1]) * state.k).toFixed(2));
+        } else if (it.tag === 'path') {
+          el.setAttribute('d', mapPath(it.orig[0] || '', map));
+        } else if (it.tag === 'polyline' || it.tag === 'polygon') {
+          el.setAttribute('points', mapPoints(it.orig[0] || '', map));
+        } else if (it.tag === 'circle') {
+          el.setAttribute('cx', map(Number(it.orig[0])).toFixed(2));
+        } else if (it.tag === 'line') {
+          const a = map(Number(it.orig[0])), b = map(Number(it.orig[1]));
+          el.setAttribute('x1', a.toFixed(2));
+          el.setAttribute('x2', b.toFixed(2));
+          if (it.axis) el.style.display = a < x0 - 0.5 || a > x1 + 0.5 ? 'none' : '';
+        } else {                             // 字：挪位置；横轴的出了绘图区就藏，放得下就多显示几个
+          const x = map(Number(it.orig[0]));
+          el.setAttribute('x', x.toFixed(2));
+          let show = it.orig[1] !== 'none';
+          if (it.index !== null && stride) show = it.index % stride === 0;
+          if (it.ends) show = false;           // 线尾直标的是全貌里的末值，放大了就不标
+          else if (it.axis) show = show && x >= x0 - 0.5 && x <= x1 + 0.5;
+          if (show) el.removeAttribute('display'); else el.setAttribute('display', 'none');
+        }
+      }
+      for (const layer of layers) {
+        if (zoomed) layer.setAttribute('clip-path', 'url(#' + clipId + ')'); else layer.removeAttribute('clip-path');
+      }
+      svg.classList.toggle('is-zoomed', zoomed);
+      // 正悬浮着的提示、折线图的准线跟不上了，先收起来
+      hideTip();
+      for (const el of svg.querySelectorAll('.chart-cross, .chart-focus')) el.style.opacity = '0';
+    }
+
+    let frame = 0;
+    function schedule() {
+      if (frame) return;
+      frame = requestAnimationFrame(function () { frame = 0; draw(); });
+    }
+    function clampOff() { state.off = Math.max(0, Math.min(span * (state.k - 1), state.off)); }
+    // 以 cx（viewBox 横坐标）为中心放大到 k：那一点在屏幕上不动
+    function zoomAround(k, cx) {
+      k = Math.max(1, Math.min(kMax, k));
+      const at = Math.max(x0, Math.min(x1, cx)) - x0;
+      const u = (at + state.off) / state.k;
+      state.off = u * k - at;
+      state.k = k;
+      clampOff();
+      schedule();
+    }
+    let tween = 0;
+    function zoomSmooth(k, cx) {
+      cancelAnimationFrame(tween);
+      if (calm) { zoomAround(k, cx); return; }
+      const from = state.k, start = performance.now();
+      const step = function (now) {
+        const t = Math.min(1, (now - start) / 180);
+        zoomAround(from + (k - from) * (1 - Math.pow(1 - t, 3)), cx);
+        if (t < 1) tween = requestAnimationFrame(step);
+      };
+      tween = requestAnimationFrame(step);
+    }
+    const unit = function () {                // 屏幕上 1 像素是 viewBox 里的多少
+      const box = svg.getBoundingClientRect();
+      return svg.viewBox.baseVal.width / (box.width || 1);
+    };
+    const toView = function (clientX) { return (clientX - svg.getBoundingClientRect().left) * unit(); };
+    const middle = function () { return x0 + span / 2; };
+
+    svg.addEventListener('dblclick', function (event) {
+      if (state.k > 1) { event.preventDefault(); zoomSmooth(1, middle()); }
+    });
+
+    // 滚轮：往上放大、往下缩小，以鼠标为中心（触控板捏合是带 Ctrl 的滚轮，一样）。缩到全貌还往下滚、
+    // 放到最大还往上滚，就不拦着，照常滚页面——不会卡在图上滚不动。放大以后横着滑（触控板、Shift + 滚轮）：左右看
+    svg.addEventListener('wheel', function (event) {
+      const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1;
+      const dx = event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX;
+      const dy = event.shiftKey ? 0 : event.deltaY;
+      if (Math.abs(dx) > Math.abs(dy)) {
+        if (state.k <= 1) return;
+        event.preventDefault();
+        state.off += dx * scale * unit();
+        clampOff();
+        schedule();
+        return;
+      }
+      if (!dy || (dy > 0 && state.k <= 1) || (dy < 0 && state.k >= kMax)) return;
+      event.preventDefault();
+      const speed = event.ctrlKey ? 0.01 : 0.0025;
+      zoomAround(state.k * Math.exp(-dy * scale * speed), toView(event.clientX));
+    }, { passive: false });
+
+    // 按住拖：放大以后左右看。两根手指：捏合放大缩小
+    const pointers = new Map();
+    let drag = null, pinch = null, moved = false;
+    svg.addEventListener('pointerdown', function (event) {
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+      pointers.set(event.pointerId, event.clientX);
+      if (pointers.size === 2) {
+        const xs = [...pointers.values()];
+        pinch = { dist: Math.abs(xs[0] - xs[1]) || 1, k: state.k };
+        drag = null;
+      } else if (state.k > 1) {
+        drag = { x: event.clientX, off: state.off };
+        moved = false;
+      }
+    });
+    window.addEventListener('pointermove', function (event) {
+      if (!pointers.has(event.pointerId)) return;
+      pointers.set(event.pointerId, event.clientX);
+      if (pinch && pointers.size === 2) {
+        const xs = [...pointers.values()];
+        zoomAround(pinch.k * (Math.abs(xs[0] - xs[1]) || 1) / pinch.dist, toView((xs[0] + xs[1]) / 2));
+        return;
+      }
+      if (!drag) return;
+      const dx = event.clientX - drag.x;
+      if (!moved && Math.abs(dx) < 4) return;
+      if (!moved) { moved = true; svg.classList.add('is-panning'); hideTip(); }
+      state.off = drag.off - dx * unit();
+      clampOff();
+      schedule();
+    });
+    const release = function (event) {
+      pointers.delete(event.pointerId);
+      if (pointers.size < 2) pinch = null;
+      if (!pointers.size) { drag = null; svg.classList.remove('is-panning'); }
+    };
+    window.addEventListener('pointerup', release);
+    window.addEventListener('pointercancel', release);
+    // 拖过的那一下不算点击
+    svg.addEventListener('click', function (event) {
+      if (moved) { event.preventDefault(); event.stopPropagation(); moved = false; }
+    }, true);
+    draw();
+  }
+
+  for (const svg of document.querySelectorAll('svg[data-zoom]')) zoomable(svg);
 
   // ---- 气泡：悬浮的那个放大、其余变淡，提示里写名字、数和占比；
   //      还可以按住拖着走：拖着的泡跟着鼠标，挤到别的泡就把它们推开，

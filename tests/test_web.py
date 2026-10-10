@@ -224,7 +224,8 @@ def ops_dashboard_off(monkeypatch):
 PROTECTED = [
     "/", "/account/", "/account/switch?account=111111111111",
     "/account/111111111111/", "/account/111111111111/cost", "/account/111111111111/usage",
-    "/account/111111111111/quota", "/account/111111111111/estimate",
+    "/account/111111111111/quota", "/account/111111111111/estimate", "/account/111111111111/timeline",
+    "/settings/", "/settings/audit", "/settings/logins",
     "/cost-usage", "/model-usage", "/model-quota", "/cost-estimate", "/cache/clear",
 ]
 
@@ -385,7 +386,8 @@ class TestShell:
         items = nav_items(logged_in.get(path).get_data(as_text=True))
         # 「账号」进的是最近看的那个账号，所以链接是 /account/ 而不是某个号码
         assert [(href, title) for href, title, _ in items] == [
-            ("/", "概览"), ("/account/", "账号"), ("/accounts/", "账号管理"),
+            ("/", "概览"), ("/customers/", "客户"), ("/account/", "账号"), ("/accounts/", "账号管理"),
+            ("/settings/", "设置"),     # 在侧边栏底下，和看数的页面分开放
         ]
         assert [title for _, title, on in items if on] == [current]
 
@@ -404,8 +406,9 @@ class TestShell:
 
     def test_logout_is_an_icon_link_not_a_text_button(self, logged_in, ledger, fake_costs):
         html = logged_in.get("/").get_data(as_text=True)
-        assert 'class="nav-item side-exit"' in html
-        assert "btn-sm" not in html
+        foot = re.search(r'<div class="side-foot">(.*?)</aside>', html, re.S).group(1)
+        assert 'class="nav-item side-exit"' in foot
+        assert "btn" not in foot
 
     def test_messages_live_in_the_top_right_stack(self, logged_in, ledger, fake_costs):
         """报错和操作结果都在右上角那一摞里：放在 <main> 外面，加载时不会跟着内容一起压暗；
@@ -574,7 +577,8 @@ class TestOverviewPage:
         assert set(found) == {"111111111111", "222222222222"}
         for number, card in found.items():
             assert re.findall(r'href="([^"]+)"', card) == [f"/account/{number}/"]
-            assert ">查看详情</a>" in card
+            # 右上角的「查看详情」：卡片窄的时候只剩箭头，字还在（悬停、读屏都有）
+            assert re.search(r'<a class="btn btn-sm acct-go"[^>]*title="查看详情"[^>]*>\s*<span class="acct-go-text">查看详情</span>', card)
         assert "gamma" not in scrape(html)
 
     def test_card_shows_who_and_since_when(self, logged_in, book, fake_costs):
@@ -587,6 +591,26 @@ class TestOverviewPage:
             assert words in text
         assert re.search(rf"(?<!\d){days}(?!\d)", text)                          # 启用第几天
         assert "k-active" in card                                                # 状态点的颜色
+
+    def test_card_layout(self, logged_in, book, fake_costs):
+        """邮箱、号码，号码下面一排生命周期；「查看详情」在右上角；客户和上游、启用日期一个样子；状态在右下角。"""
+        card = cards(logged_in.get("/").get_data(as_text=True))["222222222222"]
+        ident = re.search(r'<div class="acct-ident">(.*?)</div>\s*</div>', card, re.S).group(1)
+        assert scrape(ident) == "beta@example.com 222222222222 风控"
+        assert ident.index("222222222222") < ident.index('<div class="acct-life">')
+        top = card[card.index('<div class="acct-top">'):card.index('<dl class="acct-stats">')]
+        assert top.index('class="acct-ident"') < top.index('class="btn btn-sm acct-go"')
+        stats = re.search(r'<dl class="acct-stats">(.*?)</dl>', card, re.S).group(1)
+        assert [scrape(dt) for dt in re.findall(r"<dt>(.*?)</dt>", stats, re.S)] == ["上游", "启用日期", "已启用", "客户"]
+        assert "库存" in scrape(stats)                     # 还没分给客户
+        bottom = card[card.index('<div class="acct-bottom">'):]
+        assert re.search(r'<span class="acct-chip k-active">.*?活跃</span>', bottom, re.S)
+        assert "查看详情" not in scrape(bottom)
+
+    def test_sidebar_does_not_print_the_user_name(self, logged_in, ledger, fake_costs):
+        html = logged_in.get("/").get_data(as_text=True)
+        foot = re.search(r'<div class="side-foot">(.*?)</aside>', html, re.S).group(1)
+        assert TEST_USER not in scrape(foot)
 
     def test_card_shows_usage_and_balance(self, logged_in, book, fake_costs):
         card = cards(logged_in.get("/").get_data(as_text=True))["222222222222"]
@@ -715,7 +739,7 @@ class TestOverviewProblems:
         assert list(found)[0] == "222222222222"                  # 有问题的排前面
         card = found["222222222222"]
         assert 'data-state="error"' in card                     # 消费查不到：状态是异常
-        assert re.search(r'<p class="acct-status k-error">.*?异常</p>', card, re.S)
+        assert re.search(r'<span class="acct-chip k-error">.*?异常</span>', card, re.S)
         assert "消费查询失败：凭证缺少 ce:GetCostAndUsage 权限" in scrape(card)
         assert "没有查到消费" in scrape(card)
         assert "查询失败 1 个" in scrape(html)
@@ -746,7 +770,7 @@ class TestOverviewProblems:
         card = cards(html)["111111111111"]
         # 读不到用量就是账号在报错：状态叫异常，红色，和查不到消费的筛到一起
         assert 'data-state="error"' in card
-        assert re.search(r'<p class="acct-status k-error">.*?异常</p>', card, re.S)
+        assert re.search(r'<span class="acct-chip k-error">.*?异常</span>', card, re.S)
         assert "读不到 CloudWatch" in scrape(card)
 
     def test_daily_cost_failure_is_reported_once(self, logged_in, book, fake_costs, monkeypatch):

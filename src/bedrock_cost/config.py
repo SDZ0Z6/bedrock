@@ -201,6 +201,27 @@ LAST_KNOWN_COSTS_PATH = Path(_text("LAST_KNOWN_COSTS_PATH", "last-known-costs.js
 if not LAST_KNOWN_COSTS_PATH.is_absolute():
     LAST_KNOWN_COSTS_PATH = BASE_DIR / LAST_KNOWN_COSTS_PATH
 
+# 登录记录：每次登录成功、失败、被锁定、退出记一行，设置页的「登录记录」读它（见 login_log）。
+# 不记密码；用户名照记，失败的也记输进来的是什么。和告警状态放一起，systemd 的 ReadWritePaths 已经覆盖
+LOGIN_EVENTS_PATH = Path(_text("LOGIN_EVENTS_PATH", "login-events.jsonl"))
+if not LOGIN_EVENTS_PATH.is_absolute():
+    LOGIN_EVENTS_PATH = BASE_DIR / LOGIN_EVENTS_PATH
+
+# ---------------------------------------------------------------- 客户
+# 客户页要的每个账号每天的消费，查成功一次就存一份（见 cost_history）：停用的账号不再查 CE，
+# 客户页拿存下来的历史；查询失败时也拿它顶着。和告警状态放一起，systemd 的 ReadWritePaths 已经覆盖
+CUSTOMER_COSTS_PATH = Path(_text("CUSTOMER_COSTS_PATH", "customer-costs.json"))
+if not CUSTOMER_COSTS_PATH.is_absolute():
+    CUSTOMER_COSTS_PATH = BASE_DIR / CUSTOMER_COSTS_PATH
+
+# 客户时间线上自动判断「开始上量 / 上量终止 / 恢复上量」的规则（按折算后的每天消费）：
+#   开始上量：分给客户以后，第一次有一天 ≥ RAMPUP_DAILY
+#   上量终止：上量以后，连续 STOP_DAYS 天都低于 STOP_DAILY，记在第一天
+#   恢复上量：终止以后，又有一天 ≥ RAMPUP_DAILY
+RAMPUP_DAILY = _number("RAMPUP_DAILY", 500)
+STOP_DAILY = _number("STOP_DAILY", 50)
+STOP_DAYS = max(1, _number("STOP_DAYS", 3))
+
 # ---------------------------------------------------------------- 邮件告警
 # 邮箱（平台、地址、密码）和开关是**每个账号**的，在台账里（MAIL_* 几列），从账号管理页填。
 # 邮箱密码和 AK/SK 一样只在台账里，页面上不回显。这里只放全局的几项。

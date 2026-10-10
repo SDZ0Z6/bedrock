@@ -163,6 +163,18 @@ def _scratch_last_known(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _scratch_customer_costs(tmp_path, monkeypatch):
+    """客户页存下来的每天消费也写到临时目录，不能动项目目录里的文件。"""
+    monkeypatch.setattr(config, "CUSTOMER_COSTS_PATH", tmp_path / "customer-costs.json")
+
+
+@pytest.fixture(autouse=True)
+def _scratch_logins(tmp_path, monkeypatch):
+    """登录记录也写到临时目录：每个登录的用例都会记一行，不能记进项目目录里的文件。"""
+    monkeypatch.setattr(config, "LOGIN_EVENTS_PATH", tmp_path / "login-events.jsonl")
+
+
+@pytest.fixture(autouse=True)
 def _scratch_events(tmp_path, monkeypatch):
     """告警事件流写到临时目录：用假的 _send「发出去」的告警照样会记一条，不能记进项目目录里的文件。"""
     monkeypatch.setattr(config, "ALERT_EVENTS_PATH", tmp_path / "alert-events.jsonl")

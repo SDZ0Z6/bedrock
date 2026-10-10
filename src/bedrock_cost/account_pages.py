@@ -1,4 +1,4 @@
-"""账号页：一个账号一个页面，五个页签（摘要 / 成本 / 用量 / 配额 / 预估）。
+"""账号页：一个账号一个页面，六个页签（摘要 / 成本 / 用量 / 预估 / 时间线 / 配额）。
 
 看的是哪个账号写在网址里（/account/<号码>/usage），能直接收藏、发给别人；最近看的那个
 记在会话里，侧边栏的「账号」和老网址（/model-usage 之类）都跳到它。
@@ -10,25 +10,30 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timezone
+from types import SimpleNamespace
 
 from flask import Blueprint, flash, redirect, render_template, request, session, url_for
 
-from . import activity, chart, cloudwatch_metrics, config, cost_estimate, cost_explorer, dashboard, quotas, usage_explorer
+from . import (
+    activity, chart, cloudwatch_metrics, config, cost_estimate, cost_explorer, customers, dashboard, quotas, usage_explorer,
+)
 from .auth import login_required
 from .dates import cumulative_range, detect_preset, earliest_queryable, resolve_range
-from .excel_source import Account, ExcelSourceError, lifecycle_colors, load_accounts
+from .excel_source import Account, ExcelSourceError, lifecycle_colors, load_accounts, load_customers, load_events
 from .report import build_row
 from .views import page_meta, tz_name
 from .windows import PERIODS, WINDOWS, MetricWindow, detect_window, fit_period, floor_to_period, resolve_window
 
 bp = Blueprint("account", __name__, url_prefix="/account")
 
+# 配额放最后：第一次要拉 45 秒左右，也最少看
 TABS = {
     "summary": ("摘要", "account.summary"),
     "cost": ("成本", "account.cost"),
     "usage": ("用量", "account.usage"),
-    "quota": ("配额", "account.quota"),
     "estimate": ("预估", "account.estimate"),
+    "timeline": ("时间线", "account.timeline"),
+    "quota": ("配额", "account.quota"),
 }
 SESSION_KEY = "account"
 # 成本、预估页签的快捷时间
@@ -69,7 +74,7 @@ def _open(number: str, tab: str):
 
 
 def _frame(account: Account, accounts: list[Account], tab: str, refresh: bool = False, **extra) -> dict:
-    """五个页签共用的页头数据。"""
+    """六个页签共用的页头数据。"""
     today = date.today()
     state = activity.account_activity(account, refresh=refresh)
     return dict(
@@ -481,3 +486,67 @@ def estimate(number: str):
         date_min=_date_min(account, today),
     )
     return render_template("account_estimate.html", **context)
+
+
+# ---------------------------------------------------------------- 时间线
+@bp.route("/<number>/timeline")
+@login_required
+def timeline(number: str):
+    """这个账号从启用到今天的事：分给过哪些客户、每次调额度（改前 → 改后、谁、几点几分）、风控、替换、结算、
+    解绑、停用，以及按每天的消费算出来的上量、终止、额度预警。解绑、换了客户都还在这里。"""
+    account, accounts, bounce = _open(number, "timeline")
+    if bounce:
+        return bounce
+    refresh = request.args.get("refresh") == "1"
+    today = date.today()
+    events = load_events()
+    owners = {customer.id: customer for customer in load_customers()}
+    series = customers.fetch_series([account], today, refresh).get(account.key) or customers.Series()
+    items = customers.account_timeline(account, events, series, today, customers.risk_mails(account.account))
+    by_number = {a.account: a for a in accounts}
+
+    toasts = []
+    if series.error is not None:
+        toasts = dashboard.account_toasts([series.error], [account], "查不到每天的消费")
+
+    payload, rows = [], []
+    for item in items:
+        owner = owners.get(item.customer)
+        who = _customer_face(owner) if owner else None
+        if who is None and item.customer:      # 台账里已经没有这个客户了：只写编号
+            who = {"number": item.customer, "label": item.customer, "av": {"text": "?", "css": "av-7"}}
+        text = _other_account(item, account, by_number)
+        entry = customers.item_payload(item)
+        entry.update(text=text, who=who, none="" if who else "库存", keys=[])
+        payload.append(entry)
+        rows.append(SimpleNamespace(item=item, text=text, owner=owner, cid=item.customer))
+    rows.reverse()       # 表格最近的在上面
+
+    context = _frame(
+        account, accounts, "timeline", refresh=refresh, toasts=toasts, notes=[],
+        timeline={"items": payload, "today": today.isoformat()},
+        timeline_fallback=[(row.item.date, row.item.title,
+                            " · ".join(bit for bit in (row.owner.name if row.owner else row.cid, row.text) if bit))
+                           for row in rows],
+        rows=rows, categories=customers.CATEGORIES, series=series,
+        event_count=sum(1 for item in items if not item.auto),
+    )
+    return render_template("account_timeline.html", **context)
+
+
+def _other_account(item, account: Account, by_number: dict[str, Account]) -> str:
+    """替换账号这件事在两个账号的时间线上都有：一句话里写上另一个是谁（换成谁、换下了谁）。"""
+    if item.kind != "replace":
+        return item.text
+    mine = item.account == account.account
+    other = item.peer if mine else item.account
+    face = customers.account_face(other, by_number)
+    lead = f"{'换成' if mine else '换下'} {face['label']}" if face else ""
+    return " · ".join(bit for bit in (lead, item.text) if bit)
+
+
+def _customer_face(customer) -> dict:
+    """时间线卡片上那一行：这件事发生时账号归哪个客户（插画头像或者名字的第一个字）。"""
+    av = customers.avatar_info(customer)
+    face = {"img": url_for("static", filename=av.image)} if av.image else {"text": av.letter, "css": f"cletter lt-{av.tone}"}
+    return {"number": customer.id, "label": customer.name, "av": face}

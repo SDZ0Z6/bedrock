@@ -1,0 +1,970 @@
+{% extends "shell.html" %}
+{% from "_customer_macros.html" import cicon, cust_avatar, status_pill, mini, customer_fields, timeline_box with context %}
+{% block title %}{{ customer.name }} · 客户 · Bedrock 成本监控{% endblock %}
+{% block page_header %}{% endblock %}
+{% block loading_label %}正在处理{% endblock %}
+
+{% macro stage_pill(h) -%}
+  <span class="stage t-{{ h.stage_tone }}">{{ h.stage_label }}{% if h.stage == 'settled' and h.account.settled %} {{ h.account.settled.strftime('%m-%d') }}{% endif %}</span>
+{%- endmacro %}
+
+{# 账号那一格：小头像、邮箱、号码。点邮箱进这个账号的页面 #}
+{% macro who_cell(account, sub='') -%}
+  <div class="holding-who">
+    {{ mini(account) }}
+    <span class="holding-who-text">
+      <a class="holding-link" href="{{ url_for('account.summary', number=account.account) }}"
+         data-loading="正在读这个账号" title="去这个账号的页面">{{ account.email or account.account }}</a>
+      <small>{% if account.email %}{{ account.account }} · {% endif %}{{ sub or ('上游 ' ~ account.partner) }}</small>
+    </span>
+  </div>
+{%- endmacro %}
+
+{% block content %}
+{% set counts = view.counts %}
+
+<nav class="crumbs" aria-label="位置"><a href="{{ url_for('customers.index') }}" data-loading="正在汇总客户的数">客户</a><span aria-hidden="true">›</span><span>{{ customer.name }}</span></nav>
+
+<!-- ------------------------------------------------ banner -->
+<header class="cust-hero">
+  <div class="hero-av">
+    {%- if hero_av.image %}
+      <img src="{{ url_for('static', filename=hero_av.deco) }}" alt="" width="150" height="150" decoding="async">
+    {%- else %}
+      <span class="hero-letter cletter lt-{{ hero_av.tone }}" aria-hidden="true">{{ hero_av.letter }}</span>
+    {%- endif %}
+  </div>
+  <div class="hero-main">
+    <div class="hero-top">
+      <div class="hero-title">
+        <h1>{{ customer.name }}</h1>
+        {{ status_pill(customer) }}
+      </div>
+      <div class="hero-side">
+        <button class="btn btn-primary" type="button" data-open="dlg-assign">{{ cicon('plus') }}分配账号</button>
+        <button class="icon-btn" type="button" data-open="dlg-edit" title="编辑客户" aria-label="编辑客户">{{ cicon('pencil') }}</button>
+      </div>
+    </div>
+    <div class="hero-meta">
+      <span>{% if customer.region %}{{ flag(customer.region) | safe }}{{ region_name(customer.region) }}{% else %}{{ cicon('globe', '') }}没填地区{% endif %}</span>
+      {% if customer.since %}
+        <span>{{ cicon('calendar', '') }}{{ customer.since.isoformat() }} 开始合作 · 第 {{ (today - customer.since).days + 1 }} 天</span>
+      {% endif %}
+      <span>{{ cicon('building', '') }}上游 {{ view.partners | join('、') or '—' }}</span>
+      <span>{{ cicon('history', '') }}历史消费 {{ view.lifetime | money }}</span>
+      <span>{{ customer.id }}</span>
+    </div>
+    {% if customer.note %}<p class="hero-note">{{ customer.note }}</p>{% endif %}
+  </div>
+</header>
+
+{% if view.missing %}
+  <p class="note">{{ view.missing | length }} 个账号查不到消费、也没有存下来的数：钱上没算它们，图上也没有。</p>
+{% endif %}
+{% if view.stale %}
+  <p class="note">{{ view.stale | length }} 个账号这次没查到，用的是之前存下来的数（截至
+    {{ view.stale | map(attribute='series.stale_as_of') | min }}）。</p>
+{% endif %}
+
+<!-- ------------------------------------------------ 五张图 -->
+<section class="detail-bento" aria-label="这个客户的图表">
+  <article class="viz-card col-2" data-reveal>
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">账号</h2>
+        <p class="viz-sub">异常里：风控 {{ counts.risk }} · 待结算 {{ counts.pending }}</p>
+      </div>
+    </div>
+    <div class="donut">
+      {{ donut | safe }}
+      <div class="donut-center">
+        <span class="donut-value">{{ counts.total }}</span>
+        <span class="donut-of">个账号</span>
+      </div>
+    </div>
+    <div class="gauge-facts">
+      <span><i class="state-dot k-active" aria-hidden="true"></i>正常<strong>{{ counts.use }}</strong></span>
+      <span><i class="state-dot k-error" aria-hidden="true"></i>异常<strong>{{ counts.bad }}</strong></span>
+      <span><i class="state-dot k-idle" aria-hidden="true"></i>已结算<strong>{{ counts.settled }}</strong></span>
+    </div>
+  </article>
+
+  <article class="viz-card col-2" data-reveal>
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">余额</h2>
+        <p class="viz-sub">使用中的账号还剩多少</p>
+      </div>
+    </div>
+    <div>
+      <p class="viz-big"><span data-countup>{{ view.balance | money0 }}</span> <small>{{ view.in_use | length }} 个使用中的账号</small></p>
+      <p class="viz-meta">预算 <strong>{{ view.budget | money0 }}</strong> − 消费 <strong>{{ view.spent | money0 }}</strong></p>
+    </div>
+    {% if view.in_use %}
+      <div class="bal-rows">
+        {% for h in view.in_use %}
+          {% set left_pct = [[(h.remaining / h.account.budget * 100) if h.account.budget > 0 else 0, 0] | max, 100] | min %}
+          <div class="bal-row" style="--i: {{ loop.index0 }}">
+            <div class="bal-label">{{ mini(h.account) }}<span class="bal-mail">{{ h.account.email or h.number }}</span><b>{{ h.remaining | money0 }}</b></div>
+            <div class="bal-bar {% if left_pct <= 100 - 90 %}tone-danger{% elif left_pct <= 100 - 70 %}tone-warn{% endif %}" aria-hidden="true"><i style="width: {{ left_pct | round(1) }}%"></i></div>
+            <div class="bal-sub">还剩 {{ left_pct | round | int }}% · 额度 {{ h.account.budget | money0 }}</div>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="viz-empty">没有使用中的账号，余额是 0。</p>
+    {% endif %}
+    {% set aside = view.holdings | selectattr('stage', 'in', ['risk', 'pending']) | list %}
+    {% if aside %}
+      <p class="bal-note">
+        {% for h in aside %}
+          <span>{{ mini(h.account) }}{{ h.account.email or h.number }} {{ h.stage_label }}，没用完的 {{ [h.remaining, 0] | max | money0 }} 不算</span>
+        {% endfor %}
+      </p>
+    {% endif %}
+  </article>
+
+  <article class="viz-card col-2" data-reveal>
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">额度使用</h2>
+        <p class="viz-sub">{{ view.in_use | length }} 个使用中的账号 · 截至 {{ today.strftime('%m-%d') }}</p>
+      </div>
+    </div>
+    <div class="gauge">
+      {{ gauge | safe }}
+      <div class="gauge-center">
+        <span class="gauge-value" data-countup>{{ view.spent | money0 }}</span>
+        <span class="gauge-of">预算 {{ view.budget | money0 }}</span>
+      </div>
+    </div>
+    <div class="gauge-facts">
+      <span>使用率<strong class="tone-{{ view.level }}">{{ view.usage_pct | pct }}</strong></span>
+      <span>余额<strong class="{% if view.balance < 0 %}tone-danger{% endif %}">{{ view.balance | money }}</strong></span>
+    </div>
+  </article>
+
+  <article class="viz-card col-4" data-reveal>
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">每天消费</h2>
+        <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 按账号叠起来，已结算的也画 · Cost Explorer 晚 1~2 天出数</p>
+      </div>
+    </div>
+    <div>
+      <p class="viz-big"><span data-countup>{{ trend.total | money0 }}</span> <small>近 30 天</small></p>
+      <p class="viz-meta">日均 <strong>{{ trend.average | money }}</strong> · 近 7 天日均 <strong>{{ view.avg7 | money }}</strong></p>
+    </div>
+    <div class="viz-chart" id="cust-spend" data-tip-src="cust-spend-data">{{ trend.chart.svg | safe }}</div>
+    <div class="legend-toggles" data-legend-for="cust-spend" role="group" aria-label="只看某个账号">
+      {% for item in trend.chart.legend %}
+        <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
+                title="{{ item.name }} 近 30 天 {{ item.total | money }}">
+          <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
+      {% endfor %}
+    </div>
+    <script id="cust-spend-data" type="application/json">{{ trend.chart.tooltip | tojson }}</script>
+  </article>
+
+  <article class="viz-card col-2" data-reveal>
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">还能用几天</h2>
+        <p class="viz-sub">余额 ÷ 近 7 天日均，虚线是预测</p>
+      </div>
+    </div>
+    <div>
+      {% set left = view.days_left %}
+      {% if left is none %}
+        <p class="viz-big">— <small>最近 7 天没有消费</small></p>
+      {% elif left <= 0 %}
+        <p class="viz-big tone-warn">0 天 <small>没有余额了，该换账号了</small></p>
+      {% else %}
+        <p class="viz-big {% if left < 14 %}tone-warn{% endif %}">约 {{ left | int }} 天 <small>{{ view.runs_out_on.strftime('%m-%d') }} 前后用完</small></p>
+      {% endif %}
+      <p class="viz-meta">余额 <strong>{{ view.balance | money0 }}</strong> · 日均 <strong>{{ view.avg7 | money0 }}</strong></p>
+    </div>
+    <div class="viz-chart">{{ runway | safe }}</div>
+  </article>
+</section>
+
+<!-- ------------------------------------------------ 时间线 -->
+{% call timeline_box(timeline, categories,
+                     (customer.since.isoformat() ~ ' 开始合作到今天 · ' if customer.since else '') ~ (view.timeline | length) ~ ' 件事',
+                     timeline_fallback, '点卡片可以改日期、删掉', people=timeline.accounts) %}
+  <button class="btn btn-sm btn-primary" type="button" data-open="dlg-note">记一笔</button>
+{% endcall %}
+
+<!-- ------------------------------------------------ 名下账号、告警流 -->
+<div class="cust-cols">
+  <section class="viz-card" aria-labelledby="holdings-title" data-reveal>
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title" id="holdings-title">名下账号</h2>
+        <p class="viz-sub">正常 {{ counts.use }} · 风控 {{ counts.risk }} · 待结算 {{ counts.pending }} · 已结算 {{ counts.settled }} · 只有使用中的算进余额</p>
+      </div>
+      <button class="btn btn-sm" type="button" data-open="dlg-assign">分配账号</button>
+    </div>
+    {% if view.holdings %}
+    <div class="table-scroll">
+      <table class="holding-table">
+        <thead><tr><th>账号</th><th>阶段</th><th>额度使用</th><th>分配</th><th><span class="sr-only">操作</span></th></tr></thead>
+        <tbody>
+          {% set ns = namespace(grouped=false) %}
+          {% for h in view.holdings %}
+            {% if h.stage == 'settled' and not ns.grouped %}
+              <tr class="group-row"><td colspan="5">已结算 · 只留在历史里</td></tr>
+              {% set ns.grouped = true %}
+            {% endif %}
+            <tr {% if h.stage == 'settled' %}class="row-off"{% endif %}>
+              <td>{{ who_cell(h.account) }}</td>
+              <td>{{ stage_pill(h) }}</td>
+              <td class="use-cell">
+                {% if h.has_numbers %}
+                  <span title="{{ h.spent | money }} / {{ h.account.budget | money }}"><b>{{ '%.0f%%' % h.usage_pct if h.usage_pct is not none else '—' }}</b>
+                    · {{ short_money(h.spent) }} / {{ short_money(h.account.budget) }}</span>
+                  <div class="meter tone-{{ h.level }}" aria-hidden="true"><i style="width: {{ [h.usage_pct or 0, 100] | min }}%"></i></div>
+                {% else %}
+                  <span class="tone-warn">查不到消费</span>
+                {% endif %}
+              </td>
+              <td class="joined-cell">{{ h.joined.strftime('%m-%d') if h.joined else '—' }}
+                {%- if h.via %}<small>替换 {{ (by_number[h.via].email if h.via in by_number else h.via).split('@')[0] }}</small>{% endif %}</td>
+              <td>
+                <div class="row-acts">
+                  {% if h.stage == 'use' %}
+                    <button class="btn btn-xs" type="button" data-act="budget" data-key="{{ h.key }}">调整额度</button>
+                  {% elif h.stage == 'risk' %}
+                    <button class="btn btn-xs btn-primary" type="button" data-act="replace" data-key="{{ h.key }}">替换账号</button>
+                  {% elif h.stage == 'pending' %}
+                    <button class="btn btn-xs btn-primary" type="button" data-act="settle" data-key="{{ h.key }}">结算</button>
+                  {% elif not h.account.enabled %}
+                    <span class="calc">已停用</span>
+                  {% endif %}
+                  {# 「更多操作」用原生 popover：在顶层图层里，不会被表格的横向滚动框裁掉（位置由页面脚本按「…」算） #}
+                  <button class="btn btn-xs btn-ghost" type="button" popovertarget="more-{{ loop.index }}"
+                          aria-label="更多操作" title="更多操作">{{ cicon('more', '') }}</button>
+                  <div class="row-more-pop" id="more-{{ loop.index }}" popover>
+                      {% if h.stage == 'use' %}
+                        <button type="button" data-act="replace" data-key="{{ h.key }}">替换账号</button>
+                        <button type="button" data-act="risk" data-key="{{ h.key }}">标记风控</button>
+                        <button type="button" data-act="settle" data-key="{{ h.key }}">结算</button>
+                      {% elif h.stage == 'risk' %}
+                        <form method="post" action="{{ url_for('customers.risk', cid=customer.id) }}" data-loading="正在保存">
+                          <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+                          <input type="hidden" name="key" value="{{ h.key }}">
+                          <input type="hidden" name="action" value="clear">
+                          <button type="submit">取消风控（标错了）</button>
+                        </form>
+                        <button type="button" data-act="settle" data-key="{{ h.key }}">结算</button>
+                      {% elif h.stage == 'pending' %}
+                        <button type="button" data-act="budget" data-key="{{ h.key }}">调整额度</button>
+                      {% endif %}
+                      <button class="is-danger" type="button" data-act="unassign" data-key="{{ h.key }}">解绑</button>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <p class="viz-empty">还没有账号。点「分配账号」从库存里挑。</p>
+    {% endif %}
+  </section>
+
+  <section class="viz-card" aria-labelledby="feed-title">
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title" id="feed-title">告警流</h2>
+        <p class="viz-sub">名下账号发出的 TG 告警和收到的 AWS 邮件</p>
+      </div>
+    </div>
+    {% if view.feed %}
+      <ul class="feed" id="feed">
+        {% for item in view.feed[:40] %}
+          <li class="t-{{ item.tone }}" {% if loop.index > 4 %}hidden data-more{% endif %}>
+            <span class="feed-ico">{{ cicon('mail' if item.via == 'mail' else 'send', '') }}</span>
+            <div>
+              <div class="feed-head"><b>{{ item.title }}</b><small>{{ item.when.astimezone().strftime('%m-%d %H:%M') }} · {{ '邮件' if item.via == 'mail' else 'TG' }}</small></div>
+              {% if item.text %}<p class="feed-text">{{ item.text }}</p>{% endif %}
+              <p class="feed-acct">{{ mini(by_number.get(item.account)) }}<span>{{ item.email or item.account }}</span></p>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+      {% if view.feed | length > 4 %}
+        <button class="btn btn-sm feed-more" type="button" data-feed-more data-more-label="更早的 {{ [view.feed | length, 40] | min - 4 }} 条">更早的 {{ [view.feed | length, 40] | min - 4 }} 条</button>
+      {% endif %}
+    {% else %}
+      <p class="viz-empty">名下账号还没有发过告警。</p>
+    {% endif %}
+  </section>
+</div>
+
+<!-- ------------------------------------------------ 月度对账单 -->
+<section class="card" aria-labelledby="stmt-title" data-reveal>
+  <div class="card-head">
+    <div class="card-title">
+      <h2 id="stmt-title">月度对账单</h2>
+      <span class="card-note" data-stmt-note="month">余额每个月怎么变的。没有充值：分配账号、调高额度时余额变多；账号被标记风控、换下或者额度用完那天，它没用完的额度移出</span>
+      <span class="card-note" data-stmt-note="acct" hidden>每个账号每个月的折算后消费。不在使用中的账号不算进现在的预算和余额，历史照样列在这里</span>
+    </div>
+    <div class="page-actions">
+      <div class="seg" role="group" aria-label="对账单的看法" id="stmt-seg">
+        <button class="seg-item is-on" type="button" data-stmt="month" aria-pressed="true">按月</button>
+        <button class="seg-item" type="button" data-stmt="acct" aria-pressed="false">按账号</button>
+      </div>
+      <a class="btn btn-sm" href="{{ url_for('customers.statement_csv', cid=customer.id) }}" download>{{ cicon('download') }}导出 CSV</a>
+    </div>
+  </div>
+
+  {% set rows = view.statement %}
+  <div class="stmt-view" data-stmt-view="month">
+    <div class="table-scroll">
+      <table class="stmt">
+        <thead><tr><th>月份</th><th class="num">月初余额</th><th class="num">+ 新分配</th><th class="num">± 调整额度</th>
+          <th class="num">− 消费</th><th class="num">− 移出</th><th class="num">月末余额</th></tr></thead>
+        <tbody>
+          {% for row in rows %}
+            <tr>
+              <td>{{ row.label }}{% if loop.first or row.month[5:] == '01' %}<span class="cur">{{ row.year }}</span>{% endif %}
+                {%- if row.current %}<span class="cur">到 {{ today.strftime('%m-%d') }}</span>{% endif %}</td>
+              <td class="num">{{ row.start | money0 }}</td>
+              <td class="num {% if not row.added_accounts %}zero{% endif %}">
+                {%- if row.added_accounts %}{{ row.added | money0 }}
+                  {%- for number, amount in row.added_accounts %}<span class="who">{{ (by_number[number].email if number in by_number else number) }}</span>{% endfor %}
+                {%- else %}—{% endif %}</td>
+              <td class="num {% if not row.delta_accounts %}zero{% endif %}">
+                {%- if row.delta_accounts %}{{ '+' if row.delta >= 0 }}{{ row.delta | money0 }}
+                  {%- for number, amount in row.delta_accounts %}<span class="who">{{ (by_number[number].email if number in by_number else number) }}</span>{% endfor %}
+                {%- else %}—{% endif %}</td>
+              <td class="num {% if not row.used %}zero{% endif %}">{{ row.used | money0 if row.used else '—' }}</td>
+              <td class="num {% if not row.out_accounts %}zero{% endif %}">
+                {%- if row.out_accounts %}{{ row.out | money0 }}
+                  {%- for number, amount, why in row.out_accounts %}<span class="who">{{ (by_number[number].email if number in by_number else number) }} · {{ why or '移出' }}</span>{% endfor %}
+                {%- else %}—{% endif %}</td>
+              <td class="num end">{{ row.end | money0 }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+        <tfoot>
+          <tr><td colspan="2">合计</td>
+            <td class="num">{{ rows | sum(attribute='added') | money0 }}</td>
+            <td class="num">{{ rows | sum(attribute='delta') | money0 }}</td>
+            <td class="num">{{ rows | sum(attribute='used') | money0 }}</td>
+            <td class="num">{{ rows | sum(attribute='out') | money0 }}</td>
+            <td class="num">{{ rows[-1].end | money0 }}</td></tr>
+        </tfoot>
+      </table>
+    </div>
+    <p class="stmt-formula">核对：分配 <b>{{ rows | sum(attribute='added') | money0 }}</b> ± 调整额度 <b>{{ rows | sum(attribute='delta') | money0 }}</b>
+      − 消费 <b>{{ rows | sum(attribute='used') | money0 }}</b> − 移出 <b>{{ rows | sum(attribute='out') | money0 }}</b>
+      = <b>{{ rows[-1].end | money0 }}</b>，和现在的余额一样。</p>
+  </div>
+
+  <div class="stmt-view" data-stmt-view="acct" hidden>
+    {% set matrix = view.statement_matrix() %}
+    <div class="table-scroll">
+      <table class="stmt">
+        <thead><tr><th>账号</th><th>阶段</th>
+          {% for month in view.months %}<th class="num">{{ month[5:] | int }} 月{% if month == today.isoformat()[:7] %}<span class="cur">到 {{ today.strftime('%m-%d') }}</span>{% endif %}</th>{% endfor %}
+          <th class="num">合计</th></tr></thead>
+        <tbody>
+          {% for h, months in matrix %}
+            <tr {% if h.stage == 'settled' %}class="is-settled"{% endif %}>
+              <td>{{ who_cell(h.account, '额度 ' ~ (h.account.budget | money0)) }}</td>
+              <td>{{ stage_pill(h) }}</td>
+              {% for month in view.months %}
+                {% set cell = months.get(month) %}
+                <td class="num {% if not cell or not cell[0] %}zero{% endif %}">{{ cell[0] | money0 if cell and cell[0] else '—' }}</td>
+              {% endfor %}
+              <td class="num strong">{{ h.spent | money0 }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+        <tfoot>
+          <tr><td colspan="2">合计</td>
+            {% for month in view.months %}
+              {% set ns2 = namespace(total=0) %}
+              {% for h, months in matrix %}{% set ns2.total = ns2.total + (months.get(month, (0, 0))[0]) %}{% endfor %}
+              <td class="num">{{ ns2.total | money0 }}</td>
+            {% endfor %}
+            <td class="num">{{ view.lifetime | money0 }}</td></tr>
+        </tfoot>
+      </table>
+    </div>
+    <p class="stmt-formula">合计 <b>{{ view.lifetime | money0 }}</b> 就是 banner 上的历史消费；使用中的账号加起来 <b>{{ view.spent | money0 }}</b>，是现在的消费。</p>
+  </div>
+</section>
+
+<footer class="meta">
+  <span>Cost Explorer</span>
+  <span>缓存 {{ cache_label }}</span>
+  <span>生成于 {{ generated_at }}</span>
+  <span><a href="{{ url_for('customers.detail', cid=customer.id, refresh=1) }}" title="跳过缓存，重新查这个客户每个账号每天的消费"
+           data-loading="正在重新查 Cost Explorer" data-loading-note="跳过缓存">刷新数据</a></span>
+</footer>
+
+{# ================================================ 弹窗 #}
+<script id="holdings-data" type="application/json">{{ holdings_data | tojson }}</script>
+
+<dialog class="modal" id="dlg-edit" {% if open_edit %}data-reopen{% endif %}>
+  <form method="post" action="{{ url_for('customers.update', cid=customer.id) }}" data-loading="正在保存">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <header class="modal-head">
+      <h2>编辑客户</h2><span class="modal-sub">{{ customer.id }}</span>
+      <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+    </header>
+    <div class="modal-body">
+      {% if errors %}
+        <div class="alert alert-error form-errors"><ul>{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul></div>
+      {% endif %}
+      {{ customer_fields(customer.id, form or {'name': customer.name, 'region': customer.region, 'avatar': customer.avatar,
+                         'status': customer.status, 'since': customer.since.isoformat() if customer.since else '',
+                         'note': customer.note}, today) }}
+    </div>
+    <footer class="modal-foot">
+      <span class="card-note">存进台账的「CUSTOMERS」表</span>
+      <div class="modal-btns">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn btn-primary" type="submit">保存</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="modal" id="dlg-assign">
+  <form method="post" action="{{ url_for('customers.assign', cid=customer.id) }}" data-loading="正在保存">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <header class="modal-head">
+      <h2>分配账号</h2><span class="modal-sub">从库存分给{{ customer.name }}</span>
+      <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+    </header>
+    <div class="modal-body">
+      <div class="steps">
+        <div>
+          <p class="step-head">选账号（可以多选）</p>
+          {% if stock %}
+            <div class="pick-list">
+              {% for a in stock %}
+                <label class="pick-item">
+                  <input type="checkbox" name="account" value="{{ a.key }}">
+                  {{ mini(a) }}
+                  <span class="pick-text"><b>{{ a.email or a.account }}</b><small>{% if a.email %}{{ a.account }} · {% endif %}上游 {{ a.partner }}</small></span>
+                  <span class="pick-side">额度 {{ a.budget | money0 }}</span>
+                </label>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="pick-empty">库存里没有账号了。先去账号管理新增，不选客户就会进库存。</p>
+          {% endif %}
+        </div>
+        <div class="form-grid">
+          <div class="field"><label for="assign-date">分配日期</label>
+            <input id="assign-date" name="date" type="date" max="{{ today.isoformat() }}" value="{{ today.isoformat() }}"></div>
+        </div>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <span class="card-note">分配之后，账号的额度和消费算进这个客户的预算和余额</span>
+      <div class="modal-btns">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn btn-primary" type="submit" {% if not stock %}disabled{% endif %}>分配</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="modal" id="dlg-replace">
+  <form method="post" action="{{ url_for('customers.replace', cid=customer.id) }}" data-loading="正在保存">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <header class="modal-head">
+      <h2>替换账号</h2><span class="modal-sub">{{ customer.name }}</span>
+      <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+    </header>
+    <div class="modal-body">
+      <div class="steps">
+        <div>
+          <p class="step-head"><span class="step-no">1</span>换下哪个账号</p>
+          {% set swappable = view.holdings | selectattr('stage', 'in', ['use', 'risk', 'pending']) | list %}
+          {% if swappable %}
+            <div class="pick-list">
+              {% for h in swappable %}
+                <label class="pick-item">
+                  <input type="radio" name="old" value="{{ h.key }}" {% if loop.first %}checked{% endif %}>
+                  {{ mini(h.account) }}
+                  <span class="pick-text"><b>{{ h.account.email or h.number }}</b><small>已用 {{ h.spent | money0 }} / {{ h.account.budget | money0 }}</small></span>
+                  <span class="pick-side">{{ stage_pill(h) }}</span>
+                </label>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="pick-empty">这个客户现在没有能换下的账号。</p>
+          {% endif %}
+        </div>
+        <div>
+          <p class="step-head"><span class="step-no">2</span>为什么换</p>
+          <div class="seg" role="radiogroup" aria-label="原因">
+            {% for reason in reasons %}
+              <label class="seg-item"><input type="radio" name="reason" value="{{ reason }}" {% if loop.first %}checked{% endif %}>{{ reason }}</label>
+            {% endfor %}
+          </div>
+        </div>
+        <div>
+          <p class="step-head"><span class="step-no">3</span>换上哪个账号（上游补发的那个）</p>
+          {% if stock %}
+            <div class="pick-list">
+              {% for a in stock %}
+                <label class="pick-item">
+                  <input type="radio" name="new" value="{{ a.key }}" data-budget="{{ a.budget }}" {% if loop.first %}checked{% endif %}>
+                  {{ mini(a) }}
+                  <span class="pick-text"><b>{{ a.email or a.account }}</b><small>{% if a.email %}{{ a.account }} · {% endif %}上游 {{ a.partner }}</small></span>
+                  <span class="pick-side">额度 {{ a.budget | money0 }}</span>
+                </label>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="pick-empty">库存里没有账号。先去账号管理新增上游补发的账号（不选客户），再回来替换。</p>
+          {% endif %}
+        </div>
+        <div class="form-grid">
+          <div class="field"><label for="replace-date">日期</label>
+            <input id="replace-date" name="date" type="date" max="{{ today.isoformat() }}" value="{{ today.isoformat() }}"></div>
+        </div>
+        <div class="outcome" id="replace-outcome"></div>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <span class="card-note">时间线上记一条「替换账号」</span>
+      <div class="modal-btns">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn btn-primary" type="submit" {% if not stock or not swappable %}disabled{% endif %}>确认替换</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="modal" id="dlg-settle">
+  <form method="post" action="{{ url_for('customers.settle', cid=customer.id) }}" data-loading="正在保存">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="key" value="">
+    <header class="modal-head">
+      <h2>结算</h2><span class="modal-sub" data-fill="email"></span>
+      <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+    </header>
+    <div class="modal-body">
+      <div class="ref-grid">
+        <div>额度<b data-fill="budget"></b></div>
+        <div>折算后消费<b data-fill="spent"></b></div>
+        <div>没用完<b data-fill="rest"></b></div>
+        <div>AWS 原价<b data-fill="raw"></b></div>
+        <div>上游<b data-fill="partner"></b></div>
+      </div>
+      <div class="steps">
+        <div class="outcome" data-fill="outcome"></div>
+        <div class="outcome is-warn" data-fill="lag" hidden>这个账号最近两天还有消费，Cost Explorer 的账还没出完，这里记下的消费可能比最终的少一点。</div>
+        <div class="form-grid">
+          <div class="field"><label for="settle-date">结算日期</label>
+            <input id="settle-date" name="date" type="date" max="{{ today.isoformat() }}" value="{{ today.isoformat() }}"></div>
+          <div class="field field-full"><label for="settle-note">备注</label>
+            <input id="settle-note" name="note" maxlength="200" placeholder="比如：和客户、上游都对完了" autocomplete="off"></div>
+          <label class="check-row field-full"><input type="checkbox" name="disable" value="1">
+            <span>同时停用这个账号<small>默认不停，结算前后可能还要核对账单和 Cost Explorer。停用后就不再查它的 Cost Explorer，随时可以在账号管理里恢复</small></span></label>
+        </div>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <span class="card-note">商务、折扣、税务在线下算，这里只记「结了」</span>
+      <div class="modal-btns">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn btn-primary" type="submit">结算</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="modal modal-sm" id="dlg-budget">
+  <form method="post" action="{{ url_for('customers.budget', cid=customer.id) }}" data-loading="正在保存">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="key" value="">
+    <header class="modal-head">
+      <h2>调整额度</h2><span class="modal-sub" data-fill="email"></span>
+      <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+    </header>
+    <div class="modal-body">
+      <div class="ref-grid">
+        <div>现在的额度<b data-fill="budget"></b></div>
+        <div>已用<b data-fill="spent"></b></div>
+        <div>还剩<b data-fill="rest"></b></div>
+      </div>
+      <div class="form-grid">
+        <div class="field field-full"><label for="budget-add">调整多少</label>
+          <input id="budget-add" name="add" inputmode="decimal" required placeholder="比如 300000；减额度写负数" autocomplete="off" data-budget-add data-autofocus>
+          <span class="form-hint" data-fill="preview"></span></div>
+        <div class="field"><label for="budget-date">日期</label>
+          <input id="budget-date" name="date" type="date" max="{{ today.isoformat() }}" value="{{ today.isoformat() }}"></div>
+        <div class="field field-full"><label for="budget-note">备注</label>
+          <input id="budget-note" name="note" maxlength="200" placeholder="比如：客户补了 30 万" autocomplete="off"></div>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <span class="card-note">时间线上记一条「调整额度」</span>
+      <div class="modal-btns">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn btn-primary" type="submit">保存</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="modal modal-sm" id="dlg-risk">
+  <form method="post" action="{{ url_for('customers.risk', cid=customer.id) }}" data-loading="正在保存">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="key" value="">
+    <input type="hidden" name="action" value="mark">
+    <header class="modal-head">
+      <h2>标记风控</h2><span class="modal-sub" data-fill="email"></span>
+      <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+    </header>
+    <div class="modal-body">
+      <p class="outcome" data-fill="outcome"></p>
+      <div class="form-grid" style="margin-top: 14px">
+        <div class="field"><label for="risk-date">日期</label>
+          <input id="risk-date" name="date" type="date" max="{{ today.isoformat() }}" value="{{ today.isoformat() }}"></div>
+        <div class="field field-full"><label for="risk-note">说明</label>
+          <input id="risk-note" name="note" maxlength="200" placeholder="比如：收到 AWS 暂停通知" autocomplete="off"></div>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <div class="modal-btns">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn btn-primary" type="submit">标记风控</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="modal modal-sm" id="dlg-unassign">
+  <form method="post" action="{{ url_for('customers.unassign', cid=customer.id) }}" data-loading="正在保存">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="key" value="">
+    <header class="modal-head">
+      <h2>解绑账号</h2><span class="modal-sub" data-fill="email"></span>
+      <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+    </header>
+    <div class="modal-body">
+      <p class="outcome is-warn" data-fill="outcome"></p>
+      <div class="form-grid" style="margin-top: 14px">
+        <div class="field field-full"><label for="unassign-note">说明</label>
+          <input id="unassign-note" name="note" maxlength="200" placeholder="比如：分错客户了" autocomplete="off"></div>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <div class="modal-btns">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn btn-danger" type="submit">解绑</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="modal modal-sm" id="dlg-note">
+  <form method="post" action="{{ url_for('customers.add_event', cid=customer.id) }}" data-loading="正在保存">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <header class="modal-head">
+      <h2>记一笔</h2><span class="modal-sub">{{ customer.name }}</span>
+      <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+    </header>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="field"><label for="note-kind">类型</label>
+          <select id="note-kind" name="kind">
+            {% for kind, label in manual_kinds %}<option value="{{ kind }}">{{ label }}</option>{% endfor %}
+          </select></div>
+        <div class="field"><label for="note-date">日期</label>
+          <input id="note-date" name="date" type="date" max="{{ today.isoformat() }}" value="{{ today.isoformat() }}"></div>
+        <div class="field field-full"><label for="note-acct">账号</label>
+          <select id="note-acct" name="account">
+            <option value="">不针对某个账号</option>
+            {% for h in view.holdings %}<option value="{{ h.number }}">{{ h.account.email or h.number }}</option>{% endfor %}
+          </select></div>
+        <div class="field field-full"><label for="note-text">说明</label>
+          <textarea id="note-text" name="note" rows="3" maxlength="200" placeholder="比如：客户说下周起量会翻倍" data-autofocus></textarea></div>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <div class="modal-btns">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn btn-primary" type="submit">记下来</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="modal modal-sm" id="dlg-event">
+  <div class="modal-head">
+    <h2 data-fill="title">事件</h2>
+    <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+  </div>
+  <div class="modal-body">
+    <dl class="ev-facts" data-fill="facts"></dl>
+    <form method="post" action="{{ url_for('customers.change_event', cid=customer.id) }}" id="event-date-form" data-loading="正在保存" style="margin-top: 16px">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="id" value="">
+      <input type="hidden" name="action" value="date">
+      <div class="form-grid">
+        <div class="field"><label for="event-date">日期</label>
+          <input id="event-date" name="date" type="date" max="{{ today.isoformat() }}" required></div>
+      </div>
+      <p class="form-hint" data-fill="hint"></p>
+    </form>
+  </div>
+  <div class="modal-foot">
+    <form method="post" action="{{ url_for('customers.change_event', cid=customer.id) }}" id="event-delete-form" data-loading="正在保存">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="id" value="">
+      <input type="hidden" name="action" value="delete">
+      <button class="btn btn-danger" type="submit">删掉这条</button>
+    </form>
+    <div class="modal-btns">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="submit" form="event-date-form">保存日期</button>
+    </div>
+  </div>
+</dialog>
+
+<script src="{{ url_for('static', filename='timeline.js') }}"></script>
+<script>
+(function () {
+  'use strict';
+  const money = function (value) {
+    const sign = value < 0 ? '-' : '';
+    return sign + {{ currency | tojson }} + Math.abs(Math.round(value)).toLocaleString('en-US');
+  };
+  const data = JSON.parse(document.getElementById('holdings-data').textContent);
+  const holdings = data.holdings;
+
+  function fill(dialog, name, text) {
+    const target = dialog.querySelector('[data-fill="' + name + '"]');
+    if (target) target.textContent = text;
+    return target;
+  }
+  function closeMenus() {
+    for (const pop of document.querySelectorAll('.row-more-pop[popover]')) {
+      try { if (pop.matches(':popover-open')) pop.hidePopover(); } catch (error) { /* 不认 popover 的老浏览器 */ }
+    }
+  }
+  function open(dialog) {
+    closeMenus();
+    dialog.showModal();
+    // showModal 默认聚焦右上角的 ×；有要填的框（名字、调整多少、说明）就落到那个框上。
+    // 确认类的弹窗（风控、结算、解绑）留在 ×，免得一按回车就确认了
+    const first = dialog.querySelector('[data-autofocus], [data-name-input]');
+    if (first) first.focus();
+  }
+
+  // ---- 弹窗：打开、关闭、点外面关；提交失败回来的直接打开
+  for (const dialog of document.querySelectorAll('dialog.modal')) {
+    dialog.addEventListener('click', function (event) { if (event.target === dialog) dialog.close(); });
+  }
+  const reopen = document.querySelector('dialog[data-reopen]');
+  if (reopen) open(reopen);
+
+  // ---- 表格里每个账号的动作：把这个账号的数填进对应的弹窗
+  const actions = {
+    settle: function (dialog, h) {
+      fill(dialog, 'email', h.email);
+      fill(dialog, 'budget', money(h.budget));
+      fill(dialog, 'spent', h.has_numbers ? money(h.spent) : '查不到');
+      fill(dialog, 'rest', h.has_numbers ? money(Math.max(0, h.remaining)) : '—');
+      fill(dialog, 'raw', h.has_numbers ? money(h.raw) : '—');
+      fill(dialog, 'partner', h.partner);
+      fill(dialog, 'outcome', h.stage === 'use'
+        ? '结算之后：这个账号从使用中变成已结算，它的额度和消费从今天起不算进预算和余额，余额会少 ' + money(Math.max(0, h.remaining)) + '。它用掉的钱留在历史消费、时间线和月度对账单里。'
+        : '结算之后：这个账号从「' + h.stage_label + '」变成「已结算」。它从 ' + (h.left || '之前') + '（' + (h.left_why || '不在使用中') + '）起就不算进预算、消费和余额了，这一步不改数字。');
+      dialog.querySelector('[data-fill="lag"]').hidden = !h.recent;
+      dialog.querySelector('[name="disable"]').checked = false;
+    },
+    budget: function (dialog, h) {
+      fill(dialog, 'email', h.email);
+      fill(dialog, 'budget', money(h.budget));
+      fill(dialog, 'spent', h.has_numbers ? money(h.spent) : '查不到');
+      fill(dialog, 'rest', h.has_numbers ? money(h.remaining) : '—');
+      const input = dialog.querySelector('[data-budget-add]');
+      input.value = '';
+      input.dataset.base = h.budget;
+      fill(dialog, 'preview', '加完是多少会写在这里。');
+    },
+    risk: function (dialog, h) {
+      fill(dialog, 'email', h.email);
+      fill(dialog, 'outcome', '标记以后，这个账号从这天起不算进预算、消费和余额（没用完的 ' + money(Math.max(0, h.remaining)) + ' 跟着移出），生命周期换成「风控」。之后去替换一个新账号。');
+    },
+    unassign: function (dialog, h) {
+      fill(dialog, 'email', h.email);
+      fill(dialog, 'outcome', '解绑以后，这个账号回到库存，它的消费不再算进' + data.name + '（历史消费会少 ' + money(h.spent) + '）。时间线上留一条「解绑」的记录。一般只在分错客户的时候用。');
+    },
+  };
+
+  document.addEventListener('click', function (event) {
+    if (!(event.target instanceof Element)) return;
+    const opener = event.target.closest('[data-open]');
+    if (opener) { open(document.getElementById(opener.getAttribute('data-open'))); return; }
+    const closer = event.target.closest('[data-close]');
+    if (closer) { closer.closest('dialog').close(); return; }
+    const act = event.target.closest('[data-act]');
+    if (act) {
+      const h = holdings[act.dataset.key];
+      if (!h) return;
+      if (act.dataset.act === 'replace') {
+        const dialog = document.getElementById('dlg-replace');
+        const radio = dialog.querySelector('input[name="old"][value="' + CSS.escape(act.dataset.key) + '"]');
+        if (radio) radio.checked = true;
+        // 风控的账号换掉，原因默认是「风控」；额度用完的默认「额度用完」
+        const reason = h.stage === 'pending' && h.left_why === '用完' ? '额度用完' : '风控';
+        const option = dialog.querySelector('input[name="reason"][value="' + reason + '"]');
+        if (option) option.checked = true;
+        replaceOutcome();
+        open(dialog);
+        return;
+      }
+      const dialog = document.getElementById('dlg-' + act.dataset.act);
+      dialog.querySelector('input[name="key"]').value = act.dataset.key;
+      actions[act.dataset.act](dialog, h);
+      open(dialog);
+      return;
+    }
+    // 告警流：看更早的
+    const more = event.target.closest('[data-feed-more]');
+    if (more) {
+      const hidden = document.querySelectorAll('#feed [data-more]');
+      const showing = more.getAttribute('aria-expanded') === 'true';
+      for (const item of hidden) item.hidden = showing;
+      more.setAttribute('aria-expanded', String(!showing));
+      more.textContent = showing ? more.dataset.moreLabel : '收起';
+      return;
+    }
+    // 月度对账单：按月 / 按账号
+    const view = event.target.closest('[data-stmt]');
+    if (view) {
+      const which = view.dataset.stmt;
+      for (const button of document.querySelectorAll('[data-stmt]')) {
+        const on = button === view;
+        button.classList.toggle('is-on', on);
+        button.setAttribute('aria-pressed', String(on));
+      }
+      for (const box of document.querySelectorAll('[data-stmt-view]')) box.hidden = box.dataset.stmtView !== which;
+      for (const note of document.querySelectorAll('[data-stmt-note]')) note.hidden = note.dataset.stmtNote !== which;
+    }
+  });
+  // 「更多操作」：贴着「…」按钮右边往下开，下面放不下就往上开。点外面、按 Esc 由 popover 自己收
+  for (const pop of document.querySelectorAll('.row-more-pop[popover]')) {
+    const anchor = document.querySelector('[popovertarget="' + pop.id + '"]');
+    pop.addEventListener('beforetoggle', function (event) {
+      if (event.newState !== 'open' || !anchor) return;
+      const box = anchor.getBoundingClientRect();
+      pop.style.top = (box.bottom + 4) + 'px';
+      pop.style.right = Math.max(8, document.documentElement.clientWidth - box.right) + 'px';
+    });
+    pop.addEventListener('toggle', function (event) {
+      if (event.newState !== 'open' || !anchor) return;
+      const height = pop.offsetHeight;
+      if (pop.getBoundingClientRect().bottom > window.innerHeight - 8) {
+        pop.style.top = Math.max(8, anchor.getBoundingClientRect().top - height - 4) + 'px';
+      }
+    });
+  }
+  // 菜单是 fixed 定位的，页面一滚就和那一行对不上了，干脆收起来
+  document.addEventListener('scroll', function (event) {
+    for (const pop of document.querySelectorAll('.row-more-pop[popover]')) {
+      try { if (pop.matches(':popover-open') && !pop.contains(event.target)) pop.hidePopover(); } catch (error) { return; }
+    }
+  }, { capture: true, passive: true });
+
+  // ---- 调整额度：边填边算改完是多少
+  const addInput = document.querySelector('[data-budget-add]');
+  if (addInput) {
+    addInput.addEventListener('input', function () {
+      const dialog = addInput.closest('dialog');
+      const value = Number(addInput.value.replace(/[,\s$]/g, ''));
+      const base = Number(addInput.dataset.base || 0);
+      fill(dialog, 'preview', addInput.value.trim() && isFinite(value)
+        ? '加完是 ' + money(base + value) + '。'
+        : '要填数字，比如 300000。');
+    });
+  }
+
+  // ---- 替换：确认之后会怎样
+  function replaceOutcome() {
+    const dialog = document.getElementById('dlg-replace');
+    const box = document.getElementById('replace-outcome');
+    const old = dialog.querySelector('input[name="old"]:checked');
+    const fresh = dialog.querySelector('input[name="new"]:checked');
+    const reason = dialog.querySelector('input[name="reason"]:checked');
+    box.replaceChildren();
+    if (!old || !fresh) { box.textContent = '要先有一个能换下的账号、库存里也有账号，才能替换。'; return; }
+    const h = holdings[old.value];
+    const budget = Number(fresh.dataset.budget || 0);
+    const risky = reason && (reason.value === '风控' || reason.value === '封号');
+    const after = data.balance - (h.stage === 'use' ? Math.max(0, h.remaining) : 0) + budget;
+    const first = h.stage === 'use'
+      ? h.email + ' 停在已用 ' + money(h.spent) + '，进入待结算' + (risky ? '，打上「风控」「结算」' : '，打上「结算」') + '；从这天起不算进余额，没用完的 ' + money(Math.max(0, h.remaining)) + ' 跟着移出。'
+      : h.email + ' 进入待结算，打上「结算」。它' + (h.left ? ' ' + h.left + ' 起' : '之前') + '就已经不算进余额了。';
+    const lines = [first + '核对完账单再点「结算」。',
+      fresh.closest('label').querySelector('b').textContent + '（额度 ' + money(budget) + '）分给' + data.name + '，从 0 开始用。余额 ' + money(data.balance) + ' → ' + money(after) + '。'];
+    const head = document.createElement('b');
+    head.textContent = '确认之后：';
+    const list = document.createElement('ol');
+    for (const line of lines) { const li = document.createElement('li'); li.textContent = line; list.append(li); }
+    box.append(head, list);
+  }
+  document.addEventListener('change', function (event) {
+    if (event.target.matches('#dlg-replace input')) replaceOutcome();
+  });
+  replaceOutcome();
+
+  // ---- 头像里「名字的第一个字」跟着名字变
+  document.addEventListener('input', function (event) {
+    if (!event.target.matches('[data-name-input]')) return;
+    const preview = event.target.closest('form').querySelector('[data-letter-preview]');
+    if (!preview) return;
+    const ch = Array.from(event.target.value.trim())[0] || '?';
+    preview.textContent = /[a-z]/i.test(ch) ? ch.toUpperCase() : ch;
+  });
+
+  // ================================================ 时间线
+  // 横向时间线由 static/timeline.js 画；点卡片：看详情、改日期、删掉
+  const box = document.querySelector('[data-timeline]');
+  if (box) box.addEventListener('timeline:pick', function (event) {
+    const item = event.detail;
+    const dialog = document.getElementById('dlg-event');
+    fill(dialog, 'title', item.title);
+    const facts = dialog.querySelector('[data-fill="facts"]');
+    facts.replaceChildren();
+    const rows = [['日期', item.date],
+      ['账号', item.who ? item.who.label + (item.peer ? ' → ' + item.peer.label : '') : '整个客户'],
+      ['内容', item.text || '—'],
+      ['来源', item.id === 'since' ? '客户资料里的开始合作日期'
+        : item.auto ? '系统按数据自动记的' : '手动记的' + (item.actor ? '（' + item.actor + (item.created ? '，' + item.created : '') + '）' : '')]];
+    for (const pair of rows) {
+      const term = document.createElement('dt');
+      term.textContent = pair[0];
+      const value = document.createElement('dd');
+      value.textContent = pair[1];
+      facts.append(term, value);
+    }
+    const editable = item.id !== 'since';
+    for (const form of dialog.querySelectorAll('form')) {
+      form.hidden = !editable;
+      form.querySelector('[name="id"]').value = item.id;
+    }
+    dialog.querySelector('[form="event-date-form"]').hidden = !editable;
+    dialog.querySelector('#event-date').value = item.date;
+    fill(dialog, 'hint', item.auto ? '自动记的可以改日期；删掉以后不会再自动生成。' : '改日期、删掉都会写进审计日志。删掉只是不在时间线上显示，账号的阶段、额度不会跟着变。');
+    if (!editable) fill(dialog, 'hint', '开始合作的日期在「编辑客户」里改。');
+    dialog.showModal();
+  });
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,119 @@
+{# 账号页的「时间线」页签：这个账号从启用到今天的事，不管中间换过几个客户、解绑过没有。
+   上面是和客户页同一个样子的横向时间线（卡片上那一行是那时候归哪个客户），下面是一张事件表，
+   手动记的写着谁、几点几分记的。这里只看不改：改日期、删掉去客户页的时间线。 #}
+{% extends "account_base.html" %}
+{% from "_customer_macros.html" import cicon, timeline_box with context %}
+{% block loading_label %}正在读这个账号的事{% endblock %}
+
+{% block tab_content %}
+
+{% call timeline_box(timeline, categories,
+                     ((account.start_date.isoformat() ~ ' 启用到今天 · ') if account.start_date else '') ~ (rows | length) ~ ' 件事',
+                     timeline_fallback, '点卡片看详情') %}
+  {# 台账写进来之前的改动（比如上线前改过的额度）只在操作日志里 #}
+  <a class="btn btn-sm" href="{{ url_for('settings.audit', q=account.account) }}" title="这个账号在操作日志里的每一条记录">操作日志</a>
+{% endcall %}
+
+<section class="card" aria-labelledby="ev-table-title">
+  <div class="card-head">
+    <div class="card-title">
+      <h2 id="ev-table-title">事件表</h2>
+      <span class="card-note">最近的在上面。手动记的存在台账的 EVENTS 表里，写着谁、几点几分记的；自动的按每天的消费和告警现算</span>
+    </div>
+  </div>
+  {% if rows %}
+  <div class="table-scroll">
+    <table class="ev-table">
+      <thead><tr><th>日期</th><th>事件</th><th>内容</th><th>客户</th><th>谁记的</th></tr></thead>
+      <tbody>
+        {% for row in rows %}
+          {% set item = row.item %}
+          <tr>
+            <td class="tab-num ev-day">{{ item.date.isoformat() }}</td>
+            <td><span class="ev-kind{% if not item.auto %} is-hand{% endif %}" style="--k: var(--k-{{ item.color }})"><i aria-hidden="true"></i>{{ item.title }}</span></td>
+            <td class="ev-text">{{ row.text or '—' }}</td>
+            <td>
+              {%- if row.owner -%}
+                {%- set av = avatar_info(row.owner) -%}
+                <a class="owner-link" href="{{ url_for('customers.detail', cid=row.owner.id) }}" data-loading="正在读这个客户">
+                  {%- if av.image %}<img class="cimg owner-av" src="{{ url_for('static', filename=av.image) }}" alt="" width="18" height="18">
+                  {%- else %}<span class="cimg cletter owner-av lt-{{ av.tone }}" aria-hidden="true">{{ av.letter }}</span>{% endif -%}
+                  {{ row.owner.name }}</a>
+              {%- elif row.cid %}{{ row.cid }}
+              {%- else %}<span class="tone-muted">库存</span>{% endif -%}
+            </td>
+            <td class="ev-who">
+              {%- if item.kind == 'start' %}<span class="tone-muted">台账的启用日期</span>
+              {%- elif item.auto %}<span class="tone-muted">自动</span>
+              {%- else %}{{ item.actor or '—' }}
+                {%- if item.created_at %}<small class="tab-num">{{ item.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</small>{% endif %}
+              {%- endif -%}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <p class="empty">还没有记过事。</p>
+  {% endif %}
+</section>
+
+<dialog class="modal modal-sm" id="dlg-event">
+  <div class="modal-head">
+    <h2 data-fill="title">事件</h2>
+    <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+  </div>
+  <div class="modal-body">
+    <dl class="ev-facts" data-fill="facts"></dl>
+    <p class="form-hint" data-fill="hint"></p>
+  </div>
+  <div class="modal-foot">
+    <div class="modal-btns">
+      <button class="btn" type="button" data-close>关闭</button>
+    </div>
+  </div>
+</dialog>
+
+<script src="{{ url_for('static', filename='timeline.js') }}"></script>
+<script>
+(function () {
+  'use strict';
+  const dialog = document.getElementById('dlg-event');
+  function fill(name, text) {
+    const target = dialog.querySelector('[data-fill="' + name + '"]');
+    if (target) target.textContent = text;
+    return target;
+  }
+  document.addEventListener('click', function (event) {
+    if (!(event.target instanceof Element)) return;
+    if (event.target.closest('[data-close]')) dialog.close();
+  });
+  dialog.addEventListener('click', function (event) { if (event.target === dialog) dialog.close(); });
+
+  // 点时间线上的卡片：只看。改日期、删掉在客户页的时间线上
+  const box = document.querySelector('[data-timeline]');
+  if (box) box.addEventListener('timeline:pick', function (event) {
+    const item = event.detail;
+    fill('title', item.title);
+    const facts = dialog.querySelector('[data-fill="facts"]');
+    facts.replaceChildren();
+    const rows = [['日期', item.date], ['客户', item.who ? item.who.label : (item.none || '—')], ['内容', item.text || '—'],
+      ['来源', item.id === 'start' ? '台账里的启用日期'
+        : item.auto ? '系统按数据自动记的' : '手动记的' + (item.actor ? '（' + item.actor + (item.created ? '，' + item.created : '') + '）' : '')]];
+    for (const pair of rows) {
+      const term = document.createElement('dt');
+      term.textContent = pair[0];
+      const value = document.createElement('dd');
+      value.textContent = pair[1];
+      facts.append(term, value);
+    }
+    fill('hint', item.id === 'start' ? '启用日期在账号管理里改。'
+      : item.who ? '要改日期或者删掉，去「' + item.who.label + '」的客户页，在时间线上点这一条。'
+      : item.auto ? '按每天的消费和告警算出来的；那时候账号在库存里，没有客户页可改。'
+      : '在库存里时记的（没有客户），只在这里和操作日志里看得到。');
+    dialog.showModal();
+  });
+})();
+</script>
+{% endblock %}

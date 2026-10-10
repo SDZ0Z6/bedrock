@@ -25,6 +25,7 @@ from __future__ import annotations
 import html
 import math
 from dataclasses import dataclass, field
+from datetime import timedelta
 from types import SimpleNamespace
 
 # 8 个分类色槽（深色底），顺序即分配顺序，不循环、不生成第 9 个色
@@ -113,6 +114,13 @@ def compact_number(value: float) -> str:
     return f"{sign}{text}"
 
 
+def _zoom_attrs(left: float, right: float, count: int, band: float, gap: float) -> str:
+    """带时间轴的图能沿横轴放大、拖动（app.js）：告诉脚本绘图区的左右边界、有几格、一格多宽、
+    横轴上两个字之间至少隔多宽（0 = 刻度是服务端挑好的，只挪位置、不多加）。"""
+    return (f'data-zoom="{left:.1f},{right:.1f}" data-zoom-n="{max(1, count)}" '
+            f'data-zoom-band="{band:.3f}" data-zoom-gap="{gap:g}"')
+
+
 def _nice_step(span: float, intervals: int = 4) -> float:
     """把轴刻度落到 1 / 2 / 2.5 / 5 / 10 这类整数上。"""
     if span <= 0:
@@ -187,7 +195,7 @@ def render_stacked_areas(report, symbol: str = "$", ideal_width: int = IDEAL_W) 
     parts: list[str] = []
     parts.append(
         f'<svg class="chart-svg area-chart" viewBox="0 0 {width} {height}" '
-        f'width="{width}" height="{height}" role="img" '
+        f'width="{width}" height="{height}" {_zoom_attrs(x0, x0 + plot_w, count, band, 46.0)} role="img" '
         f'aria-label="按{"月" if report.granularity == "monthly" else "日"}'
         f'的{html.escape(report.dimension_label)}成本堆叠面积图，'
         f'共 {count} 个时间桶，{len(report.series)} 条序列">'
@@ -286,11 +294,12 @@ def render_stacked_areas(report, symbol: str = "$", ideal_width: int = IDEAL_W) 
             shown.append(index)
     if shown and shown[-1] != count - 1 and (count - 1 - shown[-1]) * band >= 46:
         shown.append(count - 1)
-    for index in shown:
+    # 每个桶的字都画上，不在 shown 里的先藏着：放大以后（app.js）放得下就多显示几个
+    for index in range(count):
         x = x0 + band * index + band / 2
         parts.append(
             f'<text x="{x:.2f}" y="{plot_bottom + 20:.0f}" text-anchor="middle" '
-            f'fill="{TICK_TEXT}" font-size="11">'
+            f'fill="{TICK_TEXT}" font-size="11" data-i="{index}"{"" if index in shown else " display=\"none\""}>'
             f"{html.escape(report.labels[index])}</text>"
         )
     parts.append("</g>")
@@ -510,7 +519,7 @@ def render_lines(report, unit: str = "", width: int = IDEAL_W, uid: str = "ln") 
     safe_uid = html.escape(uid)
     parts: list[str] = [
         f'<svg class="chart-svg line-chart" viewBox="0 0 {width} {height}" '
-        f'width="{width}" height="{height}" role="img" '
+        f'width="{width}" height="{height}" {_zoom_attrs(PAD_L, PAD_L + plot_w, count, step or plot_w, 0.0)} role="img" '
         f'aria-label="{html.escape(report.metric_label)}随时间变化的折线图，'
         f"{count} 个时间点，{len(series_list)} 条序列，"
         f'纵轴单位 {html.escape(unit or report.unit)}">'
@@ -966,6 +975,7 @@ def render_bars(
 
     parts = [
         f'<svg class="chart-svg bar-chart" viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
+        f'{_zoom_attrs(pad_l, width - pad_r, count, band, 44.0)} '
         f'role="img" aria-label="堆叠柱状图，{count} 格，{len(live)} 条序列">',
         '<g class="chart-grid">',
     ]
@@ -1005,10 +1015,12 @@ def render_bars(
         parts.append("</g>")
     parts.append('</g><g class="chart-xaxis">')
     stride = max(1, math.ceil(44.0 / band))
-    for i in range(0, count, stride):
+    # 每一格的字都画上，隔几格才显示一个：放大以后（app.js）放得下就多显示几个
+    for i in range(count):
         parts.append(
             f'<text x="{pad_l + band * i + band / 2:.2f}" y="{plot_bottom + 17:.0f}" text-anchor="middle" '
-            f'fill="{TICK_TEXT}" font-size="10.5">{html.escape(labels[i])}</text>'
+            f'fill="{TICK_TEXT}" font-size="10.5" data-i="{i}"{"" if i % stride == 0 else " display=\"none\""}>'
+            f'{html.escape(labels[i])}</text>'
         )
     parts.append('</g><g class="chart-hits">')
     for i in range(count):
@@ -1113,3 +1125,127 @@ def week_grid(stamps, values: list[float], period: int) -> list[list[float | Non
         ]
         for weekday in range(7)
     ]
+
+
+# ---------------------------------------------------------------- 客户页
+def render_donut(parts: list[tuple[str, float, str]], size: int = 196, stroke: float = 20.0) -> str:
+    """环形图（客户页的「账号」）：parts 是 (名字, 数, 颜色)，一段一个分类，从正上方顺时针首尾相接，
+    段与段之间留一道底色的缝。中间的大数字由模板盖上去，这里只画环。
+
+    进场动画（CSS，系统开了「减弱动画」就不动）：各段一段接一段画出来——每段是 pathLength=1 的弧，
+    动 dashoffset；延迟和时长按前面几段、这一段的占比算（--d0 / --dd），连起来像一笔画完一整圈。
+    """
+    live = [(name, value, color) for name, value, color in parts if value > 0]
+    total = sum(value for _, value, _ in live)
+    r = (size - stroke) / 2 - 2
+    c = size / 2
+    out = [
+        f'<svg class="donut-svg" viewBox="0 0 {size} {size}" width="{size}" height="{size}" role="img" '
+        f'aria-label="{html.escape("，".join(f"{name} {value:g}" for name, value, _ in live) or "没有数据")}">',
+        f'<circle cx="{c:.2f}" cy="{c:.2f}" r="{r:.2f}" fill="none" stroke="{GRID}" stroke-width="{stroke}"></circle>',
+    ]
+    if total <= 0:
+        out.append("</svg>")
+        return "".join(out)
+    gap = 2.4 if len(live) > 1 else 0.0       # 度
+    duration = 900.0                          # 一整圈的毫秒数
+    start, done = -90.0, 0.0
+    for name, value, color in live:
+        sweep = 360.0 * value / total
+        if sweep >= 359.9:
+            # 只有一段：画成两个半圆，起点终点重合的弧 SVG 画不出来
+            d = (f"M{c:.2f},{c - r:.2f} A{r:.2f},{r:.2f} 0 1 1 {c:.2f},{c + r:.2f} "
+                 f"A{r:.2f},{r:.2f} 0 1 1 {c:.2f},{c - r:.2f}")
+        else:
+            d = _arc(c, c, r, start + gap / 2, start + sweep - gap / 2)
+        out.append(
+            f'<path class="donut-seg" pathLength="1" d="{d}" fill="none" stroke="{color}" stroke-width="{stroke}" '
+            f'style="--d0:{done / total * duration:.0f}ms;--dd:{value / total * duration:.0f}ms">'
+            f'<title>{html.escape(name)} {value:g}</title></path>'
+        )
+        start += sweep
+        done += value
+    out.append("</svg>")
+    return "".join(out)
+
+
+def render_runway(history: list[tuple], per_day: float, width: int = 300, height: int = 210,
+                  fmt=None, axis=None) -> str:
+    """「还能用几天」：过去几周每天结束时的余额（实线 + 线下浅填充），从今天按日均往后推到 0（虚线，
+    末端一个空心点）。history 是 [(date, 余额)]，最后一个是今天；per_day 是日均消费，0 就不画预测。
+
+    动效沿用折线图的（CSS）：实线从左往右画出来，填充、今天的点和预测随后淡入。
+    """
+    fmt = fmt or compact_number
+    axis = axis or compact_number
+    if not history:
+        return (f'<svg class="chart-svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
+                f'role="img" aria-label="没有数据"><text x="{width / 2:.0f}" y="{height / 2:.0f}" '
+                f'text-anchor="middle" fill="{TICK_TEXT}" font-size="13">没有数据</text></svg>')
+    pad_l, pad_r, pad_t, pad_b = 46.0, 14.0, 12.0, 26.0
+    now = max(0.0, history[-1][1])
+    left = now / per_day if per_day > 0 and now > 0 else 0.0
+    ahead = max(6, math.ceil(left) + 2) if left else 6
+    span = len(history) - 1 + ahead
+    top = max([value for _, value in history] + [1.0])
+    step = _nice_step(top, 3)
+    ticks = max(1, math.ceil(top / step - 1e-9))
+    ceiling = step * ticks
+    plot_w, plot_h = width - pad_l - pad_r, height - pad_t - pad_b
+
+    def x(i: float) -> float:
+        return pad_l + plot_w * i / span
+
+    def y(value: float) -> float:
+        return pad_t + plot_h * (1 - max(0.0, value) / ceiling)
+
+    today_i = len(history) - 1
+    out = [
+        f'<svg class="chart-svg line-chart runway-chart" viewBox="0 0 {width} {height}" width="{width}" '
+        f'height="{height}" {_zoom_attrs(pad_l, width - pad_r, span + 1, plot_w / span, 0.0)} '
+        f'role="img" aria-label="余额 {html.escape(fmt(now))}，'
+        f'{"按日均约 " + str(math.floor(left)) + " 天后用完" if left else "最近没有消费"}">',
+        '<g class="chart-grid">',
+    ]
+    for tick in range(ticks + 1):
+        ty = y(step * tick)
+        out.append(
+            f'<line x1="{pad_l:.0f}" y1="{ty:.2f}" x2="{width - pad_r:.0f}" y2="{ty:.2f}" '
+            f'stroke="{BASELINE if tick == 0 else GRID}" stroke-width="1"></line>'
+            f'<text x="{pad_l - 7:.0f}" y="{ty + 4:.2f}" text-anchor="end" fill="{TICK_TEXT}" font-size="10.5" '
+            f'style="font-variant-numeric:tabular-nums">{html.escape(axis(step * tick))}</text>'
+        )
+    out.append("</g>")
+    points = [(x(i), y(value)) for i, (_, value) in enumerate(history)]
+    line = "M" + " L".join(f"{px:.1f},{py:.1f}" for px, py in points)
+    accent = "#d97757"
+    out.append(
+        f'<path class="chart-area" d="{line} L{points[-1][0]:.1f},{y(0):.1f} L{points[0][0]:.1f},{y(0):.1f} Z" '
+        f'fill="{accent}" fill-opacity="{AREA_FILL_OPACITY}"></path>'
+        f'<path class="chart-line" pathLength="1" d="{line}" fill="none" stroke="{accent}" '
+        f'stroke-width="{LINES_W}" stroke-linejoin="round" stroke-linecap="round"></path>'
+        f'<line x1="{x(today_i):.1f}" y1="{pad_t:.0f}" x2="{x(today_i):.1f}" y2="{y(0):.1f}" '
+        f'stroke="{LABEL_TEXT}" stroke-width="1" stroke-dasharray="3 3" stroke-opacity=".55"></line>'
+    )
+    if left:
+        end = today_i + left
+        out.append(
+            f'<path class="chart-marker" d="M{x(today_i):.1f},{y(now):.1f} L{x(end):.1f},{y(0):.1f}" fill="none" '
+            f'stroke="{accent}" stroke-width="2" stroke-dasharray="5 4"></path>'
+            f'<circle class="chart-marker" cx="{x(end):.1f}" cy="{y(0):.1f}" r="4" fill="{SURFACE}" '
+            f'stroke="{accent}" stroke-width="2"></circle>'
+        )
+    out.append(
+        f'<circle class="chart-marker" cx="{x(today_i):.1f}" cy="{y(now):.1f}" r="{MARKER_R:.1f}" fill="{accent}" '
+        f'stroke="{SURFACE}" stroke-width="2"></circle>'
+    )
+    labels = [(x(0), history[0][0].strftime("%m-%d"), "start"), (x(today_i), "今天", "middle")]
+    if left:
+        when = history[-1][0] + timedelta(days=math.floor(left))
+        labels.append((min(x(today_i + left), width - pad_r), when.strftime("%m-%d"), "end"))
+    out.append('<g class="chart-xaxis">')
+    for lx, text, anchor in labels:
+        out.append(f'<text x="{lx:.1f}" y="{height - 8:.0f}" text-anchor="{anchor}" fill="{TICK_TEXT}" '
+                   f'font-size="10.5">{html.escape(text)}</text>')
+    out.append("</g></svg>")
+    return "".join(out)
