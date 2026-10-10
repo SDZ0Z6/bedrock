@@ -64,7 +64,8 @@ def test_操作日志_新的在前_号码能点(admin):
     html = get(admin, "/settings/audit")
     rows = html[html.index("<tbody>"):html.index("</tbody>")]
     text = scrape(rows)
-    assert text.index(f"停用账号 {ALPHA_NO}") < text.index(f"修改账号 {ALPHA_NO}")
+    # 账号写成「邮箱（号码）」，号码那一截是个链接
+    assert text.index(f"停用账号 {target.email}") < text.index(f"修改账号 {target.email}")
     assert f'href="/account/{ALPHA_NO}/timeline"' in rows
     assert TEST_USER in text and "BUDGET" in text
     assert "共 2 条" in scrape(html)
@@ -77,7 +78,7 @@ def test_操作日志能搜能筛(admin):
     post(admin, "/accounts/toggle", key=other.key, enabled="0")
     html = get(admin, f"/settings/audit?q={ALPHA_NO}")
     text = scrape(html[html.index("<tbody>"):html.index("</tbody>")])
-    assert f"修改账号 {ALPHA_NO}" in text and other.account not in text
+    assert f"修改账号 {target.email}" in text and other.account not in text
     assert "对得上的 1 条" in scrape(html)
     html = get(admin, "/settings/audit?kind=账号")
     assert 'aria-current="true">账号' in html

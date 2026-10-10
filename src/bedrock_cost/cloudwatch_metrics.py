@@ -578,6 +578,57 @@ def _fetch_region(
     return rows, False, None
 
 
+@dataclass
+class AccountHours:
+    """几个账号各自四区合计的序列（不分模型）：客户页「近 24 小时调用」按账号叠起来用。"""
+
+    timestamps: list[datetime] = field(default_factory=list)
+    labels: list[str] = field(default_factory=list)
+    values: dict[str, list[float]] = field(default_factory=dict)      # account.key -> 每个时间桶的值
+    errors: list[QueryError] = field(default_factory=list)
+
+
+def account_totals(
+    accounts: list[Account],
+    window: MetricWindow,
+    metric_key: str = DEFAULT_METRIC,
+    regions: list[str] | None = None,
+    refresh: bool = False,
+) -> AccountHours:
+    """每个账号四区合计的序列。build_metrics 把几个账号按模型合在一起，这里按账号分开；
+    取数、缓存都和它共用（_fetch_region），读不到的 (账号, 区域) 记在 errors，不挡别的。"""
+    if metric_key not in METRICS:
+        metric_key = DEFAULT_METRIC
+    picked = [r for r in (regions or DEFAULT_REGIONS) if r in REGIONS] or DEFAULT_REGIONS
+    stamps, labels = build_grid(window)
+    out = AccountHours(timestamps=stamps, labels=labels,
+                       values={account.key: [0.0] * len(stamps) for account in accounts})
+    if not accounts:
+        return out
+    if refresh:
+        clear_cache()
+
+    jobs = [(account, region) for account in accounts for region in picked]
+
+    def run(job):
+        account, region = job
+        rows, _, error = _fetch_region(account, region, window, metric_key)
+        return account, region, rows, error
+
+    workers = max(1, min(config.MAX_WORKERS, len(jobs)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for account, region, rows, error in pool.map(run, jobs):
+            if error:
+                out.errors.append(as_query_error(error, account=account.account, region=region,
+                                                 partner=account.partner))
+                continue
+            totals = out.values[account.key]
+            for values in (rows or {}).values():
+                for position, value in enumerate(values[: len(totals)]):
+                    totals[position] += value
+    return out
+
+
 def build_metrics(
     accounts: list[Account],
     regions: list[str],

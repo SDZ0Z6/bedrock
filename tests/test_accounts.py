@@ -723,8 +723,8 @@ def test_审计日志记录操作但不含凭证(admin, ledger):
     post(admin, "/accounts/toggle", key=target.key, enabled="0")
 
     log = (ledger.parent / excel_source.AUDIT_NAME).read_text(encoding="utf-8")
-    assert "新增账号 333333333333" in log
-    assert "停用账号 333333333333" in log
+    assert "新增账号 acct-three@example.com（333333333333），上游 GAMMA" in log
+    assert "停用账号 acct-three@example.com（333333333333）" in log
     assert "tester" in log  # 操作人
     assert NEW_FORM["ak"] not in log
     assert NEW_FORM["sk"] not in log
@@ -1219,7 +1219,7 @@ class TestTableToggle:
     def test_is_audited(self, admin, ledger):
         post(admin, "/accounts/tg-toggle", key=self.with_chat(admin), tg_enabled="1")
         log = (ledger.parent / "ledger-audit.log").read_text(encoding="utf-8")
-        assert "开启账号 111111111111 的 TG 告警" in log
+        assert "开启账号 acct-one@example.com（111111111111） 的 TG 告警" in log
 
     def test_needs_csrf(self, admin, ledger):
         key = self.with_chat(admin)

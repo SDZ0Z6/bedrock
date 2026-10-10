@@ -98,6 +98,10 @@
         <p class="viz-big">{{ calls.total | compact }}<small>次</small></p>
         <p class="viz-meta">每小时平均 <strong>{{ calls.average | compact }}</strong>
           {%- if calls.peak_label %} · 最高 <strong>{{ calls.peak_value | compact }}</strong>（{{ calls.peak_label }}）{% endif %}</p>
+        {# 账单晚 1~2 天：这里先看今天大概花了多少（用量 × 牌价），细的去「预估」页签 #}
+        <p class="viz-meta today-cost">今天预估花费 <strong>{{ today_cost.total | money }}</strong>
+          <span class="tone-muted">· 用量 × 牌价，晚几分钟，以账单为准{% if today_cost.partial %}（有的区或模型没算上）{% endif %} ·</span>
+          <a href="{{ url_for('account.estimate', number=account.account) }}" data-loading="正在拉用量和单价">预估页签</a></p>
       </div>
       {% if calls.series | length >= 2 %}
         <div class="legend">

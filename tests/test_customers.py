@@ -491,16 +491,6 @@ def test_国旗():
 
 
 # ==================================================================== 图
-def test_环形图一段一个分类():
-    from bedrock_cost import chart
-    svg = chart.render_donut([("正常", 1, "#2c7652"), ("异常", 0, "#bc3b2e"), ("已结算", 2, "#c2c0b6")])
-    assert svg.count('class="donut-seg"') == 2          # 0 的那段不画
-    assert "--d0:0ms" in svg and "--d0:300ms" in svg     # 第二段等第一段画完（占 1/3）
-    single = chart.render_donut([("正常", 3, "#2c7652")])
-    assert single.count('class="donut-seg"') == 1 and single.count(" A") == 2   # 整圈拆成两个半圆
-    assert 'class="donut-seg"' not in chart.render_donut([])
-
-
 def test_还能用几天的图():
     from bedrock_cost import chart
     history = [(TODAY - timedelta(days=20 - i), 1_000_000 - i * 30_000) for i in range(21)]

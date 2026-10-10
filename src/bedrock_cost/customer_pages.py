@@ -14,12 +14,13 @@ from types import SimpleNamespace
 
 from flask import Blueprint, Response, flash, redirect, render_template, request, session, url_for
 
-from . import chart, config, customers, dashboard, excel_source, usage_explorer
+from . import chart, cloudwatch_metrics, config, customers, dashboard, excel_source, usage_explorer
 from .auth import csrf_protect, login_required
 from .dates import parse_date
 from .excel_source import Account, ExcelSourceError
 from .filters import money, money0
 from .views import flash_result, page_meta
+from .windows import resolve_window
 
 bp = Blueprint("customers", __name__, url_prefix="/customers")
 
@@ -82,16 +83,23 @@ def _slots(names: list[str]) -> dict[str, int]:
     return usage_explorer.assign_slots(names[: usage_explorer.MAX_SERIES])
 
 
-def _spend_chart(series: dict[str, list[float]], stamps: list[date], names: dict[str, str], height: int = 230,
-                 width: int = 560):
-    """近 30 天每天的消费：一根柱一天，按客户（或账号）堆叠。8 个以外并进「其他」。"""
+def _stacked_rows(series: dict[str, list[float]], names: dict[str, str], width: int,
+                  slots: dict[str, int] | None = None) -> list:
+    """堆叠柱的序列：按总量排，8 个以外并进「其他」。slots 给了就照它配色（同一页上几张图，同一个账号同一个颜色）。"""
     ranked = sorted((key for key in series if sum(series[key]) > 0), key=lambda key: -sum(series[key]))
     keep = ranked[: usage_explorer.MAX_SERIES]
-    slots = _slots([names[key] for key in keep])
-    rows = [SimpleNamespace(name=names[key], slot=slots[names[key]], values=series[key]) for key in keep]
-    other = [sum(series[key][i] for key in ranked[usage_explorer.MAX_SERIES:]) for i in range(len(stamps))]
+    slots = slots if slots is not None else _slots([names[key] for key in keep])
+    rows = [SimpleNamespace(name=names[key], slot=slots.get(names[key], -1), values=series[key]) for key in keep]
+    other = [sum(series[key][i] for key in ranked[usage_explorer.MAX_SERIES:]) for i in range(width)]
     if any(other):
         rows.append(SimpleNamespace(name=usage_explorer.OTHER_LABEL, slot=-1, values=other))
+    return rows
+
+
+def _spend_chart(series: dict[str, list[float]], stamps: list[date], names: dict[str, str], height: int = 230,
+                 width: int = 560, slots: dict[str, int] | None = None):
+    """近 30 天每天的消费：一根柱一天，按客户（或账号）堆叠。8 个以外并进「其他」。"""
+    rows = _stacked_rows(series, names, len(stamps), slots)
     labels = [stamp.strftime("%m-%d") for stamp in stamps]
     bars = chart.render_bars(labels, rows, width=width, height=height, fmt=money, axis=customers.short_money)
     total = sum(sum(values) for values in series.values())
@@ -195,6 +203,52 @@ def create():
     return redirect(url_for("customers.detail", cid=cid))
 
 
+# 客户页「近 24 小时调用」的取数（每个账号四区合计）。测试里默认换成不查 CloudWatch 的（见 tests/conftest.py）
+_hourly_calls = cloudwatch_metrics.account_totals
+
+
+def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dict[str, int], refresh: bool = False):
+    """近 24 小时调用：折线图，一个账号一条线（四区合计、每小时一个点），线尾是这个账号的头像。
+    CloudWatch 晚几分钟出数，比账单快得多。
+
+    最后一个点是上一个整点那一小时：没过完的这一小时不画，免得线尾凭空塌下去。只查还在用的账号——
+    结算了、停用了的不会再有调用，少查几次。一直没调用的不画线（一堆贴着 0 的线叠在一起认不出），
+    在图下面点名。账号多过 8 个时，调用少的并成「其他」一条。
+    """
+    watched = [h for h in view.holdings if h.stage != "settled" and h.account.enabled]
+    window, _ = resolve_window({"win": "24h", "period": "1h"})
+    hours = _hourly_calls([h.account for h in watched], window, "invocations", refresh=refresh)
+    width = len(hours.labels)
+    by_number = {h.number: h for h in watched}
+    series = {h.number: hours.values.get(h.key) or [0.0] * width for h in watched}
+    ranked = sorted((number for number in series if any(series[number])), key=lambda number: -sum(series[number]))
+    keep, rest = ranked[: usage_explorer.MAX_SERIES], ranked[usage_explorer.MAX_SERIES:]
+    lines = [cloudwatch_metrics.MetricSeries(name=names[number], values=series[number],
+                                             slot=slots.get(names[number], -1)) for number in keep]
+    if rest:
+        lines.append(cloudwatch_metrics.MetricSeries(
+            name=usage_explorer.OTHER_LABEL, values=[sum(series[number][i] for number in rest) for i in range(width)],
+            slot=-1))
+    report = SimpleNamespace(labels=hours.labels, timestamps=hours.timestamps, window=window, series=lines,
+                             metric_label="调用次数", unit="次", dimension_label="账号")
+    drawn = chart.render_lines(report, unit="次", width=1100, uid="calls",
+                               ends={names[number]: by_number[number].account.avatar for number in keep})
+    totals = [sum(values[i] for values in series.values()) for i in range(width)]
+    peak = max(range(width), key=lambda i: totals[i]) if any(totals) else None
+    return SimpleNamespace(
+        chart=drawn, total=sum(totals), last=totals[-1] if totals else 0.0,
+        legend=[SimpleNamespace(account=by_number[number].account, total=sum(series[number]),
+                                color=chart.color_for(slots.get(names[number], -1))) for number in keep],
+        silent=[h for h in watched if not any(series[h.number])],
+        peak_label=hours.labels[peak] if peak is not None else "", peak_value=totals[peak] if peak is not None else 0.0,
+        active=sum(1 for values in series.values() if any(values)), watched=len(watched),
+        # 写到窗口的末尾（最后一根是 17:00 那一小时，数到 18:00），不写最后一根的起点
+        start=hours.labels[0] if width else "",
+        end=window.end.astimezone().strftime("%m-%d %H:00") if width else "",
+        errors=hours.errors, accounts=[h.account for h in watched],
+    )
+
+
 # ---------------------------------------------------------------- 客户详情
 def _detail_context(cid: str, refresh: bool = False):
     """(客户, CustomerView, 全部账号, 读不了的原因)。没有这个客户时客户是 None。"""
@@ -222,23 +276,35 @@ def detail(cid: str, **extra):
     today = view.today
     counts = view.counts
 
-    # 「账号」环形图：正常、异常（风控 + 待结算，两段都是红色系）、已结算
-    donut = chart.render_donut([
-        ("正常", counts["use"], chart.TONE_COLORS["ok"]),
-        ("风控 · 待替换", counts["risk"], chart.TONE_COLORS["danger"]),
-        ("待结算", counts["pending"], "#de9a92"),
-        ("已结算", counts["settled"], "#c2c0b6"),
-    ])
+    # 「账号」：按阶段一根横条，长短按占全部账号的比例，名字后面是这一档里的账号头像
+    stage_rows = [
+        SimpleNamespace(key=key, label=label, color=color, count=counts[key],
+                        holdings=[h for h in view.listed if h.stage == key])
+        for key, label, color in (("use", "使用中", chart.TONE_COLORS["ok"]),
+                                  ("risk", "风控 · 待替换", chart.TONE_COLORS["danger"]),
+                                  ("pending", "待结算", "#de9a92"), ("settled", "已结算", "#c2c0b6"))
+    ]
     pct = view.usage_pct
     gauge = chart.render_gauge(None if pct is None else pct / 100, view.level)
     stamps, per_account = view.daily(30)
     names = {h.number: h.account.label for h in view.holdings}
-    trend = _spend_chart(per_account, stamps, names, height=230, width=760)
+    # 「每天消费」的颜色照旧（按近 30 天有消费的账号分色槽）；「近 24 小时调用」用同一套，一个账号一个颜色。
+    # 只在那张图上有的账号（30 天没消费、24 小时里有调用）拿剩下的色槽
+    spenders = sorted((number for number in per_account if sum(per_account[number]) > 0),
+                      key=lambda number: -sum(per_account[number]))
+    slots = _slots([names[number] for number in spenders[: usage_explorer.MAX_SERIES]])
+    for name in sorted(set(names.values()) - set(slots)):
+        free = [slot for slot in range(usage_explorer.MAX_SERIES) if slot not in slots.values()]
+        slots[name] = free[0] if free else -1
+    trend = _spend_chart(per_account, stamps, names, height=230, width=760, slots=slots)
+    calls = _calls_chart(view, names, slots, refresh=refresh)
     runway = chart.render_runway(view.balance_history(21), view.burn, fmt=money, axis=customers.short_money)
 
     by_number = {a.account: a for a in accounts}
     timeline = _timeline_payload(view, by_number)
     stock = customers.stock(accounts)
+    # 被换下的账号换成了谁（恢复使用的弹窗里说一声：换上来的那个不受影响）
+    swapped = {e.account: e.peer for e in view.events if e.type == "replace" and not e.deleted and e.source == "manual"}
     # 表格里每个账号的动作（结算、调整额度、标记风控、解绑）打开弹窗时要填的数，交给页面脚本
     holdings_data = {
         "balance": view.balance,
@@ -248,7 +314,8 @@ def detail(cid: str, **extra):
                 "email": h.account.email or h.number, "number": h.number, "partner": h.account.partner,
                 "budget": h.account.budget, "spent": h.spent, "raw": h.raw_spent, "remaining": h.remaining,
                 "stage": h.stage, "stage_label": h.stage_label, "left": h.left.strftime("%m-%d") if h.left else "",
-                "left_why": h.left_why, "has_numbers": h.has_numbers,
+                "left_why": h.left_why, "has_numbers": h.has_numbers, "restorable": h.restorable,
+                "replaced_by": _who(by_number.get(swapped.get(h.number, "")), swapped.get(h.number, "")),
                 # 最近两天还有量：Cost Explorer 的账还没出完，结算时提醒一声
                 "recent": sum(h.daily(today - timedelta(days=1), today)) > config.STOP_DAILY,
             }
@@ -261,9 +328,10 @@ def detail(cid: str, **extra):
         customer=customer,
         view=view,
         hero_av=avatar_info(customer),
-        donut=donut,
+        stage_rows=stage_rows,
         gauge=gauge,
         trend=trend,
+        calls=calls,
         runway=runway,
         timeline=timeline,
         timeline_fallback=_timeline_fallback(view, by_number),
@@ -277,7 +345,8 @@ def detail(cid: str, **extra):
         stage_names=customers.STAGE_SHORT,
         stage_rank=customers.TABLE_ORDER,
         today=today,
-        toasts=_toasts([view]),
+        toasts=_toasts([view]) + (dashboard.account_toasts(calls.errors, calls.accounts, "读不到 CloudWatch")
+                                  if calls.errors else []),
         form=extra.pop("form", None),
         errors=extra.pop("errors", []),
         open_edit=extra.pop("open_edit", False),
@@ -440,6 +509,35 @@ def _mark_risk(cid: str, holding, when: date, note: str | None):
     return _back(cid)
 
 
+@bp.route("/<cid>/restore", methods=["POST"])
+@login_required
+@csrf_protect
+def restore(cid: str):
+    """恢复使用：风控、被换下的账号回到使用中（AWS 解除了风控、还要接着用）。"""
+    key = request.form.get("key") or ""
+    today = date.today()
+    view, holding = _holding(cid, key)
+    if holding is None:
+        flash_result("没有恢复", text="这个账号已经不是这个客户的了，刷新页面再试。", tone="error")
+        return _back(cid)
+    if not holding.restorable:
+        flash_result("没有恢复", _who(holding.account),
+                     "只有风控、被换下（待结算）的账号能恢复；已经结算的不行，额度用完的先调整额度。", tone="error")
+        return _back(cid)
+    try:
+        changed = excel_source.restore_account(key, _when(request.form.get("date"), today), actor=_actor(),
+                                               note=(request.form.get("note") or "").strip()[:200], cid=cid)
+    except ExcelSourceError as exc:
+        flash_result("没有恢复", _who(holding.account), str(exc), tone="error")
+        return _back(cid)
+    if not changed:
+        flash_result("没有改动", _who(holding.account), "本来就是使用中。", tone="info")
+    else:
+        flash_result("已恢复使用", _who(holding.account),
+                     f"回到使用中，没用完的 {money0(max(0.0, holding.remaining))} 重新算进预算和余额。")
+    return _back(cid)
+
+
 @bp.route("/<cid>/settle", methods=["POST"])
 @login_required
 @csrf_protect
@@ -585,7 +683,7 @@ def change_event(cid: str):
         if item is None:
             flash_result("没有改动", text="时间线上已经没有这条了，刷新页面再试。", tone="error")
             return _back(cid)
-        extra = {"auto_kind": item.kind, "auto_account": item.account, "auto_date": item.date}
+        extra = {"auto_kind": item.kind, "auto_account": item.account, "auto_date": item.date, "auto_title": item.title}
     try:
         note = excel_source.change_customer_event(cid, ident, actor=_actor(), when=when, delete=delete, **extra)
     except ExcelSourceError as exc:

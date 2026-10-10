@@ -370,6 +370,10 @@ MARKER_MAX_POINTS = 30  # 点太多就不画标记，否则连成一片
 END_LABEL_MAX_SERIES = 4
 END_LABEL_MIN_GAP = 14.0
 PAD_R_LABELED = 64
+# 线尾画头像（客户页「近 24 小时调用」一个账号一条线）：头像半径、上下最少隔多远、右边留多宽
+AVATAR_R = 10.0
+AVATAR_GAP = 24.0
+PAD_R_AVATAR = 84
 
 
 def _line_path(points: list[tuple[float, float]]) -> str:
@@ -479,7 +483,7 @@ def _smooth_path(points: list[tuple[float, float]]) -> str:
     return " ".join(out)
 
 
-def render_lines(report, unit: str = "", width: int = IDEAL_W, uid: str = "ln") -> Chart:
+def render_lines(report, unit: str = "", width: int = IDEAL_W, uid: str = "ln", ends: dict | None = None) -> Chart:
     """把 UsageMetricsReport（或形状一样的东西）画成折线图。
 
     样式：平滑曲线、线下一层往下渐隐的浅色填充、悬浮时一条虚线准线 + 每条线上
@@ -487,7 +491,11 @@ def render_lines(report, unit: str = "", width: int = IDEAL_W, uid: str = "ln") 
     的大致宽度给，刻度字才是原本的 11px。uid 用来区分同一页上几张图的渐变 id。
 
     report 要有 labels / series / metric_label / unit / window；有 timestamps 时
-    横轴按时间挑整点刻度，没有就按间隔取。
+    横轴按时间挑整点刻度，没有就按间隔取。dimension_label（默认「模型」）是一条线代表什么。
+
+    ends 是 {序列名: 头像}（avatars.Avatar：text / css / emoji）：给了就在每条线的末端画头像 + 末值，
+    一眼认出是谁（客户页「近 24 小时调用」一个账号一条线）。挤在一起的上下错开、拉一根细线连回线尾，
+    一个都不省——头像是用来认线的。放大时整组藏起来：标的是全貌里的末值。
     """
     labels = report.labels
     count = len(labels)
@@ -506,8 +514,8 @@ def render_lines(report, unit: str = "", width: int = IDEAL_W, uid: str = "ln") 
         )
         return Chart(svg=svg, width=width, height=height, empty=True)
 
-    label_ends = len(series_list) <= END_LABEL_MAX_SERIES
-    pad_r = PAD_R_LABELED if label_ends else PAD_R
+    label_ends = not ends and len(series_list) <= END_LABEL_MAX_SERIES
+    pad_r = PAD_R_AVATAR if ends else PAD_R_LABELED if label_ends else PAD_R
     height = PAD_T + PLOT_H + PAD_B
     plot_w = width - PAD_L - pad_r
     plot_bottom = PAD_T + PLOT_H
@@ -625,6 +633,9 @@ def render_lines(report, unit: str = "", width: int = IDEAL_W, uid: str = "ln") 
             )
         parts.append("</g>")
 
+    if ends:
+        parts.append(_end_avatars(series_list, ends, x_at(count - 1), y_at, plot_bottom))
+
     stamps = getattr(report, "timestamps", None)
     if stamps and len(stamps) == count:
         ticks = _time_ticks(stamps, [x_at(i) for i in range(count)], plot_w, report.window.period)
@@ -668,7 +679,7 @@ def render_lines(report, unit: str = "", width: int = IDEAL_W, uid: str = "ln") 
     parts.append(
         f'<rect class="chart-overlay" x="{PAD_L}" y="{PAD_T}" '
         f'width="{plot_w:.2f}" height="{PLOT_H}" tabindex="0" role="application" '
-        f'aria-label="按左右方向键逐个时间点查看各模型的'
+        f'aria-label="按左右方向键逐个时间点查看各{html.escape(getattr(report, "dimension_label", "模型"))}的'
         f'{html.escape(report.metric_label)}"></rect>'
     )
     parts.append("</svg>")
@@ -691,6 +702,43 @@ def render_lines(report, unit: str = "", width: int = IDEAL_W, uid: str = "ln") 
     }
 
     return Chart(svg="".join(parts), width=width, height=height, tooltip=tooltip)
+
+
+def _end_avatars(series_list, ends: dict, end_x: float, y_at, plot_bottom: float) -> str:
+    """线尾的头像 + 末值（render_lines 的 ends）。按末值的高低排，压在一起的往下错开，挤出底了再从下往上推；
+    错开了就拉一根细线连回线尾。头像的底色、字色是页面上 .av-N 的那一套（CSS 变量），外圈是线的颜色。"""
+    cx = end_x + AVATAR_R + 10
+    marks = sorted(((y_at(s.values[-1]), s) for s in series_list), key=lambda item: item[0])
+    top, bottom = PAD_T + AVATAR_R, plot_bottom - AVATAR_R
+    spots: list[float] = []
+    for y, _ in marks:
+        spots.append(max(y, top) if not spots else max(y, spots[-1] + AVATAR_GAP))
+    if spots and spots[-1] > bottom:
+        spots[-1] = bottom
+        for i in range(len(spots) - 2, -1, -1):
+            spots[i] = min(spots[i], spots[i + 1] - AVATAR_GAP)
+    out = ['<g class="chart-endavatars">']
+    for (y, series), spot in zip(marks, spots):
+        face = ends.get(series.name)
+        colour = color_for(series.slot)
+        last = compact_number(series.values[-1])
+        out.append(f'<g class="chart-endavatar {html.escape(face.css) if face else ""}">'
+                   f'<title>{html.escape(series.name)}：最后一小时 {html.escape(last)}</title>')
+        if abs(spot - y) > 1:
+            out.append(f'<line x1="{end_x + 4:.2f}" y1="{y:.2f}" x2="{cx - AVATAR_R - 1:.2f}" y2="{spot:.2f}" '
+                       f'stroke="{colour}" stroke-width="1" stroke-opacity=".55"></line>')
+        if face:
+            size = 12 if face.emoji else 10
+            out.append(f'<circle cx="{cx:.2f}" cy="{spot:.2f}" r="{AVATAR_R:.0f}" style="fill: var(--av-bg)" '
+                       f'stroke="{colour}" stroke-width="2"></circle>'
+                       f'<text x="{cx:.2f}" y="{spot + size * 0.36:.2f}" text-anchor="middle" font-size="{size}" '
+                       f'font-weight="600" style="fill: var(--av-fg)">{html.escape(face.text)}</text>')
+        else:                       # 「其他」：没有头像，一个灰点
+            out.append(f'<circle cx="{cx:.2f}" cy="{spot:.2f}" r="{AVATAR_R - 4:.0f}" fill="{colour}"></circle>')
+        out.append(f'<text x="{cx + AVATAR_R + 6:.2f}" y="{spot + 4:.2f}" fill="{LABEL_TEXT}" font-size="11" '
+                   f'font-weight="600" style="font-variant-numeric:tabular-nums">{html.escape(last)}</text></g>')
+    out.append("</g>")
+    return "".join(out)
 
 
 # --------------------------------------------------------------- 模型用量的主图
@@ -1137,47 +1185,6 @@ def week_grid(stamps, values: list[float], period: int) -> list[list[float | Non
 
 
 # ---------------------------------------------------------------- 客户页
-def render_donut(parts: list[tuple[str, float, str]], size: int = 196, stroke: float = 20.0) -> str:
-    """环形图（客户页的「账号」）：parts 是 (名字, 数, 颜色)，一段一个分类，从正上方顺时针首尾相接，
-    段与段之间留一道底色的缝。中间的大数字由模板盖上去，这里只画环。
-
-    进场动画（CSS，系统开了「减弱动画」就不动）：各段一段接一段画出来——每段是 pathLength=1 的弧，
-    动 dashoffset；延迟和时长按前面几段、这一段的占比算（--d0 / --dd），连起来像一笔画完一整圈。
-    """
-    live = [(name, value, color) for name, value, color in parts if value > 0]
-    total = sum(value for _, value, _ in live)
-    r = (size - stroke) / 2 - 2
-    c = size / 2
-    out = [
-        f'<svg class="donut-svg" viewBox="0 0 {size} {size}" width="{size}" height="{size}" role="img" '
-        f'aria-label="{html.escape("，".join(f"{name} {value:g}" for name, value, _ in live) or "没有数据")}">',
-        f'<circle cx="{c:.2f}" cy="{c:.2f}" r="{r:.2f}" fill="none" stroke="{GRID}" stroke-width="{stroke}"></circle>',
-    ]
-    if total <= 0:
-        out.append("</svg>")
-        return "".join(out)
-    gap = 2.4 if len(live) > 1 else 0.0       # 度
-    duration = 900.0                          # 一整圈的毫秒数
-    start, done = -90.0, 0.0
-    for name, value, color in live:
-        sweep = 360.0 * value / total
-        if sweep >= 359.9:
-            # 只有一段：画成两个半圆，起点终点重合的弧 SVG 画不出来
-            d = (f"M{c:.2f},{c - r:.2f} A{r:.2f},{r:.2f} 0 1 1 {c:.2f},{c + r:.2f} "
-                 f"A{r:.2f},{r:.2f} 0 1 1 {c:.2f},{c - r:.2f}")
-        else:
-            d = _arc(c, c, r, start + gap / 2, start + sweep - gap / 2)
-        out.append(
-            f'<path class="donut-seg" pathLength="1" d="{d}" fill="none" stroke="{color}" stroke-width="{stroke}" '
-            f'style="--d0:{done / total * duration:.0f}ms;--dd:{value / total * duration:.0f}ms">'
-            f'<title>{html.escape(name)} {value:g}</title></path>'
-        )
-        start += sweep
-        done += value
-    out.append("</svg>")
-    return "".join(out)
-
-
 RUNWAY_FAR = 365       # 按日均一年以上才用完：不标日期，写「一年以上」
 
 

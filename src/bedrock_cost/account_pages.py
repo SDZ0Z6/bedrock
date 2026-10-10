@@ -18,7 +18,7 @@ from . import (
     activity, chart, cloudwatch_metrics, config, cost_estimate, cost_explorer, customers, dashboard, excel_source, quotas,
     usage_explorer,
 )
-from .auth import csrf_protect, login_required
+from .auth import csrf_protect, login_required, safe_next
 from .dates import cumulative_range, detect_preset, earliest_queryable, parse_date, resolve_range
 from .excel_source import Account, ExcelSourceError, lifecycle_colors, load_accounts, load_customers, load_events
 from .report import build_row
@@ -87,6 +87,10 @@ def _frame(account: Account, accounts: list[Account], tab: str, refresh: bool = 
         query_failed=False,
         days_active=dashboard.days_between(account.start_date, today),
         lifecycle_colors=lifecycle_colors(),
+        # 页头的「恢复使用」：打着「风控」「结算」、还没结算（额度用完的由 restore 挡）
+        restorable=bool({excel_source.TAG_RISK, excel_source.TAG_SETTLE} & set(account.lifecycle))
+        and not (account.customer and account.settled),
+        today_iso=today.isoformat(),
         active_page="account",
         tz_name=tz_name(),
         **page_meta(),
@@ -155,9 +159,18 @@ def summary(number: str):
                  peak_label=view.peak_label, series=view.series, chart=view.chart)
     toasts += dashboard.region_toasts(calls_report.errors, account, "读不到 CloudWatch")
 
+    # 今天到现在的预估花费：CloudWatch 的 token × 牌价（和「预估」页签一个算法），晚几分钟，不用等账单。
+    # 近 7 天一次调用都没有，今天也就是 0，不用再查
+    today_cost = SimpleNamespace(total=0.0, partial=False)
+    if calls_report.total > 0:
+        estimate = cost_estimate.build_estimate([account], today, today, refresh=refresh)
+        today_cost = SimpleNamespace(total=estimate.total_cost,
+                                     partial=bool(estimate.errors or estimate.unpriced or estimate.price_stale))
+
     context = _frame(account, accounts, "summary", refresh=refresh, row=row,
                      gauge=chart.render_gauge(None if row.usage_pct is None else row.usage_pct / 100, row.level),
-                     trend=trend, calls=calls, quota_top=_quota_top(account), toasts=toasts, notes=[])
+                     trend=trend, calls=calls, today_cost=today_cost, quota_top=_quota_top(account), toasts=toasts,
+                     notes=[])
     context["query_failed"] = bool(row.error)
     return render_template("account_summary.html", **context)
 
@@ -540,6 +553,47 @@ def timeline(number: str):
         today=today,
     )
     return render_template("account_timeline.html", **context)
+
+
+# ---------------------------------------------------------------- 恢复使用
+@bp.route("/<number>/restore", methods=["POST"])
+@login_required
+@csrf_protect
+def restore(number: str):
+    """页头的「恢复使用」：和客户页名下账号里的一样（回到使用中，没用完的额度重新算进余额）；
+    库存里的只改生命周期。改完回到原来那个页签。"""
+    back = safe_next(request.form.get("next"), url_for("account.summary", number=number))
+    try:
+        account = _find(_all_accounts(), number)
+    except ExcelSourceError as exc:
+        flash_result("没有恢复", text=str(exc), tone="error")
+        return redirect(back)
+    if account is None:
+        flash_result("没有恢复", number, "台账里没有这个账号了。", tone="error")
+        return redirect(url_for("main.index"))
+    today = date.today()
+    picked = parse_date(request.form.get("date"))
+    when = picked if picked and picked <= today else today
+    if account.customer:
+        # 额度用完的，去掉标签也还是待结算：先调整额度
+        series = customers.fetch_series([account], today).get(account.key)
+        if series is not None and series.dates and account.budget > 0 and sum(series.marked) >= account.budget:
+            flash_result("没有恢复", account.label, "额度已经用完了，恢复了也还是待结算，先调整额度。", tone="error")
+            return redirect(back)
+    try:
+        changed = excel_source.restore_account(account.key, when, actor=session.get("user") or "",
+                                               note=(request.form.get("note") or "").strip()[:200],
+                                               cid=account.customer)
+    except ExcelSourceError as exc:
+        flash_result("没有恢复", account.label, str(exc), tone="error")
+        return redirect(back)
+    if not changed:
+        flash_result("没有改动", account.label, "本来就没有「风控」「结算」。", tone="info")
+    elif account.customer:
+        flash_result("已恢复使用", account.label, "回到使用中，没用完的额度重新算进客户的预算和余额。")
+    else:
+        flash_result("已恢复使用", account.label, "生命周期换回「正常」。")
+    return redirect(back)
 
 
 # ---------------------------------------------------------------- 时间线：记一笔、改日期、删掉
