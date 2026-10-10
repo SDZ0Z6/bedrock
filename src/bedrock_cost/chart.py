@@ -297,9 +297,10 @@ def render_stacked_areas(report, symbol: str = "$", ideal_width: int = IDEAL_W) 
     # 每个桶的字都画上，不在 shown 里的先藏着：放大以后（app.js）放得下就多显示几个
     for index in range(count):
         x = x0 + band * index + band / 2
+        hidden = "" if index in shown else ' display="none"'
         parts.append(
             f'<text x="{x:.2f}" y="{plot_bottom + 20:.0f}" text-anchor="middle" '
-            f'fill="{TICK_TEXT}" font-size="11" data-i="{index}"{"" if index in shown else " display=\"none\""}>'
+            f'fill="{TICK_TEXT}" font-size="11" data-i="{index}"{hidden}>'
             f"{html.escape(report.labels[index])}</text>"
         )
     parts.append("</g>")
@@ -1017,9 +1018,10 @@ def render_bars(
     stride = max(1, math.ceil(44.0 / band))
     # 每一格的字都画上，隔几格才显示一个：放大以后（app.js）放得下就多显示几个
     for i in range(count):
+        hidden = "" if i % stride == 0 else ' display="none"'
         parts.append(
             f'<text x="{pad_l + band * i + band / 2:.2f}" y="{plot_bottom + 17:.0f}" text-anchor="middle" '
-            f'fill="{TICK_TEXT}" font-size="10.5" data-i="{i}"{"" if i % stride == 0 else " display=\"none\""}>'
+            f'fill="{TICK_TEXT}" font-size="10.5" data-i="{i}"{hidden}>'
             f'{html.escape(labels[i])}</text>'
         )
     parts.append('</g><g class="chart-hits">')
