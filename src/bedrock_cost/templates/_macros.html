@@ -32,7 +32,8 @@
    href 给了（里面的 __ID__ 换成账号号码）就是「跳到那个账号的页面」，没给就是改
    select 的值、交给所在的表单提交。 #}
 {# caption 给了（比如「当前账户」）：按钮是两行的大样子，上面一行是 caption，下面一行是邮箱前缀 · 号码 #}
-{% macro account_picker(accounts, selected, label_id, href='', caption='') -%}
+{# colors：生命周期标签的颜色（lifecycle_colors()）。每个账号右边是它的生命周期，搜索也认 #}
+{% macro account_picker(accounts, selected, label_id, href='', caption='', colors={}) -%}
   {%- set current = (accounts | selectattr('key', 'equalto', selected) | first) or (accounts | first) -%}
   {%- set active = accounts | selectattr('enabled') | list -%}
   {%- set off = accounts | rejectattr('enabled') | list -%}
@@ -54,7 +55,7 @@
         {% endif %}
       </button>
       <div class="acct-picker-pop" hidden>
-        <input class="acct-picker-search" type="search" placeholder="搜邮箱、ID 或上游" autocomplete="off"
+        <input class="acct-picker-search" type="search" placeholder="搜邮箱、ID 或生命周期" autocomplete="off"
                role="combobox" aria-expanded="true" aria-controls="acct-picker-list" aria-autocomplete="list"
                aria-label="搜索账号">
         <ul class="acct-picker-list" id="acct-picker-list" role="listbox" aria-label="账号">
@@ -63,7 +64,7 @@
             {% for account in items %}
               <li class="acct-opt" role="option" id="acct-opt-{{ group }}-{{ loop.index }}" data-group="{{ group }}"
                   data-value="{{ account.key }}" data-number="{{ account.account }}"
-                  data-search="{{ account.email }} {{ account.account }} {{ account.partner }}"
+                  data-search="{{ account.email or '' }} {{ account.account }} {{ account.lifecycle | join(' ') }} {{ account.partner }}"
                   aria-selected="{{ 'true' if account.key == current.key else 'false' }}">
                 {{ avatar(account.avatar, small=true) }}
                 <span class="acct-opt-text">
@@ -75,7 +76,9 @@
                     <span class="acct-opt-sub tone-warn">未填账号邮箱</span>
                   {% endif %}
                 </span>
-                <span class="acct-opt-side">{{ account.partner }}</span>
+                <span class="acct-opt-side">
+                  {%- for name in account.lifecycle %}<span class="pill pill-sm"><i class="tag-dot" style="--tag: {{ colors.get(name, '#87867f') }}"></i>{{ name }}</span>{% endfor -%}
+                </span>
                 <svg class="acct-opt-check" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7"/></svg>
               </li>
             {% endfor %}

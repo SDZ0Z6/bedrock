@@ -1,5 +1,6 @@
 {% extends "shell.html" %}
 {% from "_macros.html" import avatar, refresh_link %}
+{% from "_customer_macros.html" import cicon %}
 {% block title %}概览 · Bedrock 成本监控{% endblock %}
 {% block page_title %}概览{% endblock %}
 {% block loading_label %}正在查 Cost Explorer{% endblock %}
@@ -136,10 +137,18 @@
     </article>
   </section>
 
-  <!-- ------------------------------------------------ 筛选签：组内任选其一，组间同时满足 -->
+  <!-- ------------------------------------------------ 筛选签：组内任选其一，组间同时满足；搜索框也一起满足 -->
   <div class="overview-bar">
     {% if report.rows %}
       <div class="overview-filters" id="acct-filters">
+        <div class="fchips" role="search">
+          <span class="fchips-label">搜索</span>
+          <label class="search-pill">
+            {{ cicon('search', '') }}
+            <span class="sr-only">搜账号</span>
+            <input id="acct-q" type="search" placeholder="搜邮箱或账号 ID" autocomplete="off">
+          </label>
+        </div>
         <div class="fchips" role="group" aria-label="按生命周期筛选" data-group="life">
           <span class="fchips-label">生命周期</span>
           <button class="fchip" type="button" data-value="" aria-pressed="true">
@@ -191,7 +200,7 @@
     {% for row in report.rows %}
       {% set owner = customer_of(row.customer) %}
       <article class="acct-card" data-life="{{ row.lifecycle | join('|') }}" data-state="{{ row.state }}"
-               data-customer="{{ owner.id if owner else '__stock__' }}">
+               data-customer="{{ owner.id if owner else '__stock__' }}" data-q="{{ ((row.email or '') ~ ' ' ~ row.account) | lower }}">
         <div class="acct-body">
         <div class="acct-top">
           {{ avatar(row.avatar) }}
@@ -321,9 +330,9 @@
   const empty = document.getElementById('acct-empty');
   if (!grid) return;
   const cards = [...grid.querySelectorAll('.acct-card')];
-  const picked = { life: new Set(), state: new Set(), customer: new Set() };
+  const picked = { life: new Set(), state: new Set(), customer: new Set(), q: '' };
 
-  // ---- 筛选：组内任选其一（或），组间同时满足（且）
+  // ---- 筛选：组内任选其一（或），组间同时满足（且）；搜索框按邮箱、号码里有没有这几个字
   function apply() {
     let shown = 0;
     for (const card of cards) {
@@ -332,13 +341,19 @@
         || (picked.life.has('__none__') && !life.length);
       const okState = !picked.state.size || picked.state.has(card.dataset.state);
       const okCustomer = !picked.customer.size || picked.customer.has(card.dataset.customer);
-      card.hidden = !(okLife && okState && okCustomer);
+      const okQuery = !picked.q || card.dataset.q.includes(picked.q);
+      card.hidden = !(okLife && okState && okCustomer && okQuery);
       if (!card.hidden) shown += 1;
     }
     empty.hidden = shown > 0;
   }
 
-  for (const group of document.querySelectorAll('#acct-filters .fchips')) {
+  document.getElementById('acct-q').addEventListener('input', function (event) {
+    picked.q = event.target.value.trim().toLowerCase();
+    apply();
+  });
+
+  for (const group of document.querySelectorAll('#acct-filters .fchips[data-group]')) {
     const name = group.dataset.group;
     const chips = [...group.querySelectorAll('.fchip')];
     group.addEventListener('click', function (event) {

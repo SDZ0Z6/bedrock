@@ -210,25 +210,47 @@
     <div class="viz-head">
       <div>
         <h2 class="viz-title" id="holdings-title">名下账号</h2>
-        <p class="viz-sub">正常 {{ counts.use }} · 风控 {{ counts.risk }} · 待结算 {{ counts.pending }} · 已结算 {{ counts.settled }} · 只有使用中的算进余额</p>
+        <p class="viz-sub">只有使用中的算进预算和余额 · 点表头排序</p>
       </div>
       <button class="btn btn-sm" type="button" data-open="dlg-assign">分配账号</button>
     </div>
     {% if view.holdings %}
+    {# 筛选：按阶段（只列有账号的阶段）、搜邮箱或 ID，两个同时满足 #}
+    <div class="holding-tools" id="holding-tools">
+      <div class="seg" role="group" aria-label="按阶段筛选">
+        <button class="seg-item is-on" type="button" data-stage="" aria-pressed="true">全部 <span class="seg-val">{{ counts.total }}</span></button>
+        {% for key in ['use', 'risk', 'pending', 'settled'] if counts[key] %}
+          <button class="seg-item" type="button" data-stage="{{ key }}" aria-pressed="false">{{ stage_names[key] }}
+            <span class="seg-val">{{ counts[key] }}</span></button>
+        {% endfor %}
+      </div>
+      <label class="search-pill">
+        {{ cicon('search', '') }}
+        <span class="sr-only">搜名下账号</span>
+        <input id="holding-q" type="search" placeholder="搜邮箱或 ID" autocomplete="off">
+      </label>
+    </div>
     <div class="table-scroll">
-      <table class="holding-table">
-        <thead><tr><th>账号</th><th>阶段</th><th>额度使用</th><th>分配</th><th><span class="sr-only">操作</span></th></tr></thead>
+      {# 默认使用中的在上面，然后是风控、待结算、已结算（同一档里先分配的在前）。点表头排序：升、降、回到默认（app.js） #}
+      <table class="holding-table" id="holding-table" data-sortable>
+        <thead><tr>
+          <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="text">账号</th>
+          <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="number">阶段</th>
+          <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="number">额度使用</th>
+          <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="text">分配</th>
+          <th><span class="sr-only">操作</span></th></tr></thead>
         <tbody>
           {% set ns = namespace(grouped=false) %}
-          {% for h in view.holdings %}
+          {% for h in view.listed %}
             {% if h.stage == 'settled' and not ns.grouped %}
-              <tr class="group-row"><td colspan="5">已结算 · 只留在历史里</td></tr>
+              <tr class="group-row" data-group-row><td colspan="5">已结算 · 只留在历史里</td></tr>
               {% set ns.grouped = true %}
             {% endif %}
-            <tr {% if h.stage == 'settled' %}class="row-off"{% endif %}>
-              <td>{{ who_cell(h.account) }}</td>
-              <td>{{ stage_pill(h) }}</td>
-              <td class="use-cell">
+            <tr data-stage="{{ h.stage }}" data-q="{{ (h.account.email or '') | lower }} {{ h.number }}"
+                {%- if h.stage == 'settled' %} class="row-off"{% endif %}>
+              <td data-sort="{{ (h.account.email or h.number) | lower }}">{{ who_cell(h.account) }}</td>
+              <td data-sort="{{ stage_rank[h.stage] }}">{{ stage_pill(h) }}</td>
+              <td class="use-cell" data-sort="{{ '%.4f' % h.usage_pct if h.has_numbers and h.usage_pct is not none else '' }}">
                 {% if h.has_numbers %}
                   <span title="{{ h.spent | money }} / {{ h.account.budget | money }}"><b>{{ '%.0f%%' % h.usage_pct if h.usage_pct is not none else '—' }}</b>
                     · {{ short_money(h.spent) }} / {{ short_money(h.account.budget) }}</span>
@@ -237,7 +259,7 @@
                   <span class="tone-warn">查不到消费</span>
                 {% endif %}
               </td>
-              <td class="joined-cell">{{ h.joined.strftime('%m-%d') if h.joined else '—' }}
+              <td class="joined-cell" data-sort="{{ h.joined.isoformat() if h.joined else '' }}">{{ h.joined.isoformat() if h.joined else '—' }}
                 {%- if h.via %}<small>替换 {{ (by_number[h.via].email if h.via in by_number else h.via).split('@')[0] }}</small>{% endif %}</td>
               <td>
                 <div class="row-acts">
@@ -275,6 +297,7 @@
               </td>
             </tr>
           {% endfor %}
+          <tr class="holding-none" data-holding-none hidden><td colspan="5">没有符合条件的账号。</td></tr>
         </tbody>
       </table>
     </div>
@@ -317,7 +340,7 @@
   <div class="card-head">
     <div class="card-title">
       <h2 id="stmt-title">月度对账单</h2>
-      <span class="card-note" data-stmt-note="month">余额每个月怎么变的。没有充值：分配账号、调高额度时余额变多；账号被标记风控、换下或者额度用完那天，它没用完的额度移出</span>
+      <span class="card-note" data-stmt-note="month">余额每个月怎么变的，点月份看每个账号。没有充值：分配账号、调高额度时余额变多；账号被标记风控、换下或者额度用完那天，它没用完的额度移出</span>
       <span class="card-note" data-stmt-note="acct" hidden>每个账号每个月的折算后消费。不在使用中的账号不算进现在的预算和余额，历史照样列在这里</span>
     </div>
     <div class="page-actions">
@@ -335,27 +358,46 @@
       <table class="stmt">
         <thead><tr><th>月份</th><th class="num">月初余额</th><th class="num">+ 新分配</th><th class="num">± 调整额度</th>
           <th class="num">− 消费</th><th class="num">− 移出</th><th class="num">月末余额</th></tr></thead>
+        {# 一个月一行，只写数和「几个账号」；点月份展开，每个账号一行（分配、调整、消费、移出各是多少） #}
         <tbody>
           {% for row in rows %}
-            <tr>
-              <td>{{ row.label }}{% if loop.first or row.month[5:] == '01' %}<span class="cur">{{ row.year }}</span>{% endif %}
+            {% set lines = row.lines.values() | list %}
+            <tr class="stmt-month">
+              <td>
+                {%- if lines %}
+                  <button class="stmt-toggle" type="button" aria-expanded="false" aria-controls="stmt-{{ row.month }}"
+                          data-stmt-toggle="{{ row.month }}" title="看这个月每个账号的进出">
+                    <svg class="stmt-chev" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3.5 4.5 4.5L6 12.5"/></svg>{{ row.label }}</button>
+                {%- else %}<span class="stmt-label">{{ row.label }}</span>{% endif %}
+                {%- if loop.first or row.month[5:] == '01' %}<span class="cur">{{ row.year }}</span>{% endif %}
                 {%- if row.current %}<span class="cur">到 {{ today.strftime('%m-%d') }}</span>{% endif %}</td>
               <td class="num">{{ row.start | money0 }}</td>
               <td class="num {% if not row.added_accounts %}zero{% endif %}">
-                {%- if row.added_accounts %}{{ row.added | money0 }}
-                  {%- for number, amount in row.added_accounts %}<span class="who">{{ (by_number[number].email if number in by_number else number) }}</span>{% endfor %}
+                {%- if row.added_accounts %}{{ row.added | money0 }}<span class="cnt">{{ row.added_accounts | length }} 个账号</span>
                 {%- else %}—{% endif %}</td>
               <td class="num {% if not row.delta_accounts %}zero{% endif %}">
-                {%- if row.delta_accounts %}{{ '+' if row.delta >= 0 }}{{ row.delta | money0 }}
-                  {%- for number, amount in row.delta_accounts %}<span class="who">{{ (by_number[number].email if number in by_number else number) }}</span>{% endfor %}
+                {%- if row.delta_accounts %}{{ '+' if row.delta >= 0 }}{{ row.delta | money0 }}<span class="cnt">{{ row.delta_accounts | length }} 次</span>
                 {%- else %}—{% endif %}</td>
               <td class="num {% if not row.used %}zero{% endif %}">{{ row.used | money0 if row.used else '—' }}</td>
               <td class="num {% if not row.out_accounts %}zero{% endif %}">
-                {%- if row.out_accounts %}{{ row.out | money0 }}
-                  {%- for number, amount, why in row.out_accounts %}<span class="who">{{ (by_number[number].email if number in by_number else number) }} · {{ why or '移出' }}</span>{% endfor %}
+                {%- if row.out_accounts %}{{ row.out | money0 }}<span class="cnt">{{ row.out_accounts | length }} 个账号</span>
                 {%- else %}—{% endif %}</td>
               <td class="num end">{{ row.end | money0 }}</td>
             </tr>
+            {% for line in lines %}
+              {% set who = by_number.get(line.number) %}
+              <tr class="stmt-line" data-stmt-of="{{ row.month }}" {% if loop.first %}id="stmt-{{ row.month }}"{% endif %} hidden>
+                <td><span class="stmt-who">{{ mini(who) }}<span>{{ who.email if who and who.email else line.number }}</span></span></td>
+                <td></td>
+                <td class="num {% if not line.added %}zero{% endif %}">{{ line.added | money0 if line.added else '—' }}</td>
+                <td class="num {% if not line.delta %}zero{% endif %}">
+                  {%- if line.delta %}{{ '+' if line.delta >= 0 }}{{ line.delta | money0 }}{% else %}—{% endif %}</td>
+                <td class="num {% if not line.used %}zero{% endif %}">{{ line.used | money0 if line.used else '—' }}</td>
+                <td class="num {% if not line.why %}zero{% endif %}">
+                  {%- if line.why or line.out %}{{ line.out | money0 }}<span class="why">{{ line.why or '移出' }}</span>{% else %}—{% endif %}</td>
+                <td></td>
+              </tr>
+            {% endfor %}
           {% endfor %}
         </tbody>
         <tfoot>
@@ -690,18 +732,23 @@
       <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
     </header>
     <div class="modal-body">
-      <div class="form-grid">
+      {# 选「标记风控」：和名下账号里的「标记风控」一样会改生命周期，所以一定要选账号，只能选还能标的（使用中、待结算，还没打风控） #}
+      <div class="form-grid" data-note-form>
         <div class="field"><label for="note-kind">类型</label>
-          <select id="note-kind" name="kind">
+          <select id="note-kind" name="kind" data-note-kind>
             {% for kind, label in manual_kinds %}<option value="{{ kind }}">{{ label }}</option>{% endfor %}
           </select></div>
         <div class="field"><label for="note-date">日期</label>
           <input id="note-date" name="date" type="date" max="{{ today.isoformat() }}" value="{{ today.isoformat() }}"></div>
         <div class="field field-full"><label for="note-acct">账号</label>
-          <select id="note-acct" name="account">
+          <select id="note-acct" name="account" data-note-acct>
             <option value="">不针对某个账号</option>
-            {% for h in view.holdings %}<option value="{{ h.number }}">{{ h.account.email or h.number }}</option>{% endfor %}
+            {% for h in view.listed %}
+              <option value="{{ h.number }}" data-markable="{{ '1' if h.stage in ('use', 'pending') and '风控' not in h.account.lifecycle else '' }}">
+                {{- h.account.email or h.number }}{% if h.stage != 'use' %}（{{ h.stage_label }}）{% endif %}</option>
+            {% endfor %}
           </select></div>
+        <p class="outcome field-full" data-note-risk hidden>标记以后，这个账号从这天起不算进预算、消费和余额（没用完的额度跟着移出），生命周期换成「风控」。之后去替换一个新账号。</p>
         <div class="field field-full"><label for="note-text">说明</label>
           <textarea id="note-text" name="note" rows="3" maxlength="200" placeholder="比如：客户说下周起量会翻倍" data-autofocus></textarea></div>
       </div>
@@ -857,6 +904,14 @@
       more.textContent = showing ? more.dataset.moreLabel : '收起';
       return;
     }
+    // 月度对账单「按月」：点月份展开 / 收起这个月每个账号的那几行
+    const toggle = event.target.closest('[data-stmt-toggle]');
+    if (toggle) {
+      const expand = toggle.getAttribute('aria-expanded') !== 'true';
+      toggle.setAttribute('aria-expanded', String(expand));
+      for (const line of document.querySelectorAll('[data-stmt-of="' + toggle.dataset.stmtToggle + '"]')) line.hidden = !expand;
+      return;
+    }
     // 月度对账单：按月 / 按账号
     const view = event.target.closest('[data-stmt]');
     if (view) {
@@ -935,6 +990,42 @@
     if (event.target.matches('#dlg-replace input')) replaceOutcome();
   });
   replaceOutcome();
+
+  // ---- 名下账号：按阶段、搜邮箱或 ID 筛（两个同时满足）。排序是 app.js 的 data-sortable（点表头：升、降、回到默认）
+  const holdingTable = document.getElementById('holding-table');
+  if (holdingTable) {
+    const rows = [...holdingTable.querySelectorAll('tbody tr[data-stage]')];
+    const groupRow = holdingTable.querySelector('[data-group-row]');
+    const none = holdingTable.querySelector('[data-holding-none]');
+    const tools = document.getElementById('holding-tools');
+    const wanted = { stage: '', q: '' };
+    const applyHoldings = function () {
+      let shown = 0;
+      for (const row of rows) {
+        const ok = (!wanted.stage || row.dataset.stage === wanted.stage) && (!wanted.q || row.dataset.q.includes(wanted.q));
+        row.hidden = !ok;
+        if (ok) shown += 1;
+      }
+      // 「已结算 · 只留在历史里」那一行只在不筛的时候有意义（排序时由 CSS 藏起来）
+      if (groupRow) groupRow.hidden = !!(wanted.stage || wanted.q);
+      none.hidden = shown > 0;
+    };
+    tools.addEventListener('click', function (event) {
+      const button = event.target.closest('[data-stage]');
+      if (!button) return;
+      wanted.stage = button.dataset.stage;
+      for (const other of tools.querySelectorAll('[data-stage]')) {
+        const on = other === button;
+        other.classList.toggle('is-on', on);
+        other.setAttribute('aria-pressed', String(on));
+      }
+      applyHoldings();
+    });
+    document.getElementById('holding-q').addEventListener('input', function (event) {
+      wanted.q = event.target.value.trim().toLowerCase();
+      applyHoldings();
+    });
+  }
 
   // ---- 头像里「名字的第一个字」跟着名字变
   document.addEventListener('input', function (event) {

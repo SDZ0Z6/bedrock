@@ -169,6 +169,9 @@ CUSTOMER_AVATARS = 10
 TAG_NORMAL = "正常"
 TAG_SETTLE = "结算"
 TAG_RISK = "风控"
+# 时间线上「记一笔」只是记下来的几类（备注、手动标的开始上量 / 上量终止 / 恢复上量）：不改钱、不改阶段，
+# 所以账号页上也能改日期、删掉
+NOTE_TYPES = ("note", "rampup", "stop", "resume")
 _CUSTOMER_ID = re.compile(r"^C\d{3,}$")
 
 
@@ -2021,6 +2024,73 @@ def add_customer_event(cid: str, kind: str, when: date, actor: str = "", account
         ident = _write_event(sheet.parent, when=when, customer=cid, kind=kind, account=account, note=note,
                              actor=actor)
         return f"客户 {cid} 的时间线记一笔（#{ident} {kind}）"
+
+    return _mutate(action, actor, backup=False)
+
+
+def add_account_event(key: str, kind: str, when: date, actor: str = "", note: str = "",
+                      spent: float | None = None) -> str:
+    """账号页的时间线上手动记一笔：记在这个账号现在归的那个客户名下（库存里的只记账号）。
+
+    kind 是 "risk"（标记风控）时和客户页的一样改生命周期：加上「风控」、去掉「正常」，分给了客户的从这天起
+    不算进余额。已经是风控的返回空串；已经结算的不用再标。spent 是到现在用了多少，记在那一条上。
+    """
+
+    def action(sheet, index) -> str:
+        row = _locate(sheet, index, key)
+        fields = _customer_fields(sheet, index, row)
+        number, owner = fields["account"], fields["customer"]
+        if kind == "risk":
+            if TAG_RISK in fields["lifecycle"]:
+                return ""
+            if owner and fields["settled"] is not None:
+                raise ExcelSourceError("这个账号已经结算了，不用再标风控。")
+            _retag(sheet, index, row, add=(TAG_RISK,), remove=(TAG_NORMAL,))
+            _write_event(sheet.parent, when=when, customer=owner, kind="risk", account=number, amount=spent,
+                         note=note, actor=actor)
+            return f"账号 {number}{f'（客户 {owner}）' if owner else '（库存）'}标记风控"
+        if kind not in NOTE_TYPES:
+            raise ExcelSourceError(f"认不出这一类：{kind}")
+        ident = _write_event(sheet.parent, when=when, customer=owner, kind=kind, account=number, note=note,
+                             actor=actor)
+        return f"账号 {number} 的时间线记一笔（#{ident} {kind}）"
+
+    return _mutate(action, actor, backup=False)
+
+
+def change_account_event(number: str, ident: str, actor: str = "", *, when: date | None = None,
+                         delete: bool = False) -> str:
+    """账号页的时间线上改一笔手动记的事的日期，或者删掉它（打上 DELETED，行留着）。
+
+    只认这个账号的、「记一笔」那几类（NOTE_TYPES）：分配、调额度、风控、替换、结算这些连着钱和阶段，
+    去客户页的时间线上改。
+    """
+    if not delete and when is None:
+        raise ExcelSourceError("没有给新的日期。")
+    if not ident.isdigit():
+        raise ExcelSourceError(f"认不出这条事件：{ident}")
+
+    def action(sheet, index) -> str:
+        events = _sheet_with_header(sheet.parent, EVENTS_SHEET, EVENT_HEADER)
+        eindex = _titles(events, EVENT_HEADER)
+        row = next((r for r in range(2, events.max_row + 1)
+                    if int(_to_number(events.cell(row=r, column=eindex["ID"]).value, 0.0)) == int(ident)), None)
+        if row is None or _to_account_id(events.cell(row=row, column=eindex["ACCOUNT"]).value) != number:
+            raise LedgerConflict("时间线上已经没有这条了，请刷新页面后重试。")
+        kind = _clean(events.cell(row=row, column=eindex["TYPE"]).value).lower()
+        auto = _clean(events.cell(row=row, column=eindex["SOURCE"]).value).lower() == "auto"
+        if auto or kind not in NOTE_TYPES:
+            raise ExcelSourceError("这一条连着钱和阶段，要去客户页的时间线上改。")
+        if delete:
+            if _to_flag(events.cell(row=row, column=eindex["DELETED"]).value):
+                return ""
+            events.cell(row=row, column=eindex["DELETED"]).value = True
+            return f"账号 {number} 的时间线：删掉 #{ident}"
+        before = _to_date(events.cell(row=row, column=eindex["DATE"]).value)
+        if before == when:
+            return ""
+        events.cell(row=row, column=eindex["DATE"]).value = when
+        return f"账号 {number} 的时间线：#{ident} 的日期 {_show(before)} → {when.isoformat()}"
 
     return _mutate(action, actor, backup=False)
 

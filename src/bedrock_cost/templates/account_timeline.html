@@ -1,6 +1,7 @@
 {# 账号页的「时间线」页签：这个账号从启用到今天的事，不管中间换过几个客户、解绑过没有。
    上面是和客户页同一个样子的横向时间线（卡片上那一行是那时候归哪个客户），下面是一张事件表，
-   手动记的写着谁、几点几分记的。这里只看不改：改日期、删掉去客户页的时间线。 #}
+   手动记的写着谁、几点几分记的。「记一笔」记在账号现在归的客户名下（库存里的只记账号）；
+   「记一笔」那几类（备注、上量、终止、恢复）这里就能改日期、删掉，别的连着钱和阶段，去客户页的时间线改。 #}
 {% extends "account_base.html" %}
 {% from "_customer_macros.html" import cicon, timeline_box with context %}
 {% block loading_label %}正在读这个账号的事{% endblock %}
@@ -12,6 +13,7 @@
                      timeline_fallback, '点卡片看详情') %}
   {# 台账写进来之前的改动（比如上线前改过的额度）只在操作日志里 #}
   <a class="btn btn-sm" href="{{ url_for('settings.audit', q=account.account) }}" title="这个账号在操作日志里的每一条记录">操作日志</a>
+  <button class="btn btn-sm btn-primary" type="button" data-open="dlg-note">记一笔</button>
 {% endcall %}
 
 <section class="card" aria-labelledby="ev-table-title">
@@ -59,18 +61,72 @@
   {% endif %}
 </section>
 
-<dialog class="modal modal-sm" id="dlg-event">
+<dialog class="modal modal-sm" id="dlg-note">
+  <form method="post" action="{{ url_for('account.add_event', number=account.account) }}" data-loading="正在保存">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <header class="modal-head">
+      <h2>记一笔</h2><span class="modal-sub">{{ account.label }}</span>
+      <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+    </header>
+    <div class="modal-body">
+      <div class="form-grid" data-note-form>
+        <div class="field"><label for="note-kind">类型</label>
+          <select id="note-kind" name="kind" data-note-kind>
+            {% for kind, label in note_kinds %}
+              <option value="{{ kind }}" {% if kind == 'risk' and not markable %}disabled{% endif %}>
+                {{- label }}{% if kind == 'risk' and not markable %}（{{ '已经是风控' if '风控' in account.lifecycle else '已经结算' }}）{% endif %}</option>
+            {% endfor %}
+          </select></div>
+        <div class="field"><label for="note-date">日期</label>
+          <input id="note-date" name="date" type="date" max="{{ today.isoformat() }}" value="{{ today.isoformat() }}"></div>
+        <p class="outcome field-full" data-note-risk hidden>
+          {%- if owner %}标记以后，生命周期换成「风控」，这个账号从这天起不算进{{ owner.name }}的预算、消费和余额（没用完的额度跟着移出）。之后去客户页替换一个新账号。
+          {%- else %}标记以后，生命周期换成「风控」。它在库存里，分给客户的时候会一直带着「风控」。{% endif %}</p>
+        <div class="field field-full"><label for="note-text">说明</label>
+          <textarea id="note-text" name="note" rows="3" maxlength="200" placeholder="比如：客户说下周起量会翻倍" data-autofocus></textarea></div>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <span class="card-note">{% if owner %}记在{{ owner.name }}名下，客户页的时间线上也有{% else %}在库存里，只记这个账号{% endif %}</span>
+      <div class="modal-btns">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn btn-primary" type="submit">记下来</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="modal modal-sm" id="dlg-event" data-editable-kinds="{{ editable_kinds | join(' ') }}">
   <div class="modal-head">
     <h2 data-fill="title">事件</h2>
     <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
   </div>
   <div class="modal-body">
     <dl class="ev-facts" data-fill="facts"></dl>
+    {# 「记一笔」那几类：这里就能改日期、删掉 #}
+    <form method="post" action="{{ url_for('account.change_event', number=account.account) }}" id="event-date-form"
+          data-loading="正在保存" style="margin-top: 16px" hidden>
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="id" value="">
+      <input type="hidden" name="action" value="date">
+      <div class="form-grid">
+        <div class="field"><label for="event-date">日期</label>
+          <input id="event-date" name="date" type="date" max="{{ today.isoformat() }}" required></div>
+      </div>
+    </form>
     <p class="form-hint" data-fill="hint"></p>
   </div>
   <div class="modal-foot">
+    <form method="post" action="{{ url_for('account.change_event', number=account.account) }}" id="event-delete-form"
+          data-loading="正在保存" hidden>
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="id" value="">
+      <input type="hidden" name="action" value="delete">
+      <button class="btn btn-danger" type="submit">删掉这条</button>
+    </form>
     <div class="modal-btns">
       <button class="btn" type="button" data-close>关闭</button>
+      <button class="btn btn-primary" type="submit" form="event-date-form" data-event-save hidden>保存日期</button>
     </div>
   </div>
 </dialog>
@@ -80,6 +136,7 @@
 (function () {
   'use strict';
   const dialog = document.getElementById('dlg-event');
+  const editable = (dialog.dataset.editableKinds || '').split(' ');
   function fill(name, text) {
     const target = dialog.querySelector('[data-fill="' + name + '"]');
     if (target) target.textContent = text;
@@ -87,14 +144,32 @@
   }
   document.addEventListener('click', function (event) {
     if (!(event.target instanceof Element)) return;
-    if (event.target.closest('[data-close]')) dialog.close();
+    const opener = event.target.closest('[data-open]');
+    if (opener) {
+      const target = document.getElementById(opener.getAttribute('data-open'));
+      target.showModal();
+      const first = target.querySelector('[data-autofocus]');
+      if (first) first.focus();
+      return;
+    }
+    const closer = event.target.closest('[data-close]');
+    if (closer) closer.closest('dialog').close();
   });
-  dialog.addEventListener('click', function (event) { if (event.target === dialog) dialog.close(); });
+  for (const modal of document.querySelectorAll('dialog.modal')) {
+    modal.addEventListener('click', function (event) { if (event.target === modal) modal.close(); });
+  }
 
-  // 点时间线上的卡片：只看。改日期、删掉在客户页的时间线上
+  // 点时间线上的卡片：看详情。「记一笔」那几类能在这里改日期、删掉；别的去客户页的时间线上改
   const box = document.querySelector('[data-timeline]');
   if (box) box.addEventListener('timeline:pick', function (event) {
     const item = event.detail;
+    const mine = !item.auto && /^[0-9]+$/.test(item.id) && editable.indexOf(item.kind) >= 0;
+    for (const form of dialog.querySelectorAll('form')) {
+      form.hidden = !mine;
+      form.querySelector('[name="id"]').value = mine ? item.id : '';
+    }
+    dialog.querySelector('[data-event-save]').hidden = !mine;
+    dialog.querySelector('#event-date').value = item.date;
     fill('title', item.title);
     const facts = dialog.querySelector('[data-fill="facts"]');
     facts.replaceChildren();
@@ -108,8 +183,9 @@
       value.textContent = pair[1];
       facts.append(term, value);
     }
-    fill('hint', item.id === 'start' ? '启用日期在账号管理里改。'
-      : item.who ? '要改日期或者删掉，去「' + item.who.label + '」的客户页，在时间线上点这一条。'
+    fill('hint', mine ? '改日期、删掉都会写进审计日志。删掉只是不在时间线上显示。'
+      : item.id === 'start' ? '启用日期在账号管理里改。'
+      : item.who ? '这一条连着钱和阶段：要改日期或者删掉，去「' + item.who.label + '」的客户页，在时间线上点这一条。'
       : item.auto ? '按每天的消费和告警算出来的；那时候账号在库存里，没有客户页可改。'
       : '在库存里时记的（没有客户），只在这里和操作日志里看得到。');
     dialog.showModal();

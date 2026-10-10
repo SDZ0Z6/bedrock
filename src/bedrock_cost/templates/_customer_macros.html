@@ -52,7 +52,7 @@
 
 {# 横向时间线：客户页、账号页共用，画法在 static/timeline.js（页面要先引它）。
    payload 是交给脚本的数据（customers.timeline_payload 拼好的）；fallback 是没开 JS 时的清单 [(日期, 标题, 一句话)]；
-   people 是「按账号筛选」的签（客户页才有）；hint 是图例最后那句（点卡片能做什么）。标题右边的按钮从 caller() 来 #}
+   people 是「按账号筛选」下拉里的账号（客户页才有）；hint 是图例最后那句（点卡片能做什么）。标题右边的按钮从 caller() 来 #}
 {% macro timeline_box(payload, categories, sub, fallback, hint, people=()) -%}
 <section class="viz-card tl-box" aria-labelledby="tl-title" data-reveal data-timeline>
   <div class="viz-head">
@@ -73,13 +73,45 @@
       {% endfor %}
     </div>
     {% if people %}
-      <div class="fchips" role="group" aria-label="按账号筛选" data-tl-filter="acct">
-        <span class="fchips-label">账号</span>
-        <button class="fchip" type="button" data-value="" aria-pressed="true">全部</button>
-        {% for who in people %}
-          <button class="fchip" type="button" data-value="{{ who.number }}" aria-pressed="false">
-            <span class="mini-av {{ who.av.css }}" aria-hidden="true">{{ who.av.text }}</span>{{ who.label.split('@')[0] }}</button>
-        {% endfor %}
+      {# 按账号筛：账号一多，一排签既放不下、只写邮箱前半截也认不出是哪个。换成能搜邮箱、ID 的下拉：
+         开合、搜索、键盘是 app.js 的账号选择器（[data-picker]），选了会触发 select 的 change，timeline.js 接着筛 #}
+      <div class="tl-acct-filter" data-tl-acct>
+        <span class="fchips-label" id="tl-acct-label">账号</span>
+        <div class="acct-picker" data-picker>
+          <select name="tl-acct" aria-labelledby="tl-acct-label">
+            <option value="" selected>全部账号</option>
+            {% for who in people %}<option value="{{ who.number }}">{{ who.label }}</option>{% endfor %}
+          </select>
+          <button class="acct-picker-btn" type="button" aria-haspopup="listbox" aria-expanded="false"
+                  aria-labelledby="tl-acct-label tl-acct-current" hidden>
+            <span class="mini-av" data-tl-acct-av aria-hidden="true" hidden></span>
+            <span class="acct-picker-name" id="tl-acct-current" data-tl-acct-name>全部账号</span>
+            <span class="acct-picker-sub" data-tl-acct-sub></span>
+          </button>
+          <div class="acct-picker-pop" hidden>
+            <input class="acct-picker-search" type="search" placeholder="搜邮箱或 ID" autocomplete="off"
+                   role="combobox" aria-expanded="true" aria-controls="tl-acct-list" aria-autocomplete="list"
+                   aria-label="搜账号">
+            <ul class="acct-picker-list" id="tl-acct-list" role="listbox" aria-label="账号">
+              <li class="acct-opt" role="option" id="tl-acct-opt-0" data-group="on" data-value="" data-search="全部账号"
+                  aria-selected="true">
+                <span class="acct-opt-text"><span class="acct-opt-name">全部账号</span>
+                  <span class="acct-opt-sub">{{ people | length }} 个账号的事都显示</span></span>
+                <svg class="acct-opt-check" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7"/></svg>
+              </li>
+              {% for who in people %}
+                <li class="acct-opt" role="option" id="tl-acct-opt-{{ loop.index }}" data-group="on" data-value="{{ who.number }}"
+                    data-search="{{ who.label }} {{ who.number }}" aria-selected="false">
+                  <span class="mini-av {{ who.av.css }}" aria-hidden="true">{{ who.av.text }}</span>
+                  <span class="acct-opt-text"><span class="acct-opt-name">{{ who.label }}</span>
+                    {%- if who.label != who.number %}<span class="acct-opt-sub">{{ who.number }}</span>{% endif %}</span>
+                  <svg class="acct-opt-check" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7"/></svg>
+                </li>
+              {% endfor %}
+            </ul>
+            <p class="acct-picker-empty" hidden>没有匹配的账号</p>
+          </div>
+        </div>
       </div>
     {% endif %}
   </div>

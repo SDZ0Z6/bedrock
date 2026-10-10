@@ -15,13 +15,14 @@ from types import SimpleNamespace
 from flask import Blueprint, flash, redirect, render_template, request, session, url_for
 
 from . import (
-    activity, chart, cloudwatch_metrics, config, cost_estimate, cost_explorer, customers, dashboard, quotas, usage_explorer,
+    activity, chart, cloudwatch_metrics, config, cost_estimate, cost_explorer, customers, dashboard, excel_source, quotas,
+    usage_explorer,
 )
-from .auth import login_required
-from .dates import cumulative_range, detect_preset, earliest_queryable, resolve_range
+from .auth import csrf_protect, login_required
+from .dates import cumulative_range, detect_preset, earliest_queryable, parse_date, resolve_range
 from .excel_source import Account, ExcelSourceError, lifecycle_colors, load_accounts, load_customers, load_events
 from .report import build_row
-from .views import page_meta, tz_name
+from .views import flash_result, page_meta, tz_name
 from .windows import PERIODS, WINDOWS, MetricWindow, detect_window, fit_period, floor_to_period, resolve_window
 
 bp = Blueprint("account", __name__, url_prefix="/account")
@@ -522,6 +523,7 @@ def timeline(number: str):
         rows.append(SimpleNamespace(item=item, text=text, owner=owner, cid=item.customer))
     rows.reverse()       # 表格最近的在上面
 
+    owner = owners.get(account.customer) if account.customer else None
     context = _frame(
         account, accounts, "timeline", refresh=refresh, toasts=toasts, notes=[],
         timeline={"items": payload, "today": today.isoformat()},
@@ -530,8 +532,95 @@ def timeline(number: str):
                            for row in rows],
         rows=rows, categories=customers.CATEGORIES, series=series,
         event_count=sum(1 for item in items if not item.auto),
+        # 「记一笔」：和客户页一样的几类；「标记风控」只在还没打风控、也没结算的时候能选
+        note_kinds=[(kind, customers.EVENT_TYPES[kind][0]) for kind in customers.NOTE_KINDS],
+        markable=excel_source.TAG_RISK not in account.lifecycle and not (account.customer and account.settled),
+        editable_kinds=list(excel_source.NOTE_TYPES),
+        owner=owner,
+        today=today,
     )
     return render_template("account_timeline.html", **context)
+
+
+# ---------------------------------------------------------------- 时间线：记一笔、改日期、删掉
+def _timeline_back(number: str):
+    return redirect(url_for("account.timeline", number=number))
+
+
+@bp.route("/<number>/events", methods=["POST"])
+@login_required
+@csrf_protect
+def add_event(number: str):
+    """账号页时间线上的「记一笔」：记在这个账号现在归的客户名下（库存里的只记账号），客户页的时间线上也有。
+    选「标记风控」和客户页的一样改生命周期。"""
+    try:
+        account = _find(_all_accounts(), number)
+    except ExcelSourceError as exc:
+        flash_result("没有记下来", text=str(exc), tone="error")
+        return _timeline_back(number)
+    if account is None:
+        flash_result("没有记下来", number, "台账里没有这个账号了。", tone="error")
+        return redirect(url_for("main.index"))
+    kind = request.form.get("kind") or "note"
+    if kind not in customers.NOTE_KINDS:
+        kind = "note"
+    note = (request.form.get("note") or "").strip()
+    if kind == "note" and not note:
+        flash_result("没有记下来", text="备注要写点什么。", tone="error")
+        return _timeline_back(number)
+    if len(note) > 200:
+        flash_result("没有记下来", text="说明最多 200 个字。", tone="error")
+        return _timeline_back(number)
+    today = date.today()
+    picked = parse_date(request.form.get("date"))
+    when = picked if picked and picked <= today else today
+    spent = None
+    if kind == "risk":
+        # 标风控时用了多少记在那一条上（和客户页一样）；查不到就不记
+        series = customers.fetch_series([account], today).get(account.key)
+        spent = sum(series.marked) if series is not None and series.dates else None
+    try:
+        changed = excel_source.add_account_event(account.key, kind, when, actor=session.get("user") or "", note=note,
+                                                 spent=spent)
+    except ExcelSourceError as exc:
+        flash_result("没有记下来", account.label, str(exc), tone="error")
+        return _timeline_back(number)
+    if kind != "risk":
+        flash_result("已记下来", customers.EVENT_TYPES[kind][0], note)
+    elif not changed:
+        flash_result("没有改动", account.label, "这个账号本来就是风控。", tone="info")
+    elif account.customer:
+        since = "今天" if when == today else when.isoformat()
+        flash_result("已标记风控", account.label, f"从{since}起不算进客户的余额，记得去客户页替换账号。")
+    else:
+        flash_result("已标记风控", account.label, "它在库存里，分给客户的时候会一直带着「风控」。")
+    return _timeline_back(number)
+
+
+@bp.route("/<number>/events/change", methods=["POST"])
+@login_required
+@csrf_protect
+def change_event(number: str):
+    """账号页时间线上改「记一笔」那几类的日期，或者删掉。别的（分配、调额度、风控……）去客户页改。"""
+    ident = (request.form.get("id") or "").strip()
+    delete = request.form.get("action") == "delete"
+    when = None if delete else parse_date(request.form.get("date"))
+    if not delete and (when is None or when > date.today()):
+        flash_result("日期没有改", text="日期认不出来，或者晚于今天。", tone="error")
+        return _timeline_back(number)
+    try:
+        note = excel_source.change_account_event(number, ident, actor=session.get("user") or "", when=when,
+                                                 delete=delete)
+    except ExcelSourceError as exc:
+        flash_result("没有改动", text=str(exc), tone="error")
+        return _timeline_back(number)
+    if not note:
+        flash_result("没有改动", text="本来就是这样。", tone="info")
+    elif delete:
+        flash_result("已删掉")
+    else:
+        flash_result("已改日期", text=f"改到 {when.isoformat()}。")
+    return _timeline_back(number)
 
 
 def _other_account(item, account: Account, by_number: dict[str, Account]) -> str:

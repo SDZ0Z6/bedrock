@@ -4,7 +4,8 @@
  *   script[data-tl-data]   JSON：{items: [...], today: "2026-10-10"}。名字、邮箱都是纯文本，这里一律用 textContent 放
  *   [data-tl-scroll] > [data-tl-track]   时间线画在这里（没开 JS 时是 hidden）
  *   [data-tl-fallback]     没开 JS 时的一列清单，脚本接手以后藏起来
- *   [data-tl-tools]        筛选（可选）：[data-tl-filter="cat" | "acct"] 里的 .fchip，值在 data-value
+ *   [data-tl-tools]        筛选（可选）：[data-tl-filter="cat"] 里的 .fchip，值在 data-value；
+ *                          [data-tl-acct] 是按账号筛的下拉（app.js 的账号选择器），选了触发里面 select 的 change
  *   [data-tl-latest]       「回到最近」按钮（可选）
  *   template[data-icon]    卡片上的图标（服务端画好），按名字克隆
  * 点卡片：在区块上发一个 timeline:pick 事件（detail 是那一条），弹什么窗由页面自己定。
@@ -96,7 +97,7 @@
       track.replaceChildren();
       if (!shown.length) {
         track.style.width = '100%';
-        track.append(el('div', 'tl-axis is-before'), el('p', 'tl-empty', '没有这一类的事。'));
+        track.append(el('div', 'tl-axis is-before'), el('p', 'tl-empty', picked.acct ? '这个账号没有这一类的事。' : '没有这一类的事。'));
         return;
       }
       const firstX = PAD, todayX = PAD + (shown.length - 1) * SLOT + 90;
@@ -159,6 +160,32 @@
       });
     }
 
+    // 按账号筛：下拉的开合、搜索、键盘归 app.js；这里接 change，把按钮换成选中的那个（头像、邮箱、号码）
+    const acct = root.querySelector('[data-tl-acct]');
+    const acctSelect = acct && acct.querySelector('select');
+    if (acctSelect) {
+      acctSelect.addEventListener('change', function () {
+        picked.acct = acctSelect.value;
+        let chosen = null;
+        for (const option of acct.querySelectorAll('.acct-opt')) {
+          const on = option.dataset.value === acctSelect.value;
+          option.setAttribute('aria-selected', String(on));
+          if (on) chosen = option;
+        }
+        const face = chosen && picked.acct ? chosen.querySelector('.mini-av') : null;
+        const av = acct.querySelector('[data-tl-acct-av]');
+        av.className = face ? face.className : 'mini-av';
+        av.textContent = face ? face.textContent : '';
+        av.hidden = !face;
+        const name = chosen && chosen.querySelector('.acct-opt-name');
+        const sub = picked.acct && chosen ? chosen.querySelector('.acct-opt-sub') : null;
+        acct.querySelector('[data-tl-acct-name]').textContent = name ? name.textContent : '全部账号';
+        acct.querySelector('[data-tl-acct-sub]').textContent = sub ? sub.textContent : '';
+        render();
+        latest(false);
+      });
+    }
+
     // 拖着左右滚。拖过的那一下不算点卡片
     let start = null, moved = false;
     scroller.addEventListener('pointerdown', function (event) {
@@ -188,4 +215,31 @@
   }
 
   for (const root of document.querySelectorAll('[data-timeline]')) mount(root);
+
+  // 「记一笔」弹窗（[data-note-form]，客户页、账号页都有）。选「标记风控」：会改生命周期，所以账号必选、
+  // 只能选还能标的（选项上有 data-markable）；弹窗里写着标了以后会怎样，说明框的提示也换成风控的
+  for (const form of document.querySelectorAll('[data-note-form]')) {
+    const kind = form.querySelector('[data-note-kind]');
+    const acct = form.querySelector('[data-note-acct]');
+    const hint = form.querySelector('[data-note-risk]');
+    const text = form.querySelector('textarea');
+    if (!kind) continue;
+    const usual = text ? text.placeholder : '';
+    const riskOption = kind.querySelector('option[value="risk"]');
+    if (acct && riskOption && ![].some.call(acct.options, function (o) { return o.dataset.markable; })) riskOption.disabled = true;
+    const sync = function () {
+      const risk = kind.value === 'risk';
+      if (hint) hint.hidden = !risk;
+      if (text) text.placeholder = risk ? '比如：收到 AWS 暂停通知' : usual;
+      if (!acct) return;
+      acct.required = risk;
+      for (const option of acct.options) option.disabled = risk && !option.dataset.markable;
+      if (acct.selectedOptions[0] && acct.selectedOptions[0].disabled) {
+        const first = [].find.call(acct.options, function (o) { return !o.disabled; });
+        acct.value = first ? first.value : '';
+      }
+    };
+    kind.addEventListener('change', sync);
+    sync();
+  }
 })();

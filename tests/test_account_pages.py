@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from bedrock_cost import cloudwatch_metrics, config, cost_estimate, pricing, quotas, usage_explorer
+from bedrock_cost import cloudwatch_metrics, config, cost_estimate, excel_source, pricing, quotas, usage_explorer
 from bedrock_cost.aws_errors import QueryError
 from bedrock_cost.dates import earliest_queryable
 
@@ -114,13 +114,35 @@ def range_label(html: str) -> str:
 # ====================================================================== 页头和页签
 class TestHeader:
     def test_the_page_has_a_title_like_the_other_pages(self, pages):
-        """和别的页面一样有标题「账号」；右边一排是「当前账户」、调整额度、编辑资料。"""
+        """和别的页面一样有标题「账号」，按钮（调整额度、编辑资料）在标题那一行的右边；「当前账户」在标题下面。"""
         html = get(pages, f"/account/{ALPHA}/")
         head = re.search(r'<header class="page-head acct-page-head">(.*?)</header>', html, re.S).group(1)
         assert scrape(re.search(r"<h1>(.*?)</h1>", head).group(1)) == "账号"
-        actions = head[head.index('class="acct-actions"'):]
-        assert actions.index("当前账户") < actions.index("调整额度") < actions.index("编辑资料")
+        actions = head[head.index('class="page-actions"'):]
+        assert actions.index("调整额度") < actions.index("编辑资料")
+        assert "当前账户" not in head
+        switch = html[html.index('<form class="acct-switch"'):html.index('<header class="acct-hero">')]
+        assert "当前账户" in switch
+        assert html.index("编辑资料") < html.index('<form class="acct-switch"')
         assert html.count("<h1") == 1                       # 邮箱那一行是 h2
+
+    def test_picker_shows_lifecycle_not_partner(self, pages):
+        """换账号的下拉：每个账号右边是生命周期（不是上游），搜索也认生命周期。"""
+        key = next(a.key for a in excel_source.load_accounts(include_disabled=True) if a.account == ALPHA)
+        excel_source.set_lifecycle(key, ["风控", "结算"], actor="tester")
+        html = get(pages, f"/account/{BETA}/")
+        pop = re.search(r'<div class="acct-picker-pop" hidden>(.*?)</ul>', html, re.S).group(1)
+        assert 'placeholder="搜邮箱、ID 或生命周期"' in pop
+        option = re.search(rf'<li class="acct-opt"[^>]*data-number="{ALPHA}"[^>]*>.*?</li>', pop, re.S).group(0)
+        side = re.search(r'<span class="acct-opt-side">(.*?)</span>\s*<svg', option, re.S).group(1)
+        assert scrape(side) == "风控 结算"
+        assert "ALPHA" not in side                                   # 上游不再写在这里
+        assert re.search(r'data-search="[^"]*风控 结算', option)        # 搜「风控」也找得到
+        def side_of(number: str) -> str:
+            option = re.search(rf'<li class="acct-opt"[^>]*data-number="{number}"[^>]*>.*?</li>', pop, re.S).group(0)
+            return scrape(re.search(r'<span class="acct-opt-side">(.*?)</span>\s*<svg', option, re.S).group(1))
+
+        assert (side_of(BETA), side_of(GAMMA)) == ("风控", "")       # 台账里 BETA 是风控，GAMMA 没标
 
     @pytest.mark.parametrize("tab, label", TABS)
     def test_header_says_whose_page_this_is(self, pages, tab, label):
@@ -148,7 +170,7 @@ class TestHeader:
     def test_the_account_picker_keeps_the_tab(self, pages):
         """切换账号：开了 JS 直接跳到另一个账号的同一个页签；不开 JS 是下拉 + 提交到 /account/switch。"""
         html = get(pages, f"/account/{ALPHA}/usage")
-        form = re.search(r'<form method="get" action="/account/switch">(.*?)</form>', html, re.S).group(1)
+        form = re.search(r'<form class="acct-switch" method="get" action="/account/switch">(.*?)</form>', html, re.S).group(1)
         assert '<input type="hidden" name="tab" value="usage">' in form
         assert 'data-href="/account/__ID__/usage"' in form
         assert re.findall(r'<option value="([^"]+)"\s*(selected)?>', form) == [
