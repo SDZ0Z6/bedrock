@@ -4,6 +4,7 @@
    看的是哪个账号写在网址里（/account/<号码>/…），能直接收藏或发给别人。 #}
 {% extends "shell.html" %}
 {% from "_macros.html" import avatar, account_picker %}
+{% from "_customer_macros.html" import cicon %}
 {% block title %}{{ account.label }} · {{ tab_label }} · Bedrock 成本监控{% endblock %}
 
 {# 配额放最后：第一次要拉 45 秒左右，也最少看 #}
@@ -46,10 +47,11 @@
         {% endfor %}
         <noscript><button class="btn btn-sm" type="submit">切换</button></noscript>
       </form>
-      {# 调整额度：就在这一页改（时间线上记一笔）；编辑资料：去账号管理打开这个账号的「修改」弹窗，改完、取消都回来 #}
-      <button class="btn btn-pill" type="button" data-open-budget>调整额度</button>
-      <a class="btn btn-pill btn-dark" href="{{ url_for('accounts.index', edit=account.key, back=here) }}"
-         data-loading="正在读台账">编辑资料</a>
+      {# 调整额度：就在这一页改（时间线上记一笔）；编辑资料：去账号管理打开这个账号的「修改」弹窗，改完、取消都回来。
+         按钮和别的页面页头上的一个样子（账号管理的「生命周期标签」「新增账号」）：图标 + 字，深色的是主按钮 #}
+      <button class="btn" type="button" data-open-budget>{{ cicon('budget') }}调整额度</button>
+      <a class="btn btn-primary" href="{{ url_for('accounts.index', edit=account.key, back=here) }}"
+         data-loading="正在读台账">{{ cicon('pencil') }}编辑资料</a>
     </div>
   </header>
 

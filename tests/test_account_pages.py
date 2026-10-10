@@ -205,7 +205,9 @@ class TestHeader:
         html = get(pages, f"/account/{BETA}/")
         # 「编辑资料」：账号管理打开这一行的修改弹窗，改完、取消都回到这一页
         assert f'href="/accounts/?edit={BETA}%233&amp;back=/account/{BETA}/"' in html
-        assert re.search(r'<a class="btn btn-pill btn-dark"[^>]*>编辑资料</a>', html, re.S)
+        # 和别的页面页头上的按钮一个样子：深色的主按钮，图标 + 字
+        assert re.search(r'<a class="btn btn-primary"[^>]*>\s*<svg class="icon"[^>]*>.*?</svg>编辑资料</a>', html, re.S)
+        assert re.search(r'<button class="btn" type="button" data-open-budget>\s*<svg class="icon"', html)
 
     def test_disabled_accounts_are_still_viewable(self, pages):
         html = get(pages, f"/account/{GAMMA}/cost")

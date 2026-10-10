@@ -116,7 +116,7 @@ def test_编辑链接带着回来的地址(admin, fake_costs):
     response = admin.get(f"/account/{ALPHA_NO}/timeline")
     html = response.get_data(as_text=True)
     assert response.status_code == 200
-    href = re.search(r'href="(/accounts/\?[^"]*)"[^>]*>编辑资料</a>', html).group(1).replace("&amp;", "&")
+    href = re.search(r'href="(/accounts/\?[^"]*)"[^>]*>(?:(?!</a>).)*编辑资料</a>', html, re.S).group(1).replace("&amp;", "&")
     assert parse_qs(urlsplit(href).query) == {"edit": [by_account(ALPHA_NO).key],
                                               "back": [f"/account/{ALPHA_NO}/timeline"]}
 

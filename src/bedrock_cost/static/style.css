@@ -2097,8 +2097,6 @@ svg.is-zoomed.is-panning { cursor: grabbing; }
 /* 标题那一排：右边是「当前账户」、调整额度、编辑资料（和标题垂直居中，不贴底） */
 .acct-page-head { align-items: center; margin-bottom: 18px; }
 .acct-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
-.btn-pill { height: 40px; padding: 0 20px; border-radius: 999px; font-size: 14px; }
-.btn-pill.btn-dark { font-weight: 600; }
 .acct-hero { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
 .avatar-lg { width: 60px; height: 60px; }
 .avatar-lg > span { width: 46px; height: 46px; font-size: 20px; }
