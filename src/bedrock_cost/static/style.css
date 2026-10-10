@@ -2557,6 +2557,7 @@ a.event-who:hover { color: var(--accent-dim); }
 .line-chart.is-zoomed .chart-endavatars { display: none; }
 /* 手机上整张图缩到三分之一，线尾的头像只剩几个像素：给个最小宽度，左右滑着看 */
 @media (max-width: 760px) { .calls-chart .chart-svg { min-width: 680px; } }
+.calls-kpis { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 40px; }
 .calls-legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 10px; }
 .calls-who { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-dim); }
 .calls-who b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
@@ -2876,6 +2877,8 @@ a.event-who:hover { color: var(--accent-dim); }
 .log-tools + .table-scroll { border-top: 1px solid var(--line); }
 .log-table .log-when { white-space: nowrap; color: var(--text-dim); }
 .log-table .log-who { white-space: nowrap; }
+.log-table .log-who small, .log-table .log-source small { display: block; margin-top: 1px; font-size: 12px; color: var(--text-mute); }
+.log-table .log-source { white-space: nowrap; }
 .log-table .log-note { min-width: 320px; overflow-wrap: anywhere; }
 .log-table .log-agent { white-space: nowrap; color: var(--text-dim); }
 .log-kind { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 6px; background: var(--panel-3);

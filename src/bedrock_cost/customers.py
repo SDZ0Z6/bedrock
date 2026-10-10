@@ -419,10 +419,21 @@ class Holding:
         return None
 
     def daily(self, start: date, end: date) -> list[float]:
-        """start 到 end 每天的折算后消费（没有数的天是 0）。"""
+        """start 到 end 每天的折算后消费（没有数的天是 0）。这个账号自己的账，结算、对账用。"""
         values = dict(zip(self.series.dates, self.series.marked))
         span = (end - start).days + 1
         return [values.get((start + timedelta(days=i)).isoformat(), 0.0) for i in range(max(0, span))]
+
+    def active_daily(self, start: date, end: date) -> list[float]:
+        """start 到 end 每天算这个客户的消费：分给它那天起，到不算进余额（风控、换下、用完、结算）的前一天，
+        之外的天是 0。
+
+        「每天消费」、近 7 天日均（「还能用几天」）用这个：风控、换下来的账号后来还有零星的账，不该画进这个客户
+        每天花了多少，也不该把还能用几天拉短。历史消费、对账单、结算照样按这个账号全部的账算（上游按整个账号收钱）。
+        """
+        first, stop = self.joined or date.min, self.left or date.max
+        return [value if first <= start + timedelta(days=i) < stop else 0.0
+                for i, value in enumerate(self.daily(start, end))]
 
 
 # ---------------------------------------------------------------- 时间线
@@ -797,17 +808,17 @@ class CustomerView:
         return list(dict.fromkeys(h.account.partner for h in self.holdings if h.stage != "settled"))
 
     def daily(self, days: int = 30) -> tuple[list[date], dict[str, list[float]]]:
-        """近 days 天每天的消费，按账号（号码）分开。"""
+        """近 days 天每天的消费，按账号（号码）分开。每个账号只算它算这个客户的那几天（见 Holding.active_daily）。"""
         start = self.today - timedelta(days=days - 1)
         stamps = [start + timedelta(days=i) for i in range(days)]
-        return stamps, {h.number: h.daily(start, self.today) for h in self.holdings}
+        return stamps, {h.number: h.active_daily(start, self.today) for h in self.holdings}
 
     @property
     def avg7(self) -> float:
-        """近 7 天（不含今天，今天还没过完）的日均。"""
+        """近 7 天（不含今天，今天还没过完）的日均。只算使用中的那几天：风控、换下的账号后来的账不算。"""
         end = self.today - timedelta(days=1)
         start = end - timedelta(days=6)
-        return sum(sum(h.daily(start, end)) for h in self.holdings) / 7
+        return sum(sum(h.active_daily(start, end)) for h in self.holdings) / 7
 
     @property
     def burn(self) -> float:

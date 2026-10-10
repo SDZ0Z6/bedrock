@@ -21,6 +21,7 @@ import re
 import shutil
 import tempfile
 import threading
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -1125,9 +1126,19 @@ def _atomic_save(workbook, path: Path) -> None:
         raise
 
 
+# 这次改动是从哪个 IP 来的：网页那一层在每个请求开头设上（见 __init__.py），写操作日志时带上——大家共用一个
+# 账号（别的平台一键登录进来的也是它）时，光写用户名分不出是谁。命令行、定时任务里改台账没有请求，就是空的
+audit_ip: ContextVar[str] = ContextVar("audit_ip", default="")
+
+
 def _audit(note: str, actor: str) -> None:
-    """记一行操作日志。凭证的值永远不写进去。"""
-    line = f"{datetime.now():%Y-%m-%d %H:%M:%S}\t{actor or '?'}\t{note}\n"
+    """记一行操作日志：时间、谁、改了什么，网页上改的最后再加一列 IP。凭证的值永远不写进去。
+
+    「改了什么」里的换行、制表符换成空格：客户备注这类能填多行的字段原样写进去，会把一行日志拆成几行。
+    """
+    text = " ".join(note.replace("\t", " ").splitlines())
+    ip = audit_ip.get()
+    line = f"{datetime.now():%Y-%m-%d %H:%M:%S}\t{actor or '?'}\t{text}" + (f"\t{ip}" if ip else "") + "\n"
     try:
         target = config.EXCEL_PATH.parent / AUDIT_NAME
         with target.open("a", encoding="utf-8") as handle:

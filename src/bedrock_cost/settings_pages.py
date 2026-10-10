@@ -30,6 +30,8 @@ AUDIT_TAIL = 5000     # 操作日志只读最后这么多行（一行一百来�
 AUDIT_SHOW = 500      # 一次最多列这么多条，更早的用搜索找
 AUDIT_KINDS = ("账号", "客户", "标签", "告警", "其他")
 _NUMBER = re.compile(r"(?<!\d)(\d{12})(?!\d)")
+# 操作日志最后一列的 IP（网页上改的才有，见 excel_source._audit）。老日志只有三列
+_IP = re.compile(r"[0-9A-Fa-f:.]{2,45}")
 
 
 @dataclass
@@ -38,6 +40,7 @@ class AuditLine:
     actor: str
     note: str
     kind: str          # AUDIT_KINDS 之一
+    ip: str = ""       # 从哪个 IP 改的；命令行、定时任务改的，还有加 IP 之前的老日志是空的
 
     @property
     def parts(self) -> list[tuple[str, str]]:
@@ -81,11 +84,14 @@ def audit_lines(path: Path | None = None) -> list[AuditLine]:
         return []
     out = []
     for raw in reversed(tail):
-        parts = raw.rstrip("\r\n").split("\t", 2)
-        if len(parts) != 3 or not parts[2].strip():
+        parts = raw.rstrip("\r\n").split("\t")
+        ip = ""
+        if len(parts) >= 4 and _IP.fullmatch(parts[-1].strip()):
+            ip = parts.pop().strip()
+        if len(parts) < 3 or not "\t".join(parts[2:]).strip():
             continue
-        when, actor, note = (part.strip() for part in parts)
-        out.append(AuditLine(when=when, actor=actor, note=note, kind=_kind(note)))
+        when, actor, note = parts[0].strip(), parts[1].strip(), "\t".join(parts[2:]).strip()
+        out.append(AuditLine(when=when, actor=actor, note=note, kind=_kind(note), ip=ip))
     return out
 
 
@@ -109,12 +115,12 @@ def audit():
     needle = query.casefold()
     matched = [line for line in lines
                if (not kind or line.kind == kind)
-               and (not needle or needle in f"{line.when}\t{line.actor}\t{line.note}".casefold())]
+               and (not needle or needle in f"{line.when}\t{line.actor}\t{line.ip}\t{line.note}".casefold())]
     return render_template(
         "settings.html", tab="audit", tabs=_tabs("audit"), active_page="settings",
         lines=matched[:AUDIT_SHOW], matched=len(matched), total=len(lines), counts=counts,
         kinds=AUDIT_KINDS, kind=kind, query=query, show_limit=AUDIT_SHOW, tail_limit=AUDIT_TAIL,
-        audit_name=excel_source.AUDIT_NAME, **page_meta(),
+        audit_name=excel_source.AUDIT_NAME, my_ip=client_ip(), **page_meta(),
     )
 
 

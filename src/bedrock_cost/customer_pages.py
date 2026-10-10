@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import csv
 import io
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from types import SimpleNamespace
 
 from flask import Blueprint, Response, flash, redirect, render_template, request, session, url_for
 
-from . import chart, cloudwatch_metrics, config, customers, dashboard, excel_source, usage_explorer
+from . import chart, cloudwatch_metrics, config, cost_estimate, customers, dashboard, excel_source, usage_explorer
 from .auth import csrf_protect, login_required
 from .dates import parse_date
 from .excel_source import Account, ExcelSourceError
@@ -127,7 +128,7 @@ def index(**extra):
         stamps = [today - timedelta(days=29 - i) for i in range(30)]
         per_customer = {}
         for view in cards:
-            columns = [h.daily(stamps[0], today) for h in view.holdings]
+            columns = [h.active_daily(stamps[0], today) for h in view.holdings]
             per_customer[view.customer.id] = [sum(day) for day in zip(*columns)] if columns else [0.0] * 30
         names = {view.customer.id: view.customer.name for view in cards}
         trend = _spend_chart(per_customer, stamps, names)
@@ -207,6 +208,30 @@ def create():
 _hourly_calls = cloudwatch_metrics.account_totals
 
 
+def today_estimates(accounts: list[Account], today: date, refresh: bool = False) -> tuple[dict[str, float], bool]:
+    """今天到现在每个账号的预估花费：CloudWatch 的 token × 牌价，和账号页「预估」页签一个算法。
+
+    返回 ({account.key: 金额}, 有没有没算上的——读不到的区、价目表里没有的模型)。几个账号并发着查；刷新时只清一次
+    缓存，不让每个账号都去重拉一遍价目表。
+    """
+    if not accounts:
+        return {}, False
+    if refresh:
+        cost_estimate.clear_cache()
+
+    def one(account: Account):
+        return account.key, cost_estimate.build_estimate([account], today, today)
+
+    with ThreadPoolExecutor(max_workers=max(1, min(config.MAX_WORKERS, len(accounts)))) as pool:
+        reports = dict(pool.map(one, accounts))
+    partial = any(report.errors or report.unpriced or report.price_stale for report in reports.values())
+    return {key: report.total_cost for key, report in reports.items()}, partial
+
+
+# 「近 24 小时调用」上的今日预估走这个名字：测试里默认换成不查的（见 tests/conftest.py）
+_estimate_today = today_estimates
+
+
 def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dict[str, int], refresh: bool = False):
     """近 24 小时调用：折线图，一个账号一条线（四区合计、每小时一个点），线尾是这个账号的头像。
     CloudWatch 晚几分钟出数，比账单快得多。
@@ -235,9 +260,13 @@ def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dic
                                ends={names[number]: by_number[number].account.avatar for number in keep})
     totals = [sum(values[i] for values in series.values()) for i in range(width)]
     peak = max(range(width), key=lambda i: totals[i]) if any(totals) else None
+    # 今日预估：只估这 24 小时里有调用的账号（一直没调用的今天也就是 0，不用再查）
+    costs, partial = _estimate_today([by_number[number].account for number in ranked], view.today, refresh=refresh)
     return SimpleNamespace(
         chart=drawn, total=sum(totals), last=totals[-1] if totals else 0.0,
+        today_cost=sum(costs.values()), partial=partial,
         legend=[SimpleNamespace(account=by_number[number].account, total=sum(series[number]),
+                                today=costs.get(by_number[number].key, 0.0),
                                 color=chart.color_for(slots.get(names[number], -1))) for number in keep],
         silent=[h for h in watched if not any(series[h.number])],
         peak_label=hours.labels[peak] if peak is not None else "", peak_value=totals[peak] if peak is not None else 0.0,
