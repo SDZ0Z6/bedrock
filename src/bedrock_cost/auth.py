@@ -11,6 +11,7 @@ import secrets
 import threading
 import time
 from functools import wraps
+from urllib.parse import urlsplit
 
 from flask import (
     Blueprint,
@@ -137,6 +138,14 @@ def csrf_protect(view):
     return wrapper
 
 
+def login_source() -> str:
+    """登录表单是从哪个网站提交过来的：别的平台「一键登录」替用户提交时，浏览器带的 Origin（没有就看 Referer）
+    是那个平台；本站登录页提交的返回空串。这个头能伪造（curl 想写什么写什么），只当参考——IP 才靠得住。"""
+    raw = request.headers.get("Origin") or request.headers.get("Referer") or ""
+    host = urlsplit(raw).netloc if raw and raw != "null" else ""
+    return "" if not host or host == request.host else host
+
+
 @bp.route("/login", methods=["GET", "POST"])
 def login():
     if session.get("user"):
@@ -146,10 +155,11 @@ def login():
     if request.method == "POST":
         # 每次提交都记一行（设置页的「登录记录」）：不记密码；用户名照记，失败的也记输了什么
         agent = request.headers.get("User-Agent", "")
+        source = login_source()
         username = (request.form.get("username") or "").strip()
         remaining = lockout_remaining(ip)
         if remaining:
-            login_log.record("locked", user=username, ip=ip, agent=agent)
+            login_log.record("locked", user=username, ip=ip, agent=agent, source=source)
             flash(f"登录失败次数过多，请在 {remaining} 秒后重试。", "error")
             return render_template("login.html"), 429
 
@@ -157,14 +167,14 @@ def login():
         right_user = _same(config.AUTH_USERNAME, username)
         if right_user and password_matches(password):
             clear_failures(ip)
-            login_log.record("ok", user=username, ip=ip, agent=agent)
+            login_log.record("ok", user=username, ip=ip, agent=agent, source=source)
             session.permanent = True
             session["user"] = username
             # 只允许跳回本站路径，避免开放重定向
             return redirect(safe_next(request.form.get("next"), url_for("main.index")))
 
         record_failure(ip)
-        login_log.record("fail" if right_user else "user", user=username, ip=ip, agent=agent)
+        login_log.record("fail" if right_user else "user", user=username, ip=ip, agent=agent, source=source)
         flash("用户名或密码错误。", "error")
         # 返回 401 而不是 200：这样 Nginx 的访问日志里失败登录是可识别的，
         # fail2ban 才能据此封 IP。不带 WWW-Authenticate，所以浏览器不会弹

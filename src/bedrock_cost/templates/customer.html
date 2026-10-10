@@ -161,7 +161,7 @@
     <div class="viz-head">
       <div>
         <h2 class="viz-title">每天消费</h2>
-        <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 按账号叠起来，已结算的也画 · Cost Explorer 晚 1~2 天出数</p>
+        <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 按账号叠起来，只算在用的那几天 · Cost Explorer 晚 1~2 天出数</p>
       </div>
     </div>
     <div>
@@ -207,12 +207,17 @@
     <div class="viz-head">
       <div>
         <h2 class="viz-title">近 24 小时调用</h2>
-        <p class="viz-sub">{% if calls.start %}{{ calls.start }} ~ {{ calls.end }} · {% endif %}一个账号一条线，线尾是它的头像 · 每小时一个点 · 四区合计 · CloudWatch，晚几分钟，不用等账单</p>
+        {% if calls.start %}<p class="viz-sub">{{ calls.start }} ~ {{ calls.end }}</p>{% endif %}
       </div>
     </div>
     {% if calls.watched %}
       <div>
-        <p class="viz-big"><span data-countup>{{ calls.total | compact }}</span> <small>次</small></p>
+        {# 左边是调用次数，右边是今天到现在的预估花费（用量 × 牌价，以账单为准） #}
+        <div class="calls-kpis">
+          <p class="viz-big"><span data-countup>{{ calls.total | compact }}</span> <small>次</small></p>
+          <p class="viz-big" title="CloudWatch 的用量 × 牌价，和账号页「预估」页签一个算法，以账单为准">
+            <span data-countup>{{ calls.today_cost | money }}</span> <small>今日预估{% if calls.partial %}（有的没算上）{% endif %}</small></p>
+        </div>
         <p class="viz-meta">最近一小时 <strong>{{ calls.last | compact }}</strong>
           {%- if calls.peak_label %} · 最多的一小时 <strong>{{ calls.peak_value | compact }}</strong>（{{ calls.peak_label }}）{% endif %}
           · {{ calls.active }} / {{ calls.watched }} 个在用的账号有调用</p>
@@ -225,7 +230,7 @@
           {% for item in calls.legend %}
             <span class="calls-who"><span class="mini-av {{ item.account.avatar.css }}" style="box-shadow: 0 0 0 2px {{ item.color }}"
               aria-hidden="true">{{ item.account.avatar.text }}</span>{{ item.account.email or item.account.account }}
-              <b>{{ item.total | compact }}</b></span>
+              <b>{{ item.total | compact }}</b> 次 · 今日 <b>{{ item.today | money }}</b></span>
           {% endfor %}
         </div>
       {% endif %}

@@ -126,6 +126,9 @@ def _quiet_customer_calls(monkeypatch):
                                                values={a.key: [0.0] * len(stamps) for a in accounts})
 
     monkeypatch.setattr(customer_pages, "_hourly_calls", quiet)
+    # 同一张图上的「今日预估」也不查（要查 CloudWatch 的 token 指标和价目表）
+    monkeypatch.setattr(customer_pages, "_estimate_today",
+                        lambda accounts, today, refresh=False: ({a.key: 0.0 for a in accounts}, False))
 
 
 @pytest.fixture(autouse=True)

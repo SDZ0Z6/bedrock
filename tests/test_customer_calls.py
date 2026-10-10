@@ -236,3 +236,51 @@ def test_账号卡片是按阶段的横条(admin, fake_costs):
     widths = re.findall(r'<div class="stage-bar" aria-hidden="true"><i style="width: ([\d.]+)%', box)
     assert widths == ["50.0", "50.0", "0.0", "0.0"]
     assert re.search(r'<span class="mini-av av-\d+" title="acct-two@example.com"', rows[1][1])   # 风控那一档是 B
+
+
+# ====================================================================== 今日预估
+def test_标题下面只写时间_旁边是今日预估(admin, fake_costs, real_calls, monkeypatch):
+    asked = []
+
+    def estimate(accounts, today, refresh=False):
+        asked.append(sorted(a.account for a in accounts))
+        return {a.key: 12.5 if a.account == ALPHA_NO else 7.5 for a in accounts}, False
+
+    monkeypatch.setattr(customer_pages, "_estimate_today", estimate)
+    make(admin)
+    post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
+    box = card(detail(admin))
+    sub = scrape(re.search(r'<p class="viz-sub">(.*?)</p>', box, re.S).group(1))
+    assert re.fullmatch(r"\d\d-\d\d \d\d:00 ~ \d\d-\d\d \d\d:00", sub)       # 那句说明拿掉了
+    assert "$20.00 今日预估" in scrape(box) and "有的没算上" not in box
+    legend_text = scrape(re.search(r'<div class="calls-legend">(.*?)</div>', box, re.S).group(1))
+    assert "acct-one@example.com 1.8K 次 · 今日 $12.50" in legend_text
+    assert asked == [sorted([ALPHA_NO, BETA_NO])]
+
+
+def test_今日预估只估有调用的账号(admin, fake_costs, monkeypatch):
+    quiet_except(monkeypatch, {ALPHA_NO: 30.0})
+    asked = []
+    monkeypatch.setattr(customer_pages, "_estimate_today",
+                        lambda accounts, today, refresh=False: (asked.append([a.account for a in accounts])
+                                                                or {a.key: 1.0 for a in accounts}, True))
+    make(admin)
+    post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
+    box = card(detail(admin))
+    assert asked == [[ALPHA_NO]]
+    assert "$1.00 今日预估（有的没算上）" in scrape(box)
+
+
+def test_每个账号各估各的_刷新只清一次缓存(ledger, fake_estimate, monkeypatch):
+    """fake_estimate：每个账号每个区每天 100 万输入 token 的 Opus 5（$5/M），四个区一天 $20。"""
+    from datetime import date
+
+    from bedrock_cost import excel_source
+
+    accounts = excel_source.load_accounts(force=True)
+    cleared = []
+    real_clear = cost_estimate.clear_cache
+    monkeypatch.setattr(cost_estimate, "clear_cache", lambda: (cleared.append(1), real_clear()))
+    costs, partial = customer_pages.today_estimates(accounts, date.today(), refresh=True)
+    assert costs == {a.key: pytest.approx(20.0) for a in accounts} and partial is False
+    assert len(cleared) == 1

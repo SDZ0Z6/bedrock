@@ -3,6 +3,9 @@
 和告警流水（events）一样是一行一条 JSON（JSON Lines）：追加一行是一次写入，几个线程同时登录也不会
 互相覆盖。超过 MAX_LINES 行就重写一遍，只留最新的 KEEP_LINES 行（临时文件 + 原子替换）。
 
+别的网站替用户提交登录表单（「一键登录」）时，浏览器带的 Origin 是那个网站：记在 source 里，设置页上看得出哪些
+是从哪个平台一键登录进来的。这个头能伪造，只当参考；IP 才是靠得住的。
+
 **不记密码**：密码一个字都不记。用户名照记，登录失败时也记输进来的是什么（fail 是用户名对、密码错；
 user 是用户名就不对）——看是谁在试、试的是什么名字就靠它。要知道：有人把密码错填进用户名框的话，
 那一次的「用户名」就是密码，会出现在登录记录里。IP 和浏览器（User-Agent，截短）照记。
@@ -28,6 +31,7 @@ MAX_LINES = 1200     # 超过这么多行就裁一次
 KEEP_LINES = 1000    # 裁完留最新的这么多行
 MAX_AGENT = 200      # User-Agent 最长记多少字
 MAX_USER = 64        # 用户名最长记多少字
+MAX_SOURCE = 120     # 来源网站最长记多少字
 KINDS = {
     "ok": ("登录成功", "ok"),
     "fail": ("密码不对", "error"),
@@ -47,6 +51,7 @@ class Entry:
     user: str           # 用户名；登录失败、被锁定时是输进来的那个（可能是错的）
     ip: str
     agent: str          # User-Agent，截到 MAX_AGENT 字
+    source: str = ""    # 登录表单是从哪个网站提交的（别的平台一键登录）；本站登录页提交的、退出是空的
 
     @property
     def label(self) -> str:
@@ -91,8 +96,8 @@ def _path(path: Path | None) -> Path:
     return path or config.LOGIN_EVENTS_PATH
 
 
-def record(kind: str, *, user: str = "", ip: str = "", agent: str = "", when: datetime | None = None,
-           path: Path | None = None) -> Entry | None:
+def record(kind: str, *, user: str = "", ip: str = "", agent: str = "", source: str = "",
+           when: datetime | None = None, path: Path | None = None) -> Entry | None:
     """记一条（追加一行）。返回记下的那条；没记下来返回 None。"""
     entry = Entry(
         when=(when or datetime.now(timezone.utc)).astimezone(timezone.utc),
@@ -100,6 +105,7 @@ def record(kind: str, *, user: str = "", ip: str = "", agent: str = "", when: da
         user=" ".join((user or "").split())[:MAX_USER],
         ip=(ip or "")[:64],
         agent=(agent or "")[:MAX_AGENT],
+        source=(source or "")[:MAX_SOURCE],
     )
     payload = asdict(entry)
     payload["when"] = entry.when.isoformat(timespec="seconds")
@@ -158,7 +164,8 @@ def recent(limit: int = 500, path: Path | None = None) -> list[Entry]:
             if when.tzinfo is None:
                 when = when.replace(tzinfo=timezone.utc)
             out.append(Entry(when=when, kind=str(data.get("kind", "")), user=str(data.get("user", "")),
-                             ip=str(data.get("ip", "")), agent=str(data.get("agent", ""))))
+                             ip=str(data.get("ip", "")), agent=str(data.get("agent", "")),
+                             source=str(data.get("source", ""))))
         except (ValueError, KeyError, TypeError, AttributeError):
             continue
     return out

@@ -28,7 +28,7 @@
     <label class="search-pill">
       {{ cicon('search', '') }}
       <span class="sr-only">搜操作日志</span>
-      <input type="search" name="q" value="{{ query }}" placeholder="搜账号号码、客户编号、谁、改了什么" autocomplete="off">
+      <input type="search" name="q" value="{{ query }}" placeholder="搜账号号码、邮箱、客户、IP、改了什么" autocomplete="off">
     </label>
     {% if kind %}<input type="hidden" name="kind" value="{{ kind }}">{% endif %}
     <div class="fchips" aria-label="按类别筛选">
@@ -48,7 +48,8 @@
           {% for line in lines %}
             <tr>
               <td class="tab-num log-when">{{ line.when }}</td>
-              <td class="log-who">{{ line.actor }}</td>
+              <td class="log-who">{{ line.actor }}
+                {%- if line.ip %}<small class="tab-num">{{ line.ip }}{% if line.ip == my_ip %}<span class="me-tag">你</span>{% endif %}</small>{% endif %}</td>
               <td><span class="log-kind">{{ line.kind }}</span></td>
               {# 说明里的 12 位号码点进去是那个账号的时间线 #}
               <td class="log-note">
@@ -90,7 +91,7 @@
   {% if entries %}
     <div class="table-scroll">
       <table class="log-table">
-        <thead><tr><th>时间</th><th>结果</th><th>用户</th><th>IP</th><th>浏览器</th></tr></thead>
+        <thead><tr><th>时间</th><th>结果</th><th>用户</th><th>IP</th><th>来源</th><th>浏览器</th></tr></thead>
         <tbody>
           {% for entry in entries %}
             <tr>
@@ -98,6 +99,9 @@
               <td><span class="login-kind k-{{ entry.tone }}"><i class="state-dot" aria-hidden="true"></i>{{ entry.label }}</span></td>
               <td class="log-who {% if entry.failed %}tone-danger{% endif %}">{{ entry.user or '—' }}</td>
               <td class="tab-num">{{ entry.ip or '—' }}{% if entry.ip and entry.ip == my_ip %}<span class="me-tag">你现在的 IP</span>{% endif %}</td>
+              {# 别的平台一键登录：表单是从那个网站提交的 #}
+              <td class="log-source">{% if entry.source %}{{ entry.source }}<small>从这个网站提交</small>
+                {%- elif entry.kind == 'logout' %}<span class="tone-muted">—</span>{% else %}<span class="tone-muted">本站</span>{% endif %}</td>
               <td class="log-agent" title="{{ entry.agent }}">{{ entry.browser }}</td>
             </tr>
           {% endfor %}

@@ -39,10 +39,10 @@ from datetime import timedelta
 from flask import Flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import config
+from . import config, excel_source
 from .account_pages import bp as account_bp
 from .accounts import bp as accounts_bp
-from .auth import bp as auth_bp
+from .auth import bp as auth_bp, client_ip
 from .customer_pages import bp as customers_bp
 from .filters import register_filters
 from .ops import bp as ops_bp
@@ -51,6 +51,16 @@ from .views import bp as views_bp
 
 __all__ = ["create_app", "__version__"]
 __version__ = "1.0.0"
+
+
+def _remember_ip() -> None:
+    """操作日志带上这次改动是从哪个 IP 来的（excel_source.audit_ip）。"""
+    ip = client_ip()
+    excel_source.audit_ip.set("" if ip == "?" else ip)
+
+
+def _forget_ip(_error=None) -> None:
+    excel_source.audit_ip.set("")
 
 
 def _security_headers(response):
@@ -94,5 +104,7 @@ def create_app(**overrides: object) -> Flask:
         app.register_blueprint(ops_bp)
     app.register_blueprint(accounts_bp)
     app.register_blueprint(settings_bp)
+    app.before_request(_remember_ip)
+    app.teardown_request(_forget_ip)
     app.after_request(_security_headers)
     return app
