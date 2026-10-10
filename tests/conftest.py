@@ -112,6 +112,23 @@ def _no_network(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _quiet_customer_calls(monkeypatch):
+    """客户页的「近 24 小时调用」默认不查 CloudWatch：每个账号都是 0。
+
+    不换的话，每个打开客户页的用例都会去连 CloudWatch（被上面的 _no_network 拦下），页面上多出一堆
+    「读不到 CloudWatch」。要测这张图的用例自己换回去（见 tests/test_customer_calls.py）。
+    """
+    from bedrock_cost import cloudwatch_metrics, customer_pages
+
+    def quiet(accounts, window, metric_key="invocations", regions=None, refresh=False):
+        stamps, labels = cloudwatch_metrics.build_grid(window)
+        return cloudwatch_metrics.AccountHours(timestamps=stamps, labels=labels,
+                                               values={a.key: [0.0] * len(stamps) for a in accounts})
+
+    monkeypatch.setattr(customer_pages, "_hourly_calls", quiet)
+
+
+@pytest.fixture(autouse=True)
 def _no_price_fetch(request, tmp_path, monkeypatch):
     """价目表：不读开发机项目根下那份 bedrock-prices.json，也不去拉 AWS 的公开价目表。
 

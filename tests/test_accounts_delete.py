@@ -102,7 +102,7 @@ class TestDelete:
         delete(admin, "111111111111", password="wrong-password")
         delete(admin, "111111111111")
         log = audit(ledger)
-        assert "删除账号 111111111111（ALPHA）" in log
+        assert "删除账号 acct-one@example.com（111111111111），上游 ALPHA" in log      # 清空之前记下是谁
         assert TEST_PASSWORD not in log and "wrong-password" not in log
 
     def test_a_deleted_id_can_be_added_again(self, admin, ledger):
@@ -161,10 +161,11 @@ class TestBackups:
         delete(admin, "222222222222")
         assert len(backups(ledger)) == 1                          # 还是改字段时的那一份
         log = audit(ledger)
-        for line in ("开启账号 111111111111 的 TG 告警", "开启账号 111111111111 的邮件告警",
-                     "账号 111111111111 的生命周期：空 → 风控", "新增生命周期标签「观察」",
+        one, two = "acct-one@example.com（111111111111）", "acct-two@example.com（222222222222）"
+        for line in (f"开启账号 {one} 的 TG 告警", f"开启账号 {one} 的邮件告警",
+                     f"账号 {one} 的生命周期：空 → 风控", "新增生命周期标签「观察」",
                      "删除生命周期标签「结算」",
-                     "停用账号 111111111111", "恢复账号 111111111111", "删除账号 222222222222"):
+                     f"停用账号 {one}", f"恢复账号 {one}", f"删除账号 {two}"):
             assert line in log                                   # 不备份，但照样记审计
 
     def test_an_unchanged_edit_neither_writes_nor_backs_up(self, admin, ledger):

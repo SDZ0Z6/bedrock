@@ -1251,6 +1251,40 @@ def _plain(value: float) -> str:
     return "0" if text in ("", "-0") else text
 
 
+# 操作日志里事件的说法，和 customers.EVENT_TYPES 里的标题一样（tests/test_restore_and_audit.py 核对）
+EVENT_TITLES = {
+    "signup": "开始合作", "start": "启用账号", "assign": "分配账号", "unassign": "解绑", "budget": "调整额度",
+    "rampup": "开始上量", "resume": "恢复上量", "stop": "上量终止", "quota": "额度预警", "mail": "AWS 邮件",
+    "risk": "标记风控", "unrisk": "取消风控", "restore": "恢复使用", "replace": "替换账号", "settle": "结算",
+    "disable": "停用", "enable": "恢复启用", "note": "备注",
+}
+
+
+def _account_label(sheet, index: dict[str, int], row: int) -> str:
+    """操作日志里的一个账号：邮箱（号码）——光写号码看不出是谁。没填邮箱就只写号码。"""
+    number = _to_account_id(sheet.cell(row=row, column=index["account"]).value) or NO_ACCOUNT
+    email = _clean(sheet.cell(row=row, column=index["email"]).value) if "email" in index else ""
+    return f"{email}（{number}）" if email else number
+
+
+def _number_label(sheet, index: dict[str, int], number: str) -> str:
+    """同上，按号码找那一行（事件里只存了号码）；台账里已经没有这个号码就只写号码。"""
+    for row in range(2, sheet.max_row + 1):
+        if number and _to_account_id(sheet.cell(row=row, column=index["account"]).value) == number:
+            return _account_label(sheet, index, row)
+    return number
+
+
+def _customer_label(book, cid: str) -> str:
+    """操作日志里的一个客户：名字（编号）。台账里找不到这个客户就只写编号。"""
+    try:
+        sheet, index, row = _customer_row(book, cid)
+    except ExcelSourceError:
+        return cid
+    name = _clean(sheet.cell(row=row, column=index["NAME"]).value) if "NAME" in index else ""
+    return f"{name}（{cid}）" if name else cid
+
+
 def _show(value: object) -> str:
     """审计日志里的取值展示：2000.0 写成 2000，日期写成 2026-09-01，空值写成「空」。"""
     if isinstance(value, float):
@@ -1351,8 +1385,8 @@ def create_account(data: dict, actor: str = "") -> str:
             _customer_row(sheet.parent, data["customer"])
             _write_event(sheet.parent, when=started or date.today(), customer=data["customer"], kind="assign",
                          account=data["account"], amount=data["budget"], actor=actor)
-            owner = f"，分给客户 {data['customer']}"
-        return (f"新增账号 {data['account']}（{data['partner']}），额度 {_plain(data['budget'])}"
+            owner = f"，分给客户 {_customer_label(sheet.parent, data['customer'])}"
+        return (f"新增账号 {_account_label(sheet, index, row)}，上游 {data['partner']}，额度 {_plain(data['budget'])}"
                 f"{when}{tg}{mail}{owner}")
 
     return _mutate(action, actor, backup=True)
@@ -1389,7 +1423,11 @@ def update_account(key: str, data: dict, actor: str = "") -> str:
                 changes["mail_enabled"] = "MAIL_ENABLED 开 → 关（告警邮箱删了）"
         if not changes:
             return ""
-        return Note(f"修改账号 {data['account']}：" + "；".join(changes.values()), changes)
+        if "customer" in changes:      # 客户写名字（编号），没有客户写「库存」
+            def owner(cid: str) -> str:
+                return _customer_label(sheet.parent, cid) if cid else "库存"
+            changes["customer"] = f"客户 {owner(before['customer'])} → {owner(_customer_fields(sheet, index, row)['customer'])}"
+        return Note(f"修改账号 {_account_label(sheet, index, row)}：" + "；".join(changes.values()), changes)
 
     return _mutate(action, actor, backup=True)
 
@@ -1411,7 +1449,7 @@ def set_tg_enabled(key: str, enabled: bool, actor: str = "") -> str:
         if _to_flag(sheet.cell(row=row, column=column).value) == enabled:
             return ""
         sheet.cell(row=row, column=column).value = bool(enabled)
-        return f"{'开启' if enabled else '关闭'}账号 {key.rpartition('#')[0]} 的 TG 告警"
+        return f"{'开启' if enabled else '关闭'}账号 {_account_label(sheet, index, row)} 的 TG 告警"
 
     return _mutate(action, actor, backup=False)
 
@@ -1438,7 +1476,7 @@ def set_mail_enabled(key: str, enabled: bool, actor: str = "") -> str:
         if _to_flag(sheet.cell(row=row, column=column).value) == enabled:
             return ""
         sheet.cell(row=row, column=column).value = bool(enabled)
-        return f"{'开启' if enabled else '关闭'}账号 {key.rpartition('#')[0]} 的邮件告警"
+        return f"{'开启' if enabled else '关闭'}账号 {_account_label(sheet, index, row)} 的邮件告警"
 
     return _mutate(action, actor, backup=False)
 
@@ -1463,7 +1501,9 @@ def set_account_budget(key: str, budget: float, actor: str = "", note: str = "")
         sheet.cell(row=row, column=_ensure_column(sheet, index, "budget")).value = budget
         _write_event(sheet.parent, when=date.today(), customer=fields["customer"], kind="budget",
                      account=fields["account"], amount=budget, before=before, note=note, actor=actor)
-        return Note(f"修改账号 {fields['account']}：BUDGET {_plain(before)} → {_plain(budget)}", {"budget": ""})
+        owner = f"（客户 {_customer_label(sheet.parent, fields['customer'])}）" if fields["customer"] else "（库存）"
+        return Note(f"修改账号 {_account_label(sheet, index, row)}：BUDGET {_plain(before)} → {_plain(budget)}{owner}",
+                    {"budget": ""})
 
     return _mutate(action, actor, backup=True)
 
@@ -1481,7 +1521,7 @@ def set_enabled(key: str, enabled: bool, actor: str = "") -> str:
         if fields["account"] != NO_ACCOUNT:
             _write_event(sheet.parent, when=date.today(), customer=fields["customer"],
                          kind="enable" if enabled else "disable", account=fields["account"], actor=actor)
-        return f"{'恢复' if enabled else '停用'}账号 {key.rpartition('#')[0]}"
+        return f"{'恢复' if enabled else '停用'}账号 {_account_label(sheet, index, row)}"
 
     return _mutate(action, actor, backup=False)
 
@@ -1498,10 +1538,11 @@ def delete_account(key: str, actor: str = "") -> str:
     def action(sheet, index) -> str:
         row = _locate(sheet, index, key)
         partner = _clean(sheet.cell(row=row, column=index["partner"]).value) or NO_PARTNER
+        who = _account_label(sheet, index, row)       # 清空之前先记下是谁
         for column in range(1, sheet.max_column + 1):
             # 写 .value = None 才真的清空（cell(..., value=None) 会被 openpyxl 当成没给值）
             sheet.cell(row=row, column=column).value = None
-        return f"删除账号 {key.rpartition('#')[0]}（{partner}）"
+        return f"删除账号 {who}，上游 {partner}"
 
     return _mutate(action, actor, backup=False)
 
@@ -1528,7 +1569,7 @@ def set_lifecycle(key: str, tags: list[str], actor: str = "") -> str:
         sheet.cell(row=row, column=column).value = ",".join(clean) or None
         # 打上 / 去掉「风控」：客户时间线上记一笔
         _log_account_change(sheet, index, row, fields, actor)
-        return (f"账号 {key.rpartition('#')[0]} 的生命周期："
+        return (f"账号 {_account_label(sheet, index, row)} 的生命周期："
                 f"{'、'.join(before) or '空'} → {'、'.join(clean) or '空'}")
 
     return _mutate(action, actor, backup=False)
@@ -1837,7 +1878,7 @@ def create_customer(data: dict, actor: str = "") -> str:
         ident = f"C{max(numbers, default=0) + 1:03d}"
         _write_customer(customers, cindex, _next_free_row(customers, cindex), ident, data)
         made["id"] = ident
-        return f"新建客户 {ident}（{data['name']}）"
+        return f"新建客户 {data['name']}（{ident}）"
 
     _mutate(action, actor, backup=True)
     return made.get("id", "")
@@ -1851,7 +1892,8 @@ def update_customer(cid: str, data: dict, actor: str = "") -> str:
         changes = _write_customer(customers, cindex, row, cid, data)
         if not changes:
             return ""
-        return Note(f"修改客户 {cid}：" + "；".join(changes.values()), [title.lower() for title in changes])
+        return Note(f"修改客户 {_customer_label(sheet.parent, cid)}：" + "；".join(changes.values()),
+                    [title.lower() for title in changes])
 
     return _mutate(action, actor, backup=True)
 
@@ -1868,7 +1910,7 @@ def assign_accounts(cid: str, keys: list[str], when: date, actor: str = "") -> s
         book = sheet.parent
         _customer_row(book, cid)
         column = _ensure_column(sheet, index, "customer")
-        numbers = []
+        labels = []
         for key in keys:
             row = _locate(sheet, index, key)
             fields = _customer_fields(sheet, index, row)
@@ -1880,8 +1922,8 @@ def assign_accounts(cid: str, keys: list[str], when: date, actor: str = "") -> s
             _restart(sheet, index, row, fields["lifecycle"])
             _write_event(book, when=when, customer=cid, kind="assign", account=fields["account"],
                          amount=fields["budget"], actor=actor)
-            numbers.append(fields["account"])
-        return f"把账号 {'、'.join(numbers)} 分给客户 {cid}"
+            labels.append(_account_label(sheet, index, row))
+        return f"客户 {_customer_label(book, cid)}：分配账号 {'、'.join(labels)}，日期 {when.isoformat()}"
 
     return _mutate(action, actor, backup=False)
 
@@ -1897,7 +1939,7 @@ def unassign_account(cid: str, key: str, when: date, actor: str = "", note: str 
             sheet.cell(row=row, column=index["settled"]).value = None
         _write_event(sheet.parent, when=when, customer=cid, kind="unassign", account=fields["account"],
                      note=note, actor=actor)
-        return f"账号 {fields['account']} 和客户 {cid} 解绑，回到库存"
+        return f"客户 {_customer_label(sheet.parent, cid)}：解绑账号 {_account_label(sheet, index, row)}，回到库存"
 
     return _mutate(action, actor, backup=False)
 
@@ -1914,7 +1956,8 @@ def mark_risk(cid: str, key: str, when: date, actor: str = "", spent: float | No
         _retag(sheet, index, row, add=(TAG_RISK,), remove=(TAG_NORMAL,))
         _write_event(sheet.parent, when=when, customer=cid, kind="risk", account=fields["account"],
                      amount=spent, note=note, actor=actor)
-        return f"账号 {fields['account']}（客户 {cid}）标记风控"
+        return (f"客户 {_customer_label(sheet.parent, cid)}：账号 {_account_label(sheet, index, row)} 标记风控，"
+                f"日期 {when.isoformat()}")
 
     return _mutate(action, actor, backup=False)
 
@@ -1930,7 +1973,35 @@ def clear_risk(cid: str, key: str, when: date, actor: str = "") -> str:
         add = () if TAG_SETTLE in fields["lifecycle"] else (TAG_NORMAL,)
         _retag(sheet, index, row, add=add, remove=(TAG_RISK,))
         _write_event(sheet.parent, when=when, customer=cid, kind="unrisk", account=fields["account"], actor=actor)
-        return f"账号 {fields['account']}（客户 {cid}）取消风控"
+        return f"客户 {_customer_label(sheet.parent, cid)}：账号 {_account_label(sheet, index, row)} 取消风控"
+
+    return _mutate(action, actor, backup=False)
+
+
+def restore_account(key: str, when: date, actor: str = "", note: str = "", cid: str = "") -> str:
+    """恢复使用：AWS 解除了风控、换下来的账号还要接着用。生命周期去掉「风控」「结算」、标上「正常」，
+    记一条「恢复使用」。
+
+    分给了客户的（cid 是页面上看到的客户，对不上就报错）回到使用中：没用完的额度重新算进预算和余额，
+    对账单上那次「移出」不再算（就当它没离开过），时间线上之前的风控、替换都留着。库存里的只改生命周期。
+    已经结算的不能恢复；本来就没有「风控」「结算」的返回空串。额度用完的恢复了也还是待结算，由调用方先挡。
+    """
+
+    def action(sheet, index) -> str:
+        row = _owned_row(sheet, index, key, cid) if cid else _locate(sheet, index, key)
+        fields = _customer_fields(sheet, index, row)
+        owner = fields["customer"]
+        if owner and fields["settled"] is not None:
+            raise ExcelSourceError("这个账号已经结算了，不能恢复。要再用，先解绑回库存再分配。")
+        if TAG_RISK not in fields["lifecycle"] and TAG_SETTLE not in fields["lifecycle"]:
+            return ""
+        _retag(sheet, index, row, add=(TAG_NORMAL,), remove=(TAG_RISK, TAG_SETTLE))
+        _write_event(sheet.parent, when=when, customer=owner, kind="restore", account=fields["account"], note=note,
+                     actor=actor)
+        who = _account_label(sheet, index, row)
+        if owner:
+            return f"客户 {_customer_label(sheet.parent, owner)}：账号 {who} 恢复使用，日期 {when.isoformat()}"
+        return f"账号 {who}（库存）恢复使用，日期 {when.isoformat()}"
 
     return _mutate(action, actor, backup=False)
 
@@ -1962,7 +2033,8 @@ def replace_account(cid: str, old_key: str, new_key: str, reason: str, when: dat
         _restart(sheet, index, new_row, new["lifecycle"])
         _write_event(book, when=when, customer=cid, kind="replace", account=old["account"], peer=new["account"],
                      amount=new["budget"], before=spent, note=reason, actor=actor)
-        return f"客户 {cid}：账号 {old['account']} 换成 {new['account']}（{reason or '没写原因'}）"
+        return (f"客户 {_customer_label(book, cid)}：账号 {_account_label(sheet, index, old_row)} 换成 "
+                f"{_account_label(sheet, index, new_row)}，原因 {reason or '没写'}，日期 {when.isoformat()}")
 
     return _mutate(action, actor, backup=False)
 
@@ -1985,7 +2057,8 @@ def settle_account(cid: str, key: str, when: date, actor: str = "", spent: float
         if off:
             _write_event(sheet.parent, when=when, customer=cid, kind="disable", account=fields["account"],
                          actor=actor)
-        return f"客户 {cid}：账号 {fields['account']} 结算{off}"
+        return (f"客户 {_customer_label(sheet.parent, cid)}：账号 {_account_label(sheet, index, row)} 结算，"
+                f"日期 {when.isoformat()}{off}")
 
     return _mutate(action, actor, backup=False)
 
@@ -2010,7 +2083,8 @@ def set_budget(cid: str, key: str, budget: float, when: date, actor: str = "", n
             _retag(sheet, index, row, add=(TAG_NORMAL,), remove=(TAG_SETTLE,))
         _write_event(sheet.parent, when=when, customer=cid, kind="budget", account=fields["account"],
                      amount=budget, before=fields["budget"], note=note, actor=actor)
-        return f"客户 {cid}：账号 {fields['account']} 的额度 {_plain(fields['budget'])} → {_plain(budget)}"
+        return (f"客户 {_customer_label(sheet.parent, cid)}：账号 {_account_label(sheet, index, row)} 的额度 "
+                f"{_plain(fields['budget'])} → {_plain(budget)}，日期 {when.isoformat()}")
 
     return _mutate(action, actor, backup=True)
 
@@ -2023,7 +2097,9 @@ def add_customer_event(cid: str, kind: str, when: date, actor: str = "", account
         _customer_row(sheet.parent, cid)
         ident = _write_event(sheet.parent, when=when, customer=cid, kind=kind, account=account, note=note,
                              actor=actor)
-        return f"客户 {cid} 的时间线记一笔（#{ident} {kind}）"
+        which = f"，账号 {_number_label(sheet, index, account)}" if account else ""
+        return (f"客户 {_customer_label(sheet.parent, cid)} 的时间线记一笔：#{ident}「{EVENT_TITLES.get(kind, kind)}」"
+                f"{which}，日期 {when.isoformat()}")
 
     return _mutate(action, actor, backup=False)
 
@@ -2048,12 +2124,20 @@ def add_account_event(key: str, kind: str, when: date, actor: str = "", note: st
             _retag(sheet, index, row, add=(TAG_RISK,), remove=(TAG_NORMAL,))
             _write_event(sheet.parent, when=when, customer=owner, kind="risk", account=number, amount=spent,
                          note=note, actor=actor)
-            return f"账号 {number}{f'（客户 {owner}）' if owner else '（库存）'}标记风控"
+            who = _account_label(sheet, index, row)
+            if owner:
+                return f"客户 {_customer_label(sheet.parent, owner)}：账号 {who} 标记风控，日期 {when.isoformat()}"
+            return f"账号 {who}（库存）标记风控，日期 {when.isoformat()}"
         if kind not in NOTE_TYPES:
             raise ExcelSourceError(f"认不出这一类：{kind}")
         ident = _write_event(sheet.parent, when=when, customer=owner, kind=kind, account=number, note=note,
                              actor=actor)
-        return f"账号 {number} 的时间线记一笔（#{ident} {kind}）"
+        what = f"#{ident}「{EVENT_TITLES[kind]}」"
+        who = _account_label(sheet, index, row)
+        if owner:
+            return (f"客户 {_customer_label(sheet.parent, owner)} 的时间线记一笔：{what}，账号 {who}，"
+                    f"日期 {when.isoformat()}")
+        return f"账号 {who}（库存）的时间线记一笔：{what}，日期 {when.isoformat()}"
 
     return _mutate(action, actor, backup=False)
 
@@ -2081,16 +2165,18 @@ def change_account_event(number: str, ident: str, actor: str = "", *, when: date
         auto = _clean(events.cell(row=row, column=eindex["SOURCE"]).value).lower() == "auto"
         if auto or kind not in NOTE_TYPES:
             raise ExcelSourceError("这一条连着钱和阶段，要去客户页的时间线上改。")
+        before = _to_date(events.cell(row=row, column=eindex["DATE"]).value)
+        what = f"#{ident}「{EVENT_TITLES[kind]}」"
+        head = f"账号 {_number_label(sheet, index, number)} 的时间线"
         if delete:
             if _to_flag(events.cell(row=row, column=eindex["DELETED"]).value):
                 return ""
             events.cell(row=row, column=eindex["DELETED"]).value = True
-            return f"账号 {number} 的时间线：删掉 #{ident}"
-        before = _to_date(events.cell(row=row, column=eindex["DATE"]).value)
+            return f"{head}：删掉 {what}（日期 {_show(before)}）"
         if before == when:
             return ""
         events.cell(row=row, column=eindex["DATE"]).value = when
-        return f"账号 {number} 的时间线：#{ident} 的日期 {_show(before)} → {when.isoformat()}"
+        return f"{head}：{what} 的日期 {_show(before)} → {when.isoformat()}"
 
     return _mutate(action, actor, backup=False)
 
@@ -2115,12 +2201,13 @@ def _override_row(sheet, index: dict[str, int], cid: str, key: str) -> int | Non
 
 def change_customer_event(cid: str, ident: str, actor: str = "", *, when: date | None = None,
                           delete: bool = False, auto_kind: str = "", auto_account: str = "",
-                          auto_date: date | None = None) -> str:
+                          auto_date: date | None = None, auto_title: str = "") -> str:
     """改时间线上一件事的日期，或者删掉它。
 
     ident 是手动事件的编号（"12"），或者自动事件的标识（"auto:…"）。手动的直接改那一行（删掉是打上
     DELETED，行留着）；自动的本身不存，记一行改动：改了日期、删掉了——删掉的以后不会再自动生成。
-    auto_kind / auto_account / auto_date 是自动事件原来的类别、账号、日期，记在改动那一行里方便人看。
+    auto_kind / auto_account / auto_date 是自动事件原来的类别、账号、日期，记在改动那一行里方便人看；
+    auto_title 是它在时间线上的标题（「额度 70%」这种），写进操作日志。
     """
     if not delete and when is None:
         raise ExcelSourceError("没有给新的日期。")
@@ -2141,20 +2228,28 @@ def change_customer_event(cid: str, ident: str, actor: str = "", *, when: date |
                     events.cell(row=row, column=eindex["DATE"]).value = when
                 events.cell(row=row, column=eindex["DELETED"]).value = True if delete else None
                 _put(events.cell(row=row, column=eindex["ACTOR"]), actor)
-            what = "删掉" if delete else f"改到 {when.isoformat()}"
-            return f"客户 {cid} 的时间线：自动事件 {key} {what}"
+            done = "删掉" if delete else f"改到 {when.isoformat()}"
+            bits = [_number_label(sheet, index, auto_account) if auto_account else "",
+                    f"原本 {auto_date.isoformat()}" if auto_date else ""]
+            which = "，".join(bit for bit in bits if bit)
+            return (f"客户 {_customer_label(book, cid)} 的时间线：自动记的「{auto_title or EVENT_TITLES.get(auto_kind, auto_kind)}」"
+                    f"{f'（{which}）' if which else ''}{done}")
         if not ident.isdigit():
             raise ExcelSourceError(f"认不出这条事件：{ident}")
         row = _event_row(events, eindex, cid, int(ident))
+        kind = _clean(events.cell(row=row, column=eindex["TYPE"]).value).lower()
+        number = _to_account_id(events.cell(row=row, column=eindex["ACCOUNT"]).value)
+        before = _to_date(events.cell(row=row, column=eindex["DATE"]).value)
+        what = f"#{ident}「{EVENT_TITLES.get(kind, kind)}」" + (f"（账号 {_number_label(sheet, index, number)}）" if number else "")
+        head = f"客户 {_customer_label(book, cid)} 的时间线"
         if delete:
             if _to_flag(events.cell(row=row, column=eindex["DELETED"]).value):
                 return ""
             events.cell(row=row, column=eindex["DELETED"]).value = True
-            return f"客户 {cid} 的时间线：删掉 #{ident}"
-        before = _to_date(events.cell(row=row, column=eindex["DATE"]).value)
+            return f"{head}：删掉 {what}，原本的日期 {_show(before)}"
         if before == when:
             return ""
         events.cell(row=row, column=eindex["DATE"]).value = when
-        return f"客户 {cid} 的时间线：#{ident} 的日期 {_show(before)} → {when.isoformat()}"
+        return f"{head}：{what} 的日期 {_show(before)} → {when.isoformat()}"
 
     return _mutate(action, actor, backup=False)

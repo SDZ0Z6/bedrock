@@ -230,8 +230,8 @@ class TestMailToggle:
         assert by_account("111111111111").mail_active is True
         post(admin, "/accounts/mail-toggle", key=key, mail_enabled="0")
         assert by_account("111111111111").mail_enabled is False
-        assert "开启账号 111111111111 的邮件告警" in audit(ledger)
-        assert "关闭账号 111111111111 的邮件告警" in audit(ledger)
+        assert "开启账号 acct-one@example.com（111111111111） 的邮件告警" in audit(ledger)
+        assert "关闭账号 acct-one@example.com（111111111111） 的邮件告警" in audit(ledger)
 
     def test_cannot_switch_on_without_a_mailbox(self, admin, ledger):
         post(admin, "/accounts/mail-toggle", key=by_account("111111111111").key, mail_enabled="1")

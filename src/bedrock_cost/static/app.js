@@ -529,7 +529,8 @@
     const grid = svg.querySelector('.chart-grid');
     const items = [];
     for (const el of svg.querySelectorAll('rect, path, polyline, polygon, circle, line, text')) {
-      if ((grid && grid.contains(el)) || el.closest('defs, .chart-cursor')) continue;
+      // 线尾的头像不挪：放大时整组藏起来（style.css 的 .is-zoomed）
+      if ((grid && grid.contains(el)) || el.closest('defs, .chart-cursor, .chart-endavatars')) continue;
       const tag = el.tagName.toLowerCase();
       const item = { el: el, tag: tag };
       if (tag === 'rect') item.attrs = ['x', 'width'];

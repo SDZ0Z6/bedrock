@@ -79,20 +79,26 @@
     <div class="viz-head">
       <div>
         <h2 class="viz-title">账号</h2>
-        <p class="viz-sub">异常里：风控 {{ counts.risk }} · 待结算 {{ counts.pending }}</p>
+        <p class="viz-sub">按阶段 · 只有使用中的算进余额</p>
       </div>
     </div>
-    <div class="donut">
-      {{ donut | safe }}
-      <div class="donut-center">
-        <span class="donut-value">{{ counts.total }}</span>
-        <span class="donut-of">个账号</span>
-      </div>
-    </div>
-    <div class="gauge-facts">
-      <span><i class="state-dot k-active" aria-hidden="true"></i>正常<strong>{{ counts.use }}</strong></span>
-      <span><i class="state-dot k-error" aria-hidden="true"></i>异常<strong>{{ counts.bad }}</strong></span>
-      <span><i class="state-dot k-idle" aria-hidden="true"></i>已结算<strong>{{ counts.settled }}</strong></span>
+    <p class="viz-big"><span data-countup>{{ counts.total }}</span> <small>个账号</small></p>
+    {# 横条：一个阶段一根，长短按占全部账号的比例；名字后面是这一档里的账号头像（最多 5 个） #}
+    <div class="stage-bars">
+      {% for row in stage_rows %}
+        <div class="stage-row{% if not row.count %} is-zero{% endif %}" style="--i: {{ loop.index0 }}">
+          <div class="stage-line">
+            <span class="stage-name">{{ row.label }}</span>
+            <span class="stage-faces">
+              {%- for h in row.holdings[:5] %}<span class="mini-av {{ h.account.avatar.css }}" title="{{ h.account.email or h.number }}"
+                aria-hidden="true">{{ h.account.avatar.text }}</span>{% endfor -%}
+              {%- if row.holdings | length > 5 %}<span class="stage-more">+{{ (row.holdings | length) - 5 }}</span>{% endif -%}
+            </span>
+            <b>{{ row.count }}</b>
+          </div>
+          <div class="stage-bar" aria-hidden="true"><i style="width: {{ '%.1f' % (row.count / counts.total * 100 if counts.total else 0) }}%; background: {{ row.color }}"></i></div>
+        </div>
+      {% endfor %}
     </div>
   </article>
 
@@ -195,6 +201,42 @@
     </div>
     <div class="viz-chart">{{ runway | safe }}</div>
   </article>
+
+  {# 账单要晚 1~2 天，这张看现在：CloudWatch 的调用次数，晚几分钟。颜色和「每天消费」一样，一个账号一个颜色 #}
+  <article class="viz-card col-6" data-reveal>
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">近 24 小时调用</h2>
+        <p class="viz-sub">{% if calls.start %}{{ calls.start }} ~ {{ calls.end }} · {% endif %}一个账号一条线，线尾是它的头像 · 每小时一个点 · 四区合计 · CloudWatch，晚几分钟，不用等账单</p>
+      </div>
+    </div>
+    {% if calls.watched %}
+      <div>
+        <p class="viz-big"><span data-countup>{{ calls.total | compact }}</span> <small>次</small></p>
+        <p class="viz-meta">最近一小时 <strong>{{ calls.last | compact }}</strong>
+          {%- if calls.peak_label %} · 最多的一小时 <strong>{{ calls.peak_value | compact }}</strong>（{{ calls.peak_label }}）{% endif %}
+          · {{ calls.active }} / {{ calls.watched }} 个在用的账号有调用</p>
+      </div>
+      <div class="chart-wrap chart-fluid calls-chart" data-line-src="cust-calls-data">{{ calls.chart.svg | safe }}</div>
+      {% if calls.chart.tooltip %}<script id="cust-calls-data" type="application/json">{{ calls.chart.tooltip | tojson }}</script>{% endif %}
+      {# 头像对邮箱：两个账号可能是同一个字母，外圈的颜色就是它那条线的颜色 #}
+      {% if calls.legend %}
+        <div class="calls-legend">
+          {% for item in calls.legend %}
+            <span class="calls-who"><span class="mini-av {{ item.account.avatar.css }}" style="box-shadow: 0 0 0 2px {{ item.color }}"
+              aria-hidden="true">{{ item.account.avatar.text }}</span>{{ item.account.email or item.account.account }}
+              <b>{{ item.total | compact }}</b></span>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% if calls.silent %}
+        <p class="calls-silent">近 24 小时没有调用：
+          {%- for h in calls.silent %}<span class="calls-who">{{ mini(h.account) }}{{ h.account.email or h.number }}</span>{% endfor %}</p>
+      {% endif %}
+    {% else %}
+      <p class="viz-empty">没有在用的账号。</p>
+    {% endif %}
+  </article>
 </section>
 
 <!-- ------------------------------------------------ 时间线 -->
@@ -276,6 +318,10 @@
                   <button class="btn btn-xs btn-ghost" type="button" popovertarget="more-{{ loop.index }}"
                           aria-label="更多操作" title="更多操作">{{ cicon('more', '') }}</button>
                   <div class="row-more-pop" id="more-{{ loop.index }}" popover>
+                      {% if h.restorable %}
+                        {# AWS 解除了风控、换下来的还要接着用：回到使用中 #}
+                        <button type="button" data-act="restore" data-key="{{ h.key }}">恢复使用</button>
+                      {% endif %}
                       {% if h.stage == 'use' %}
                         <button type="button" data-act="replace" data-key="{{ h.key }}">替换账号</button>
                         <button type="button" data-act="risk" data-key="{{ h.key }}">标记风控</button>
@@ -700,6 +746,33 @@
   </form>
 </dialog>
 
+<dialog class="modal modal-sm" id="dlg-restore">
+  <form method="post" action="{{ url_for('customers.restore', cid=customer.id) }}" data-loading="正在保存">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="key" value="">
+    <header class="modal-head">
+      <h2>恢复使用</h2><span class="modal-sub" data-fill="email"></span>
+      <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+    </header>
+    <div class="modal-body">
+      <div class="outcome" data-fill="outcome"></div>
+      <div class="form-grid" style="margin-top: 14px">
+        <div class="field"><label for="restore-date">日期</label>
+          <input id="restore-date" name="date" type="date" max="{{ today.isoformat() }}" value="{{ today.isoformat() }}"></div>
+        <div class="field field-full"><label for="restore-note">说明</label>
+          <input id="restore-note" name="note" maxlength="200" placeholder="比如：AWS 解除了暂停" autocomplete="off"></div>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <span class="card-note">时间线上记一条「恢复使用」</span>
+      <div class="modal-btns">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn btn-primary" type="submit">恢复使用</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
 <dialog class="modal modal-sm" id="dlg-unassign">
   <form method="post" action="{{ url_for('customers.unassign', cid=customer.id) }}" data-loading="正在保存">
     <input type="hidden" name="csrf" value="{{ csrf_token() }}">
@@ -745,7 +818,8 @@
             <option value="">不针对某个账号</option>
             {% for h in view.listed %}
               <option value="{{ h.number }}" data-markable="{{ '1' if h.stage in ('use', 'pending') and '风控' not in h.account.lifecycle else '' }}">
-                {{- h.account.email or h.number }}{% if h.stage != 'use' %}（{{ h.stage_label }}）{% endif %}</option>
+                {{- h.account.email or h.number }}{% if h.account.email %} · {{ h.number }}{% endif %}
+                {%- if h.stage != 'use' %}（{{ h.stage_label }}）{% endif %}</option>
             {% endfor %}
           </select></div>
         <p class="outcome field-full" data-note-risk hidden>标记以后，这个账号从这天起不算进预算、消费和余额（没用完的额度跟着移出），生命周期换成「风控」。之后去替换一个新账号。</p>
@@ -859,6 +933,23 @@
     risk: function (dialog, h) {
       fill(dialog, 'email', h.email);
       fill(dialog, 'outcome', '标记以后，这个账号从这天起不算进预算、消费和余额（没用完的 ' + money(Math.max(0, h.remaining)) + ' 跟着移出），生命周期换成「风控」。之后去替换一个新账号。');
+    },
+    restore: function (dialog, h) {
+      fill(dialog, 'email', h.email);
+      const rest = h.has_numbers ? Math.max(0, h.remaining) : null;
+      const lines = [
+        '回到使用中：生命周期去掉「风控」「结算」，标上「正常」。',
+        rest === null ? '它的额度重新算进预算和余额。'
+          : '没用完的 ' + money(rest) + ' 重新算进预算和余额（余额 ' + money(data.balance) + ' → ' + money(data.balance + rest) + '）。',
+        '对账单上之前那次「移出」不再算，就当它没离开过；时间线上的风控、替换记录都留着，再记一条「恢复使用」。',
+      ];
+      if (h.replaced_by) lines.push('换上来的 ' + h.replaced_by + ' 不受影响，两个都在用。');
+      const box = dialog.querySelector('[data-fill="outcome"]');
+      const head = document.createElement('b');
+      head.textContent = '恢复以后：';
+      const list = document.createElement('ol');
+      for (const line of lines) { const li = document.createElement('li'); li.textContent = line; list.append(li); }
+      box.replaceChildren(head, list);
     },
     unassign: function (dialog, h) {
       fill(dialog, 'email', h.email);
@@ -990,6 +1081,9 @@
     if (event.target.matches('#dlg-replace input')) replaceOutcome();
   });
   replaceOutcome();
+
+  // ---- 近 24 小时调用：手机上图比屏幕宽、能左右滑；一打开先停在最右边（最近那几个小时和线尾的头像）
+  for (const wrap of document.querySelectorAll('.calls-chart')) wrap.scrollLeft = wrap.scrollWidth;
 
   // ---- 名下账号：按阶段、搜邮箱或 ID 筛（两个同时满足）。排序是 app.js 的 data-sortable（点表头：升、降、回到默认）
   const holdingTable = document.getElementById('holding-table');

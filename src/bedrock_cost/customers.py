@@ -378,6 +378,19 @@ class Holding:
         return STAGES[self.stage][0]
 
     @property
+    def restorable(self) -> bool:
+        """能「恢复使用」：风控 · 待替换，或者被换下、标了「结算」的待结算——还没结算、额度也没用完。
+
+        只是额度用完的待结算不算（去调整额度）；已结算的是线下对完账的，不能直接恢复。
+        """
+        tags = self.account.lifecycle
+        if self.stage not in ("risk", "pending") or self.account.settled is not None:
+            return False
+        if TAG_RISK not in tags and TAG_SETTLE not in tags:
+            return False
+        return not (self.has_numbers and self.account.budget > 0 and self.spent >= self.account.budget)
+
+    @property
     def stage_tone(self) -> str:
         return STAGES[self.stage][1]
 
@@ -427,6 +440,7 @@ EVENT_TYPES = {
     "mail": ("AWS 邮件", "risk", "risk", "mail"),
     "risk": ("标记风控", "risk", "risk", "flag"),
     "unrisk": ("取消风控", "risk", "misc", "flag"),
+    "restore": ("恢复使用", "risk", "up", "play"),      # AWS 解除了风控、换下来的又要接着用：回到使用中
     "replace": ("替换账号", "acct", "acct", "swap"),
     "settle": ("结算", "money", "money", "check"),
     "disable": ("停用", "acct", "misc", "power"),
@@ -446,7 +460,7 @@ LONG_RUNWAY_DAYS = 365
 # 同一天的几件事按这个顺序排；同一组里的（标记 / 取消风控、停用 / 恢复）按记下来的先后
 _TYPE_ORDER = {kind: position for position, group in enumerate((
     ("signup",), ("start",), ("assign",), ("budget",), ("rampup",), ("resume",), ("quota",), ("stop",), ("mail",),
-    ("risk", "unrisk"), ("replace",), ("settle",), ("disable", "enable"), ("unassign",), ("note",),
+    ("risk", "unrisk", "restore"), ("replace",), ("settle",), ("disable", "enable"), ("unassign",), ("note",),
 )) for kind in group}
 # 告警流水里算「AWS 风控邮件」的几类（mail_rules 的 abuse / compromised / suspended）
 RISK_MAIL_KINDS = ("mail-abuse", "mail-compromised", "mail-suspended")
@@ -529,7 +543,7 @@ def _manual_item(event: CustomerEvent, partners: dict[str, str]) -> Item:
             text = f"{text} · {note}" if text else note
     elif event.type == "risk":
         text = " · ".join(bit for bit in (f"已用 {_money(event.amount)}" if event.amount is not None else "", note) if bit)
-    elif event.type == "unrisk":
+    elif event.type in ("unrisk", "restore"):
         text = note or "回到使用中"
     elif event.type == "replace":
         bits = [note, f"上游补发 {_short(event.amount)}" if event.amount else ""]
@@ -972,14 +986,24 @@ def _joined_and_via(account: Account, events: list[CustomerEvent]) -> tuple[date
 
 
 def _left(holding: Holding, events: list[CustomerEvent], since: date | None = None) -> tuple[date | None, str]:
-    """不在使用中的账号：从哪天起不算进余额、为什么。只看 since（默认分给这个客户那天）以后的事。"""
+    """不在使用中的账号：从哪天起不算进余额、为什么。只看 since（默认分给这个客户那天）以后的事。
+
+    恢复使用过的，只看最后一次恢复以后的事：之前那次风控、换下已经翻篇了。
+    """
     if holding.stage == "use":
         return None, ""
     number = holding.number
     joined = since or holding.joined or date.min
+    restored = max(((event.date, event.id) for event in events
+                    if event.type == "restore" and event.account == number and not event.deleted
+                    and event.source == "manual" and event.date >= joined), default=None)
+    if restored:
+        joined = restored[0]
     candidates: list[tuple[date, str]] = []
     for event in events:
         if event.deleted or event.source != "manual" or event.account != number or event.date < joined:
+            continue
+        if restored and (event.date, event.id) < restored:
             continue
         if event.type == "risk":
             candidates.append((event.date, "风控"))
@@ -990,7 +1014,8 @@ def _left(holding: Holding, events: list[CustomerEvent], since: date | None = No
     if holding.account.settled:
         candidates.append((holding.account.settled, "结算"))
     if not candidates:
-        return holding.account.settled or holding.joined, "结算" if holding.account.settled else ""
+        start = restored[0] if restored else holding.joined
+        return holding.account.settled or start, "结算" if holding.account.settled else ""
     # 同一天的几个原因：先标的风控、再换下……说最早的那个
     priority = {"风控": 0, "换下": 1, "用完": 2, "结算": 3}
     return min(candidates, key=lambda pair: (pair[0], priority[pair[1]]))

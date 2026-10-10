@@ -63,6 +63,8 @@ def _kind(note: str) -> str:
         return "账号"
     if "客户" in note:
         return "客户"
+    if note.startswith("账号 "):         # 库存里的账号：在账号页记一笔、标风控、恢复使用
+        return "账号"
     return "其他"
 
 

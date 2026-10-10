@@ -2540,6 +2540,29 @@ a.event-who:hover { color: var(--accent-dim); }
 .detail-bento { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-auto-flow: row dense; gap: 16px; margin-bottom: 18px; }
 .detail-bento .col-2 { grid-column: span 2; }
 .detail-bento .col-4 { grid-column: span 4; }
+.detail-bento .col-6 { grid-column: 1 / -1; }
+/* 「账号」：按阶段的横条，长短按占全部账号的比例；名字后面是这一档的账号头像 */
+.stage-bars { display: flex; flex-direction: column; gap: 14px; margin-top: 14px; }
+.stage-line { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim); }
+.stage-name { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stage-faces { display: inline-flex; align-items: center; }
+.stage-faces .mini-av { width: 18px; height: 18px; font-size: 9px; box-shadow: 0 0 0 2px var(--panel); }
+.stage-faces .mini-av + .mini-av { margin-left: -5px; }
+.stage-more { margin-left: 5px; font-size: 11.5px; color: var(--text-mute); }
+.stage-line b { min-width: 16px; text-align: right; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.stage-row.is-zero .stage-line, .stage-row.is-zero .stage-line b { color: var(--text-mute); }
+.stage-bar { height: 8px; margin-top: 7px; border-radius: 999px; background: var(--panel-3); overflow: hidden; }
+.stage-bar > i { display: block; height: 100%; border-radius: inherit; }
+/* 「近 24 小时调用」：线尾的头像放大时藏起来（标的是全貌里的末值）；图下面是头像对邮箱 */
+.line-chart.is-zoomed .chart-endavatars { display: none; }
+/* 手机上整张图缩到三分之一，线尾的头像只剩几个像素：给个最小宽度，左右滑着看 */
+@media (max-width: 760px) { .calls-chart .chart-svg { min-width: 680px; } }
+.calls-legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 10px; }
+.calls-who { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-dim); }
+.calls-who b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.calls-legend .mini-av { width: 20px; height: 20px; font-size: 10px; }
+.calls-silent { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 10px 0 0; font-size: 12.5px; color: var(--text-mute); }
+.calls-silent .mini-av { width: 16px; height: 16px; font-size: 8.5px; }
 @media (max-width: 1200px) {
   .detail-bento { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .detail-bento .col-2 { grid-column: span 1; }
@@ -2551,11 +2574,6 @@ a.event-who:hover { color: var(--accent-dim); }
 }
 .gauge-facts .state-dot { display: inline-block; margin-right: 6px; vertical-align: 1px; }
 .viz-big.tone-warn { color: var(--warn); }
-.donut { position: relative; width: 100%; max-width: 196px; margin: 2px auto 0; }
-.donut-svg { display: block; width: 100%; height: auto; }
-.donut-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
-.donut-value { font-size: 34px; font-weight: 600; line-height: 1.1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
-.donut-of { font-size: 12.5px; color: var(--text-mute); }
 .runway-chart { display: block; width: 100%; height: auto; }
 /* 「余额」：每个使用中的账号还剩多少 */
 .bal-rows { display: flex; flex-direction: column; gap: 14px; }
@@ -2814,11 +2832,9 @@ a.event-who:hover { color: var(--accent-dim); }
   [data-reveal]:not(.in) *, [data-reveal]:not(.in) *::before, [data-reveal]:not(.in) *::after {
     animation-play-state: paused !important;
   }
-  /* 环形图：一段接一段画出来（--d0 延迟、--dd 时长，按占比算好的） */
-  .donut-seg { stroke-dasharray: 1; animation: donut-draw var(--dd, .9s) linear var(--d0, 0s) backwards; }
-  @keyframes donut-draw { from { stroke-dashoffset: 1; } }
   /* 余额条：和进度条一样从左往右长出来 */
   .bal-bar > i { animation: meter-fill .9s cubic-bezier(.33, 1, .68, 1) backwards; animation-delay: calc(.2s + var(--i, 0) * 90ms); }
+  .stage-bar > i { animation: meter-fill .9s cubic-bezier(.33, 1, .68, 1) backwards; animation-delay: calc(.2s + var(--i, 0) * 90ms); }
   /* 时间线：从最近的那件开始，一张张浮上来 */
   /* 时间线从以前流到现在：先淡出左边的虚线，实线从左往右画过去，事件跟着一件件从左边滑进来，
      最后亮出「今天」和后面的虚线；实线上一直有一道光从以前流向现在 */

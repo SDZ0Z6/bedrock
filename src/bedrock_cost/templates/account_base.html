@@ -40,6 +40,10 @@
       <p class="page-sub">一个账号一页：消费、用量、预估、时间线和配额。网址里就是号码，能收藏、发给别人</p>
     </div>
     <div class="page-actions">
+      {# 恢复使用：打着「风控」「结算」、还没结算的账号（AWS 解除了风控、换下来的又要接着用），和客户页名下账号里的一样 #}
+      {% if restorable %}
+        <button class="btn" type="button" data-open-restore>{{ cicon('play') }}恢复使用</button>
+      {% endif %}
       <button class="btn" type="button" data-open-budget>{{ cicon('budget') }}调整额度</button>
       <a class="btn btn-primary" href="{{ url_for('accounts.index', edit=account.key, back=here) }}"
          data-loading="正在读台账">{{ cicon('pencil') }}编辑资料</a>
@@ -108,6 +112,45 @@
     {% endfor %}
   </nav>
 
+  {% if restorable %}
+  <dialog class="modal modal-sm" id="dlg-acct-restore">
+    <form method="post" action="{{ url_for('account.restore', number=account.account) }}" data-loading="正在保存">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="next" value="{{ here }}">
+      <div class="modal-head">
+        <h2>恢复使用</h2><span class="modal-sub">{{ account.email or account.account }}</span>
+        <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="outcome"><b>恢复以后：</b>
+          <ol>
+            <li>生命周期去掉「风控」「结算」，标上「正常」。</li>
+            {% if owner %}
+              <li>回到{{ owner.name }}的使用中，没用完的额度重新算进预算和余额。</li>
+              <li>对账单上之前那次「移出」不再算，就当它没离开过；时间线上的风控、替换记录都留着，再记一条「恢复使用」。</li>
+            {% else %}
+              <li>它在库存里，分给客户的时候就是正常的账号。时间线上记一条「恢复使用」。</li>
+            {% endif %}
+          </ol>
+        </div>
+        <div class="form-grid" style="margin-top: 14px">
+          <div class="field"><label for="acct-restore-date">日期</label>
+            <input id="acct-restore-date" name="date" type="date" max="{{ today_iso }}" value="{{ today_iso }}"></div>
+          <div class="field field-full"><label for="acct-restore-note">说明（可选）</label>
+            <input id="acct-restore-note" name="note" maxlength="200" autocomplete="off" placeholder="比如：AWS 解除了暂停"></div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <span class="card-note">时间线上记一条「恢复使用」{% if owner %}，{{ owner.name }}的客户页上也看得到{% endif %}</span>
+        <div class="modal-btns">
+          <button class="btn" type="button" data-close>取消</button>
+          <button class="btn btn-primary" type="submit">恢复使用</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+  {% endif %}
+
   {# 调整额度：填加多少（减写负数），和客户页的「调整额度」一样。改完回这一页 #}
   <dialog class="modal modal-sm" id="dlg-acct-budget">
     <form method="post" action="{{ url_for('accounts.budget') }}" data-loading="正在保存">
@@ -157,8 +200,14 @@
         input.focus();
       } else if (event.target.closest('#dlg-acct-budget [data-close]')) {
         dialog.close();
+      } else if (event.target.closest('[data-open-restore]')) {
+        document.getElementById('dlg-acct-restore').showModal();
+      } else if (event.target.closest('#dlg-acct-restore [data-close]')) {
+        document.getElementById('dlg-acct-restore').close();
       }
     });
+    const restore = document.getElementById('dlg-acct-restore');
+    if (restore) restore.addEventListener('click', function (event) { if (event.target === restore) restore.close(); });
     dialog.addEventListener('click', function (event) { if (event.target === dialog) dialog.close(); });
     // 边填边算改完是多少
     input.addEventListener('input', function () {
