@@ -155,7 +155,7 @@ EVENTS_SHEET = "EVENTS"
 # TYPE 是事件类别（customers.EVENT_TYPES 的 key）；AMOUNT / BEFORE 是金额（分配时的额度、额度改前改后、
 # 结算时的消费）；PEER 是替换时换上的新账号；SOURCE 是 manual（有人操作）或 auto——自动事件本身
 # 每次按数据算出来，不存，表里只存对它的改动：改了日期、删掉了（KEY 认是哪一条，DELETED 是删掉）。
-# CUSTOMER 空着的是账号在库存里时记的事（调额度、风控、停用 / 恢复），只在账号页的时间线上
+# CUSTOMER 空着的是账号在库存里时记的事（调额度、风控、停用 / 恢复），只在账号页的时间线上（也在那里改日期、删掉）
 EVENT_HEADER = (
     "ID", "DATE", "CUSTOMER", "ACCOUNT", "TYPE", "AMOUNT", "BEFORE", "PEER", "NOTE",
     "SOURCE", "KEY", "DELETED", "CREATED_AT", "ACTOR",
@@ -174,6 +174,12 @@ TAG_RISK = "风控"
 # 所以账号页上也能改日期、删掉
 NOTE_TYPES = ("note", "rampup", "stop", "resume")
 _CUSTOMER_ID = re.compile(r"^C\d{3,}$")
+
+
+def account_page_editable(kind: str, customer: str) -> bool:
+    """账号页的时间线上能改日期、删掉的手动事件：「记一笔」那几类，以及账号在库存里时记的（CUSTOMER 空着：
+    标风控、调额度、停用 / 恢复、恢复使用……）——那时候没有客户，不连着谁的钱和阶段，也没有客户页可改。"""
+    return kind in NOTE_TYPES or not customer
 
 
 @dataclass
@@ -2157,8 +2163,9 @@ def change_account_event(number: str, ident: str, actor: str = "", *, when: date
                          delete: bool = False) -> str:
     """账号页的时间线上改一笔手动记的事的日期，或者删掉它（打上 DELETED，行留着）。
 
-    只认这个账号的、「记一笔」那几类（NOTE_TYPES）：分配、调额度、风控、替换、结算这些连着钱和阶段，
-    去客户页的时间线上改。
+    只认这个账号的、account_page_editable 的：「记一笔」那几类，以及在库存里时记的（什么类都行）。分给了客户
+    以后记的分配、调额度、风控、替换、结算这些连着钱和阶段，去客户页的时间线上改。删掉只是不在时间线上
+    显示，生命周期、额度不跟着变。
     """
     if not delete and when is None:
         raise ExcelSourceError("没有给新的日期。")
@@ -2174,10 +2181,12 @@ def change_account_event(number: str, ident: str, actor: str = "", *, when: date
             raise LedgerConflict("时间线上已经没有这条了，请刷新页面后重试。")
         kind = _clean(events.cell(row=row, column=eindex["TYPE"]).value).lower()
         auto = _clean(events.cell(row=row, column=eindex["SOURCE"]).value).lower() == "auto"
-        if auto or kind not in NOTE_TYPES:
+        owner = _to_customer_id(events.cell(row=row, column=eindex["CUSTOMER"]).value)
+        if auto or not account_page_editable(kind, owner):
             raise ExcelSourceError("这一条连着钱和阶段，要去客户页的时间线上改。")
         before = _to_date(events.cell(row=row, column=eindex["DATE"]).value)
-        what = f"#{ident}「{EVENT_TITLES[kind]}」"
+        # 库存里记的什么类都能改：台账里手写的类别不在表里，照原样写
+        what = f"#{ident}「{EVENT_TITLES.get(kind, kind)}」"
         head = f"账号 {_number_label(sheet, index, number)} 的时间线"
         if delete:
             if _to_flag(events.cell(row=row, column=eindex["DELETED"]).value):
