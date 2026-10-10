@@ -1764,6 +1764,16 @@ def _retag(sheet, index: dict[str, int], row: int, add=(), remove=()) -> None:
         _ensure_listed(sheet.parent, [name for name in add if name not in before])
 
 
+def _restart(sheet, index: dict[str, int], row: int, tags) -> None:
+    """从库存分出去（分配、替换上来）的账号：上一段合作留下的「结算」去掉；没有「风控」的标上「正常」。
+
+    「风控」不动：那是 AWS 那边的事，分给哪个客户都还在——客户页上它就是「风控 · 待替换」，不算进预算和余额。
+    要取消，在客户页「取消风控」或者账号管理里改生命周期。
+    """
+    risky = TAG_RISK in tags
+    _retag(sheet, index, row, add=() if risky else (TAG_NORMAL,), remove=(TAG_SETTLE,))
+
+
 def _owned_row(sheet, index: dict[str, int], key: str, cid: str, *, allow_settled: bool = False) -> int:
     """账号在台账里的行号，并核对它确实是这个客户的（还没结算）。"""
     row = _locate(sheet, index, key)
@@ -1844,7 +1854,10 @@ def update_customer(cid: str, data: dict, actor: str = "") -> str:
 
 
 def assign_accounts(cid: str, keys: list[str], when: date, actor: str = "") -> str:
-    """把库存里的账号分给客户：写上客户编号、生命周期换成「正常」，每个账号记一条「分配账号」。"""
+    """把库存里的账号分给客户：写上客户编号，每个账号记一条「分配账号」。
+
+    生命周期见 _restart：去掉上一段合作的「结算」，「风控」留着（AWS 那边的事，分给谁都还在）。
+    """
     if not keys:
         raise ExcelSourceError("先选要分配的账号。")
 
@@ -1861,7 +1874,7 @@ def assign_accounts(cid: str, keys: list[str], when: date, actor: str = "") -> s
             _put(sheet.cell(row=row, column=column), cid)
             if "settled" in index:
                 sheet.cell(row=row, column=index["settled"]).value = None
-            _retag(sheet, index, row, add=(TAG_NORMAL,), remove=(TAG_RISK, TAG_SETTLE))
+            _restart(sheet, index, row, fields["lifecycle"])
             _write_event(book, when=when, customer=cid, kind="assign", account=fields["account"],
                          amount=fields["budget"], actor=actor)
             numbers.append(fields["account"])
@@ -1943,7 +1956,7 @@ def replace_account(cid: str, old_key: str, new_key: str, reason: str, when: dat
         _put(sheet.cell(row=new_row, column=_ensure_column(sheet, index, "customer")), cid)
         if "settled" in index:
             sheet.cell(row=new_row, column=index["settled"]).value = None
-        _retag(sheet, index, new_row, add=(TAG_NORMAL,), remove=(TAG_RISK, TAG_SETTLE))
+        _restart(sheet, index, new_row, new["lifecycle"])
         _write_event(book, when=when, customer=cid, kind="replace", account=old["account"], peer=new["account"],
                      amount=new["budget"], before=spent, note=reason, actor=actor)
         return f"客户 {cid}：账号 {old['account']} 换成 {new['account']}（{reason or '没写原因'}）"

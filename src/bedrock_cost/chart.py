@@ -121,6 +121,13 @@ def _zoom_attrs(left: float, right: float, count: int, band: float, gap: float) 
             f'data-zoom-band="{band:.3f}" data-zoom-gap="{gap:g}"')
 
 
+def _runway_words(left: float, far: bool) -> str:
+    """「还能用几天」那张图的读屏说明。"""
+    if not left:
+        return "最近没有消费"
+    return "按日均一年以上才用完" if far else f"按日均约 {math.floor(left)} 天后用完"
+
+
 def _nice_step(span: float, intervals: int = 4) -> float:
     """把轴刻度落到 1 / 2 / 2.5 / 5 / 10 这类整数上。"""
     if span <= 0:
@@ -1171,10 +1178,17 @@ def render_donut(parts: list[tuple[str, float, str]], size: int = 196, stroke: f
     return "".join(out)
 
 
+RUNWAY_FAR = 365       # 按日均一年以上才用完：不标日期，写「一年以上」
+
+
 def render_runway(history: list[tuple], per_day: float, width: int = 300, height: int = 210,
                   fmt=None, axis=None) -> str:
     """「还能用几天」：过去几周每天结束时的余额（实线 + 线下浅填充），从今天按日均往后推到 0（虚线，
     末端一个空心点）。history 是 [(date, 余额)]，最后一个是今天；per_day 是日均消费，0 就不画预测。
+
+    预测最多往后画历史的两倍长：日均很低时（比如账号刚风控、只剩零星几分钱），「用完」在几百、几亿天
+    以后——照着画，历史那一段会被挤成一条竖线；把那么多天加到今天上，日期也放不下（线上出过
+    OverflowError）。画不到 0 的，虚线停在右边，末端写用完的日期，一年以上的写「一年以上」。
 
     动效沿用折线图的（CSS）：实线从左往右画出来，填充、今天的点和预测随后淡入。
     """
@@ -1187,7 +1201,9 @@ def render_runway(history: list[tuple], per_day: float, width: int = 300, height
     pad_l, pad_r, pad_t, pad_b = 46.0, 14.0, 12.0, 26.0
     now = max(0.0, history[-1][1])
     left = now / per_day if per_day > 0 and now > 0 else 0.0
-    ahead = max(6, math.ceil(left) + 2) if left else 6
+    far = not math.isfinite(left) or left > RUNWAY_FAR
+    shown = min(left, max(6.0, 2.0 * (len(history) - 1)))     # 预测画多远（天）
+    ahead = max(6, math.ceil(shown) + 2) if left else 6
     span = len(history) - 1 + ahead
     top = max([value for _, value in history] + [1.0])
     step = _nice_step(top, 3)
@@ -1206,7 +1222,7 @@ def render_runway(history: list[tuple], per_day: float, width: int = 300, height
         f'<svg class="chart-svg line-chart runway-chart" viewBox="0 0 {width} {height}" width="{width}" '
         f'height="{height}" {_zoom_attrs(pad_l, width - pad_r, span + 1, plot_w / span, 0.0)} '
         f'role="img" aria-label="余额 {html.escape(fmt(now))}，'
-        f'{"按日均约 " + str(math.floor(left)) + " 天后用完" if left else "最近没有消费"}">',
+        f'{_runway_words(left, far)}">',
         '<g class="chart-grid">',
     ]
     for tick in range(ticks + 1):
@@ -1230,21 +1246,25 @@ def render_runway(history: list[tuple], per_day: float, width: int = 300, height
         f'stroke="{LABEL_TEXT}" stroke-width="1" stroke-dasharray="3 3" stroke-opacity=".55"></line>'
     )
     if left:
-        end = today_i + left
+        end = today_i + shown
+        rest = now * (1 - shown / left) if math.isfinite(left) else now     # 画到的那天还剩多少（没到 0 = 还没用完）
         out.append(
-            f'<path class="chart-marker" d="M{x(today_i):.1f},{y(now):.1f} L{x(end):.1f},{y(0):.1f}" fill="none" '
+            f'<path class="chart-marker" d="M{x(today_i):.1f},{y(now):.1f} L{x(end):.1f},{y(rest):.1f}" fill="none" '
             f'stroke="{accent}" stroke-width="2" stroke-dasharray="5 4"></path>'
-            f'<circle class="chart-marker" cx="{x(end):.1f}" cy="{y(0):.1f}" r="4" fill="{SURFACE}" '
-            f'stroke="{accent}" stroke-width="2"></circle>'
         )
+        if shown >= left:          # 画到了 0：末端一个空心点
+            out.append(
+                f'<circle class="chart-marker" cx="{x(end):.1f}" cy="{y(0):.1f}" r="4" fill="{SURFACE}" '
+                f'stroke="{accent}" stroke-width="2"></circle>'
+            )
     out.append(
         f'<circle class="chart-marker" cx="{x(today_i):.1f}" cy="{y(now):.1f}" r="{MARKER_R:.1f}" fill="{accent}" '
         f'stroke="{SURFACE}" stroke-width="2"></circle>'
     )
     labels = [(x(0), history[0][0].strftime("%m-%d"), "start"), (x(today_i), "今天", "middle")]
     if left:
-        when = history[-1][0] + timedelta(days=math.floor(left))
-        labels.append((min(x(today_i + left), width - pad_r), when.strftime("%m-%d"), "end"))
+        text = "一年以上" if far else (history[-1][0] + timedelta(days=math.floor(left))).strftime("%m-%d")
+        labels.append((min(x(today_i + shown), width - pad_r), text, "end"))
     out.append('<g class="chart-xaxis">')
     for lx, text, anchor in labels:
         out.append(f'<text x="{lx:.1f}" y="{height - 8:.0f}" text-anchor="{anchor}" fill="{TICK_TEXT}" '

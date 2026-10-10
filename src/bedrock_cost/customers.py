@@ -431,6 +431,10 @@ EVENT_TYPES = {
 CATEGORIES = [("acct", "账号"), ("use", "用量"), ("risk", "风控"), ("money", "结算、额度"), ("misc", "其他")]
 # 「记一笔」能记的几类
 MANUAL_KINDS = ("note", "rampup", "stop", "resume")
+# 「还能用几天」：日均不到半分钱就当最近没有消费；超过一年的不写具体天数和日期。账号刚风控、只剩零星
+# 几分钱的时候，余额 ÷ 日均是天文数字，加到今天上连日期都放不下（线上出过 OverflowError）
+MIN_DAILY = 0.005
+LONG_RUNWAY_DAYS = 365
 # 同一天的几件事按这个顺序排；同一组里的（标记 / 取消风控、停用 / 恢复）按记下来的先后
 _TYPE_ORDER = {kind: position for position, group in enumerate((
     ("signup",), ("start",), ("assign",), ("budget",), ("rampup",), ("resume",), ("quota",), ("stop",), ("mail",),
@@ -764,17 +768,30 @@ class CustomerView:
         return sum(sum(h.daily(start, end)) for h in self.holdings) / 7
 
     @property
+    def burn(self) -> float:
+        """往后推「还能用几天」用的日均：近 7 天的日均，不到半分钱的当 0（最近没有消费）。"""
+        avg = self.avg7
+        return avg if avg >= MIN_DAILY else 0.0
+
+    @property
     def days_left(self) -> float | None:
-        """还能用几天：余额 ÷ 日均。没有余额是 0，最近没量是 None。"""
+        """还能用几天：余额 ÷ 日均。没有余额是 0，最近没量（日均不到半分钱）是 None。"""
         if self.balance <= 0:
             return 0.0
-        avg = self.avg7
-        return self.balance / avg if avg > 0 else None
+        burn = self.burn
+        return self.balance / burn if burn else None
+
+    @property
+    def long_runway(self) -> bool:
+        """一年以上才用完：页面上不写具体天数和日期，写「一年以上」。"""
+        left = self.days_left
+        return left is not None and left > LONG_RUNWAY_DAYS
 
     @property
     def runs_out_on(self) -> date | None:
+        """哪天前后用完；一年以上的不算日期（太远了，加到今天上可能连日期都放不下）。"""
         left = self.days_left
-        if left is None:
+        if left is None or left > LONG_RUNWAY_DAYS:
             return None
         return self.today + timedelta(days=math.floor(left))
 
@@ -1063,8 +1080,8 @@ def account_timeline(account: Account, events: list[CustomerEvent], series: Seri
 
 
 def stock(accounts: list[Account]) -> list[Account]:
-    """库存：还没分给任何客户的账号（停用的不算，分不出去）。"""
-    return [a for a in accounts if not a.customer and a.enabled]
+    """库存：还没分给任何客户的账号（停用的不算，分不出去）。打着「风控」的排在最后。"""
+    return sorted((a for a in accounts if not a.customer and a.enabled), key=lambda a: TAG_RISK in a.lifecycle)
 
 
 def customer_ids(customers: list[Customer]) -> set[str]:

@@ -2669,6 +2669,9 @@ a.event-who:hover { color: var(--accent-dim); }
 .use-cell b { color: var(--text); font-weight: 600; }
 .joined-cell small { display: block; font-size: 12px; color: var(--text-mute); }
 .row-acts { display: flex; justify-content: flex-end; align-items: center; gap: 6px; }
+/* 分配、替换的账号清单里，打着「风控」的那个 */
+.pick-flag { flex: none; height: 22px; padding: 0 8px; border-radius: 6px; background: var(--danger-tint);
+             color: var(--danger); font-size: 12px; line-height: 22px; }
 /* 「更多操作」：原生 popover，在顶层图层里（不会被表格的横向滚动框裁掉），位置由页面脚本按「…」算 */
 .row-more-pop { position: fixed; inset: auto; margin: 0; min-width: 150px; padding: 6px; background: var(--panel); color: var(--text);
                 border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-lg); }

@@ -8,6 +8,13 @@
   <span class="stage t-{{ h.stage_tone }}">{{ h.stage_label }}{% if h.stage == 'settled' and h.account.settled %} {{ h.account.settled.strftime('%m-%d') }}{% endif %}</span>
 {%- endmacro %}
 
+{# 库存里打着「风控」的账号：选之前就看得见。分过去还是风控（客户页上是「风控 · 待替换」，不算进余额） #}
+{% macro risk_flag(account) -%}
+  {%- if '风控' in account.lifecycle -%}
+    <span class="pick-flag" title="这个账号打着「风控」：分过去还是风控，不算进预算和余额">风控</span>
+  {%- endif -%}
+{%- endmacro %}
+
 {# 账号那一格：小头像、邮箱、号码。点邮箱进这个账号的页面 #}
 {% macro who_cell(account, sub='') -%}
   <div class="holding-who">
@@ -179,6 +186,8 @@
         <p class="viz-big">— <small>最近 7 天没有消费</small></p>
       {% elif left <= 0 %}
         <p class="viz-big tone-warn">0 天 <small>没有余额了，该换账号了</small></p>
+      {% elif view.long_runway %}
+        <p class="viz-big">一年以上 <small>一年内用不完</small></p>
       {% else %}
         <p class="viz-big {% if left < 14 %}tone-warn{% endif %}">约 {{ left | int }} 天 <small>{{ view.runs_out_on.strftime('%m-%d') }} 前后用完</small></p>
       {% endif %}
@@ -453,6 +462,7 @@
                   <input type="checkbox" name="account" value="{{ a.key }}">
                   {{ mini(a) }}
                   <span class="pick-text"><b>{{ a.email or a.account }}</b><small>{% if a.email %}{{ a.account }} · {% endif %}上游 {{ a.partner }}</small></span>
+                  {{ risk_flag(a) }}
                   <span class="pick-side">额度 {{ a.budget | money0 }}</span>
                 </label>
               {% endfor %}
@@ -517,10 +527,12 @@
           {% if stock %}
             <div class="pick-list">
               {% for a in stock %}
+                {# 默认选第一个；打着「风控」的排在最后，不会被默认选上 #}
                 <label class="pick-item">
                   <input type="radio" name="new" value="{{ a.key }}" data-budget="{{ a.budget }}" {% if loop.first %}checked{% endif %}>
                   {{ mini(a) }}
                   <span class="pick-text"><b>{{ a.email or a.account }}</b><small>{% if a.email %}{{ a.account }} · {% endif %}上游 {{ a.partner }}</small></span>
+                  {{ risk_flag(a) }}
                   <span class="pick-side">额度 {{ a.budget | money0 }}</span>
                 </label>
               {% endfor %}
