@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import re
 import threading
 import time
 from dataclasses import dataclass
@@ -291,11 +290,10 @@ def daily_cost(accounts: list[Account], start: date, end: date, refresh: bool = 
 
 
 def money_axis(value: float) -> str:
-    """柱状图纵轴上的金额：一千以下写整数（$750），以上用紧凑写法（$1.5K、$100K、$2M），整的不写 .0，
-    和客户页的一样。「$100.0K」七个字在纵轴那一栏里放不下，头一个字会被切掉。"""
-    if value < 1000:
-        return f"{config.CURRENCY_SYMBOL}{value:,.0f}"
-    return re.sub(r"\.0+(?=[KMB]$)", "", chart.compact_money(value, config.CURRENCY_SYMBOL))
+    """柱状图纵轴上的金额：紧凑写法，小数尾巴上的 0 不写（$750、$1.5K、$100K、$2.5M），和客户页的一样。
+    「$100.0K」七个字在纵轴那一栏里放不下，头一个字会被切掉。图例只挑小的几项时纵轴会缩到几块钱以下，
+    所以一块钱以内照写小数（$0.25），不取整成 $0。"""
+    return chart.short_money(value, config.CURRENCY_SYMBOL)
 
 
 def cost_trend(accounts: list[Account], today: date, slots: dict[str, int], days: int = 30,

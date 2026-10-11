@@ -19,6 +19,9 @@
 
 再一轮：图例能挑几个账号（点一个加一个，再点放回去，挑了以后有「显示全部」），挑中的从底下重新叠起来。
 账号页成本明细不并「其他」（在 test_account_pages、test_usage_explorer 里）。
+
+再一轮：图例挑了几项时纵轴跟着它们重新算（去掉大的以后小的也看得清），app.js 和 chart.py 的算法要一样
+（test_chart_js_parity 用 node 对一遍）。
 """
 
 from __future__ import annotations
@@ -325,27 +328,39 @@ def test_账号页每日消费_图外的事不用查每天的消费(admin, fake_
     assert summary_marks(html) == []
 
 
-# ====================================================================== 点图例：挑几项只看这几项，从基线起重新叠
-def test_柱状图写着基线_图例能挑几项():
-    """点一项加一项，再点一下放回去，挑了以后后面有「显示全部」。别人的段子消失，挑中的从基线（data-base）起按原来的
-    次序重新叠：每段往下挪「它下面没挑中的那几段」有多高；没挑中的也挪到「挑上它该在的地方」藏着，所以再挑一项它
-    就在原地出现，压在它上面的马上往上让开（is-rising）。提示里只列挑中的，两项以上写它们的合计（每行带着 v）。"""
+# ====================================================================== 点图例：挑几项只看这几项，纵轴跟着它们
+def test_柱状图写着绘图区上下边_图例能挑几项_纵轴跟着重新算():
+    """点一项加一项，再点一下放回去，挑了以后后面有「显示全部」。别人的段子淡出；挑中的从基线（data-base）起按原来的
+    次序重新叠，纵轴按它们每天加起来最多的那天重新算（顶到 data-top），刻度重画——挑的都是小的，柱子也撑得起来。
+    全放回来就是服务端画的原样。提示里只列挑中的，两项以上写它们的合计（每行带着 v）。"""
     series = [SimpleNamespace(name="kite", slot=0, values=[1.0, 2.0]), SimpleNamespace(name="kumo", slot=1, values=[3.0, 1.0])]
     svg = chart.render_bars(["10-01", "10-02"], series, width=300, height=150).svg
-    assert re.search(r'<svg class="chart-svg bar-chart"[^>]* data-base="([\d.]+)"', svg).group(1) == f"{150 - 26.0:.2f}"
+    head = re.search(r'<svg class="chart-svg bar-chart"[^>]* data-base="([\d.]+)" data-top="([\d.]+)"', svg)
+    assert head.groups() == (f"{150 - 26.0:.2f}", "12.00")
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "const picked = new Set();" in js and "if (picked.has(index)) picked.delete(index); else picked.add(index);" in js
     assert "reset.textContent = '显示全部';" in js and "reset.hidden = picked.size === 0;" in js
-    assert "let below = base - bottoms[0][0];" in js and "seg.style.setProperty('--drop', below.toFixed(2) + 'px');" in js
-    assert "below += i + 1 < segs.length ? bottoms[i][0] - bottoms[i + 1][0] : bottoms[i][1];" in js
-    assert "seg.classList.toggle('is-rising', below < was - 0.01);" in js
+    # 纵轴：挑中的每天加起来最多的那天，照 chart.py 取整；段子从基线起叠，上面还有段的让出一道缝
+    assert "const step = niceStep(most || 1, 3);" in js and "const scale = (base - plotTop) / (step * ticks);" in js
+    assert "goal.set(seg, [n === mine.length - 1 ? high : Math.min(bottom, high + BAR_GAP), bottom]);" in js
+    assert "text.textContent = axisMoney(plan.step * tick, symbol);" in js
+    # 放大着也对：柱顶圆头那段交给放大的脚本重画
+    assert "if (svg.zoomReshape) svg.zoomReshape(seg.el, d); else seg.el.setAttribute('d', d);" in js
+    assert "svg.zoomReshape = function (el, d) {" in js
     # 没挑：全部的合计；挑了一项：不写合计；两项以上：只加挑中的
     assert "const head = !picked.size ? '合计 ' + item.total : sum ? '合计 ' + sum : rows.length ? '' : '这天没有';" in js
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     assert ".bar-chart[data-focus] .chart-bars [data-s]:not(.is-focus) { opacity: 0; }" in css
-    assert ".bar-chart[data-focus] .chart-bars [data-s] { transform: translateY(var(--drop, 0px)); }" in css
-    assert ".bar-chart[data-focus] .chart-bars [data-s].is-rising { transition: opacity .18s ease, transform .3s" in css
+    assert "--drop" not in css + js and "is-rising" not in css + js           # 以前靠平移往下落，现在改的是段子的上下边
     assert ".legend-reset[hidden] { display: none; }" in css
+
+
+def test_薄得看不见的段子也画上():
+    """小的那项在全部一起看时不到半个像素，以前不画；现在照画——图例只挑它的时候纵轴放大，它就看得见了。"""
+    series = [SimpleNamespace(name="big", slot=0, values=[1000.0, 1000.0]), SimpleNamespace(name="tiny", slot=1, values=[0.01, 0.0])]
+    svg = chart.render_bars(["10-01", "10-02"], series, width=300, height=150).svg
+    assert len(re.findall(r'<(?:rect|path) data-s="1"', svg)) == 1
+    assert len(re.findall(r'<(?:rect|path) data-s="0"', svg)) == 2
 
 
 def test_图例能挑几项_四张图都是():

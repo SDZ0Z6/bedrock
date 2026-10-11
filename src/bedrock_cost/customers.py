@@ -524,16 +524,9 @@ def short_money(value: float) -> str:
 
 
 def _short(value: float) -> str:
-    """额度的短写法：$1M、$1.5M、$500K。"""
-    from .chart import compact_money
-    text = compact_money(value, config.CURRENCY_SYMBOL)
-    match = re.match(r"^(\D*)(\d+(?:\.\d+)?)([KMB]?)$", text)
-    if not match:
-        return text
-    head, number, unit = match.groups()
-    if "." in number:
-        number = number.rstrip("0").rstrip(".")
-    return f"{head}{number}{unit}"
+    """额度的短写法：$1M、$1.5M、$500K。和柱状图纵轴同一个写法（chart.short_money）。"""
+    from .chart import short_money
+    return short_money(value, config.CURRENCY_SYMBOL)
 
 
 def _manual_item(event: CustomerEvent, partners: dict[str, str]) -> Item:
