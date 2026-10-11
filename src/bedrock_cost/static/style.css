@@ -1942,15 +1942,13 @@ dialog.modal > form { display: flex; flex-direction: column; max-height: calc(10
 .bar-col { transform-box: fill-box; transform-origin: 50% 100%; transition: opacity .18s ease, transform .22s cubic-bezier(.34, 1.56, .64, 1); }
 .bar-chart.is-hovering .bar-col:not(.is-hover) { opacity: .35; }
 .bar-chart .bar-col.is-hover { transform: scale(1.5, 1.04); }
-/* 图例挑了几项：只看这几项。别人的段子消失，挑中的从基线起按原来的次序重新叠（app.js 算好每段往下挪多少，写在 --drop）。
-   没挑中的也挪到「挑上它该在的地方」藏着，再挑一项它就在原地出现。动画在下面 no-preference 里：先等别人消失，再越落
-   越快地「跌」下来；再挑一项时，压在它上面的马上往上让开（is-rising）；全放回来的时候先升回原位，别人再出来 */
+/* 图例挑了几项：只看这几项。别人的段子淡出；挑中的从基线起按原来的次序重新叠、纵轴按它们重新算，段子跟着变高
+   （app.js 改每段的上下边、重画刻度，自己做动画：有要淡出的先等 0.16 秒）。这里只管淡入淡出：挑的时候别人马上淡出；
+   全放回来的时候挑中的先变回原样（0.42 秒），别人再淡入 */
 .bar-chart[data-focus] .chart-bars [data-s]:not(.is-focus) { opacity: 0; }
-.bar-chart[data-focus] .chart-bars [data-s] { transform: translateY(var(--drop, 0px)); }
 @media (prefers-reduced-motion: no-preference) {
-  .chart-bars [data-s] { transition: opacity .2s ease .22s, transform .32s cubic-bezier(.2, .8, .2, 1); }
-  .bar-chart[data-focus] .chart-bars [data-s] { transition: opacity .18s ease, transform .42s cubic-bezier(.55, .05, .9, .4) .16s; }
-  .bar-chart[data-focus] .chart-bars [data-s].is-rising { transition: opacity .18s ease, transform .3s cubic-bezier(.2, .8, .2, 1); }
+  .chart-bars [data-s] { transition: opacity .2s ease .38s; }
+  .bar-chart[data-focus] .chart-bars [data-s] { transition: opacity .18s ease; }
 }
 /* 竖虚线（客户页「每日消费」上的启用、风控……）：图例挑了几项时只留它们的线，别人的藏起来；线头悬浮看详情（app.js 的 data-tip） */
 .chart-marks [data-s] { transition: opacity .18s ease; }

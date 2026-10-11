@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bedrock_cost import activity, chart, config, dashboard, usage_explorer
+from bedrock_cost import activity, chart, config, customers, dashboard, usage_explorer
 from bedrock_cost.aws_errors import QueryError
 from bedrock_cost.cost_explorer import CostSplit
 from bedrock_cost.dashboard import Toast, _parts
@@ -507,10 +507,13 @@ class TestMisc:
     @pytest.mark.parametrize(
         "value, expected",
         [(0, "$0"), (750, "$750"), (999, "$999"), (1000, "$1K"), (1500, "$1.5K"), (100_000, "$100K"),
-         (2_000_000, "$2M"), (2_500_000, "$2.50M")],
+         (2_000_000, "$2M"), (2_500_000, "$2.5M"),
+         # 图例只挑小的几项时纵轴缩到几块钱以下：照写小数，不取整成 $0
+         (0.25, "$0.25"), (12.5, "$12.5")],
     )
     def test_money_axis(self, value, expected):
-        assert dashboard.money_axis(value) == expected
+        """和客户页纵轴、额度短写法同一个写法（chart.short_money）；app.js 缩放纵轴时照它写。"""
+        assert dashboard.money_axis(value) == expected == customers.short_money(value)
 
     def test_days_between(self):
         assert dashboard.days_between(date(2026, 10, 1), TODAY) == 9

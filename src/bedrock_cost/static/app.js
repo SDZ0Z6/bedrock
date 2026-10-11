@@ -515,7 +515,37 @@
     });
   }
 
-  // ---- 堆叠柱状图：划到哪一格那一格亮、其余变淡；点图例挑几项，只看这几项
+  // ---- 堆叠柱状图：划到哪一格那一格亮、其余变淡；点图例挑几项，只看这几项，纵轴跟着它们重新算
+  // 下面几样和 chart.py 一样，两边要一起改：段与段之间的缝（BAR_GAP）、柱顶的圆角（BAR_RADIUS）、
+  // 刻度取整（_nice_step）、圆头柱子的路径（_round_top）、纵轴金额的写法（short_money）
+  const BAR_GAP = 2, BAR_RADIUS = 4;
+  function niceStep(span, intervals) {
+    if (span <= 0) return 1;
+    const rough = span / intervals;
+    const base = Math.pow(10, Math.floor(Math.log10(rough)));
+    for (const multiple of [1, 2, 2.5, 5, 10]) if (rough <= base * multiple) return base * multiple;
+    return base * 10;
+  }
+  function roundTop(x, top, w, bottom, radius) {
+    const r = Math.max(0, Math.min(radius, w / 2, bottom - top));
+    const f = function (n) { return n.toFixed(2); };
+    return 'M' + f(x) + ',' + f(bottom) + ' L' + f(x) + ',' + f(top + r) + ' Q' + f(x) + ',' + f(top) + ' ' + f(x + r) + ',' + f(top) +
+      ' L' + f(x + w - r) + ',' + f(top) + ' Q' + f(x + w) + ',' + f(top) + ' ' + f(x + w) + ',' + f(top + r) +
+      ' L' + f(x + w) + ',' + f(bottom) + ' Z';
+  }
+  function axisMoney(value, symbol) {
+    const v = Math.abs(value);
+    const text = v >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(2) + 'M'
+      : v >= 1e3 ? (v / 1e3).toFixed(1) + 'K' : v === 0 ? '0' : v.toFixed(2);
+    const unit = /[KMB]$/.test(text) ? text.slice(-1) : '';
+    let number = unit ? text.slice(0, -1) : text;
+    if (number.indexOf('.') >= 0) number = number.replace(/0+$/, '').replace(/\.$/, '');
+    return (value < 0 ? '-' : '') + symbol + number + unit;
+  }
+  const easeInOut = function (t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; };
+  // 系统开了「减弱动画」：柱子直接到位、纵轴不淡入；下面放大缩放也不做平滑
+  const calm = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
   for (const holder of document.querySelectorAll('[data-tip-src]')) {
     const source = document.getElementById(holder.dataset.tipSrc);
     const svg = holder.querySelector('.bar-chart');
@@ -559,42 +589,142 @@
     reset.textContent = '显示全部';
     reset.hidden = true;
     legend.append(reset);
-    const base = Number(svg.dataset.base);
+    const base = Number(svg.dataset.base), plotTop = Number(svg.dataset.top);
 
-    const apply = function () {
+    // 每一段：哪一项、多少钱（悬浮数据里的 v）、服务端画的上下边、现在的上下边（动画走到哪了）。
+    // 柱顶那段是圆头的 path，左右位置从它的 d 里读——这时候还没放大过，读到的是原样
+    const stacks = columns.map(function (col) {
+      const values = new Map(((data[Number(col.dataset.idx)] || {}).rows || []).map(function (r) { return [r.s, r.v || 0]; }));
+      return [...col.querySelectorAll('[data-s]')].map(function (el) {
+        const seg = { el: el, s: Number(el.dataset.s), round: el.tagName.toLowerCase() === 'path' };
+        seg.v = values.get(seg.s) || 0;
+        if (seg.round) {
+          const n = (el.getAttribute('d').match(/-?\d*\.?\d+/g) || []).map(Number);
+          seg.x = n[0]; seg.w = n[10] - n[0]; seg.top0 = n[5]; seg.bottom0 = n[1];
+        } else {
+          seg.top0 = Number(el.getAttribute('y'));
+          seg.bottom0 = seg.top0 + Number(el.getAttribute('height'));
+        }
+        seg.top = seg.top0;
+        seg.bottom = seg.bottom0;
+        return seg;
+      });
+    });
+    const place = function (seg, top, bottom) {
+      seg.top = top;
+      seg.bottom = bottom;
+      if (seg.round) {
+        const d = roundTop(seg.x, top, seg.w, bottom, BAR_RADIUS);
+        // 放大着的图：交给放大的脚本，它记下没放大时的新样子，再按现在的放大画
+        if (svg.zoomReshape) svg.zoomReshape(seg.el, d); else seg.el.setAttribute('d', d);
+      } else {
+        seg.el.setAttribute('y', top.toFixed(2));
+        seg.el.setAttribute('height', Math.max(0, bottom - top).toFixed(2));
+      }
+    };
+
+    // 纵轴：挑了几项就按它们重画刻度（横线、字的样子照服务端画的第一条），全放回来就换回原样。
+    // 金额的前缀（$）照第一个刻度「$0」
+    const grid = svg.querySelector('.chart-grid');
+    const gridOriginal = grid ? [...grid.children].map(function (el) { return el.cloneNode(true); }) : [];
+    const gridLines = gridOriginal.filter(function (el) { return el.tagName.toLowerCase() === 'line'; });
+    const gridText = gridOriginal.find(function (el) { return el.tagName.toLowerCase() === 'text'; });
+    const symbol = gridText ? gridText.textContent.trim().replace(/0$/, '') : '';
+    const drawAxis = function (plan) {
+      if (!grid || !gridLines.length || !gridText) return;
+      let parts;
+      if (!plan.step) {
+        parts = gridOriginal.map(function (el) { return el.cloneNode(true); });
+      } else {
+        parts = [];
+        for (let tick = 0; tick <= plan.ticks; tick++) {
+          const y = base - plan.step * tick * plan.scale;
+          const line = (gridLines[tick === 0 ? 0 : Math.min(1, gridLines.length - 1)]).cloneNode(false);
+          line.setAttribute('y1', y.toFixed(2));
+          line.setAttribute('y2', y.toFixed(2));
+          const text = gridText.cloneNode(false);
+          text.setAttribute('y', (y + 4).toFixed(2));
+          text.textContent = axisMoney(plan.step * tick, symbol);
+          parts.push(line, text);
+        }
+      }
+      grid.replaceChildren.apply(grid, parts);
+      if (!calm && grid.animate) grid.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 260, easing: 'ease-out' });
+    };
+
+    // 挑中的几项从基线起按原来的次序重新叠；纵轴按它们每天加起来最多的那天重新算（和 chart.py 一样取整），
+    // 挑的都是小的，柱子也撑得起来。什么都没挑就是服务端画的原样
+    const layout = function () {
+      const goal = new Map();
+      if (!picked.size) {
+        for (const stack of stacks) for (const seg of stack) goal.set(seg, [seg.top0, seg.bottom0]);
+        return { goal: goal };
+      }
+      let most = 0;
+      for (const stack of stacks) {
+        most = Math.max(most, stack.reduce(function (t, seg) { return t + (picked.has(seg.s) ? seg.v : 0); }, 0));
+      }
+      const step = niceStep(most || 1, 3);
+      const ticks = Math.max(1, Math.ceil((most || 1) / step - 1e-9));
+      const scale = (base - plotTop) / (step * ticks);
+      for (const stack of stacks) {
+        const mine = stack.filter(function (seg) { return picked.has(seg.s); });
+        let bottom = base;
+        mine.forEach(function (seg, n) {
+          const high = bottom - seg.v * scale;
+          // 上面还有段的，顶端让出一道缝；最上面那段（圆头的那段没挑上就是平头）贴着顶
+          goal.set(seg, [n === mine.length - 1 ? high : Math.min(bottom, high + BAR_GAP), bottom]);
+          bottom = high;
+        });
+      }
+      return { goal: goal, step: step, ticks: ticks, scale: scale };
+    };
+
+    let frame = 0, waiting = 0;
+    // before：这次点之前看得见的那几项（null = 全看得见）
+    const apply = function (before) {
       for (const t of toggles) t.setAttribute('aria-pressed', String(picked.has(Number(t.dataset.s))));
       legend.classList.toggle('has-focus', picked.size > 0);
       reset.hidden = picked.size === 0;
       for (const el of svg.querySelectorAll('[data-s]')) el.classList.toggle('is-focus', picked.has(Number(el.dataset.s)));
-      if (!picked.size) {
-        delete svg.dataset.focus;
-        for (const seg of svg.querySelectorAll('.chart-bars [data-s]')) {
-          seg.style.removeProperty('--drop');
-          seg.classList.remove('is-rising');
+      if (picked.size) svg.dataset.focus = [...picked].join(' '); else delete svg.dataset.focus;
+      if (!base || !plotTop) return;
+
+      // 要藏的原地淡出（style.css），不挪；刚挑上的先放到新位置再淡入；一直看得见的从现在的样子动到新样子
+      const plan = layout();
+      const shown = function (s) { return !picked.size || picked.has(s); };
+      const was = function (s) { return before === null || before.has(s); };
+      const moves = [];
+      let leaving = false;
+      for (const stack of stacks) {
+        for (const seg of stack) {
+          if (!shown(seg.s)) { leaving = leaving || was(seg.s); continue; }
+          const to = plan.goal.get(seg);
+          if (!was(seg.s)) { place(seg, to[0], to[1]); continue; }
+          if (Math.abs(seg.top - to[0]) > 0.01 || Math.abs(seg.bottom - to[1]) > 0.01) {
+            moves.push([seg, seg.top, seg.bottom, to[0], to[1]]);
+          }
         }
-        return;
       }
-      svg.dataset.focus = [...picked].join(' ');
-      if (!base) return;
-      // 挑中的几项从基线起按原来的次序重新叠：每一段往下挪「它下面没挑中的那几段」有多高（style.css 按 --drop 挪，
-      // 先等别人消失再落）。没挑中的也挪到「挑上它该在的地方」再藏着，所以再挑一项，它就在原地出现，压在它上面的
-      // 往上让开（is-rising：不等，马上让）。段的位置用 getBBox 量：不含 --drop 本身，纵坐标放大、拖动都不变
-      for (const col of columns) {
-        const segs = [...col.querySelectorAll('[data-s]')];
-        if (!segs.length) continue;
-        const bottoms = segs.map(function (seg) { const box = seg.getBBox(); return [box.y + box.height, box.height]; });
-        let below = base - bottoms[0][0];   // 太薄没画出来的段也占着地方
-        segs.forEach(function (seg, i) {
-          const was = parseFloat(seg.style.getPropertyValue('--drop')) || 0;
-          seg.style.setProperty('--drop', below.toFixed(2) + 'px');
-          seg.classList.toggle('is-rising', below < was - 0.01);
-          if (picked.has(Number(seg.dataset.s))) return;
-          // 这一段占的高度：到上面那一段的底边（含段和段之间的缝），最上面那段就是它自己的高
-          below += i + 1 < segs.length ? bottoms[i][0] - bottoms[i + 1][0] : bottoms[i][1];
-        });
-      }
+      cancelAnimationFrame(frame);
+      clearTimeout(waiting);
+      const run = function () {
+        drawAxis(plan);
+        // 段太多（「全部」几百天 × 好几项）就不动画了，直接到位
+        if (calm || moves.length > 2400) { for (const m of moves) place(m[0], m[3], m[4]); return; }
+        const start = performance.now();
+        const step = function (now) {
+          const t = Math.min(1, (now - start) / 420), k = easeInOut(t);
+          for (const m of moves) place(m[0], m[1] + (m[3] - m[1]) * k, m[2] + (m[4] - m[2]) * k);
+          if (t < 1) frame = requestAnimationFrame(step);
+        };
+        frame = requestAnimationFrame(step);
+      };
+      // 有要藏的：等它们淡出（0.18 秒）再动；只是多挑上一项、或者全放回来：马上动
+      if (leaving && !calm) waiting = setTimeout(run, 160); else run();
     };
     legend.addEventListener('click', function (event) {
+      const before = picked.size ? new Set(picked) : null;
       if (event.target.closest('.legend-reset')) {
         picked.clear();
         // 用键盘按的：按钮马上藏起来，焦点交给第一个签，不丢到页面开头
@@ -605,7 +735,7 @@
         const index = Number(button.dataset.s);
         if (picked.has(index)) picked.delete(index); else picked.add(index);
       }
-      apply();
+      apply(before);
     });
   }
 
@@ -616,7 +746,6 @@
   // 圆点不会变扁。怎么用：鼠标划到图上滚滚轮，往上放大、往下缩小（以鼠标为中心；缩到全貌还往下滚、
   // 放到最大还往上滚，就照常滚页面）；手机上双指捏合；放大以后按住拖、或者横着滑，左右看；双击回到全貌。
   const SVG_NS = 'http://www.w3.org/2000/svg';
-  const calm = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   let zoomSeq = 0;
 
   function mapPath(d, map) {
@@ -667,6 +796,14 @@
       item.index = el.dataset.i === undefined ? null : Number(el.dataset.i);
       items.push(item);
     }
+    // 柱状图的图例挑了几项、纵轴跟着缩放时（见上面），柱顶那段圆头的形状换了：记下它没放大时的新样子，
+    // 放大着的话马上按现在的放大重画。别的段是 rect，挪的是 y、height，和这里挪的 x、width 不打架
+    const byElement = new Map(items.map(function (it) { return [it.el, it]; }));
+    svg.zoomReshape = function (el, d) {
+      const it = byElement.get(el);
+      if (it) it.orig[0] = d;
+      el.setAttribute('d', it && state.k > 1.0001 ? mapPath(d, map) : d);
+    };
     // 画图的那几层放大时裁到绘图区里（纵轴、横轴的字不裁）
     const layers = [...svg.children].filter(function (child) {
       return !child.matches('defs, .chart-grid, .chart-xaxis, title, desc');

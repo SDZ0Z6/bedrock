@@ -95,6 +95,17 @@ def compact_money(value: float, symbol: str = "$") -> str:
     return f"{sign}{symbol}{text}"
 
 
+def short_money(value: float, symbol: str = "$") -> str:
+    """紧凑金额，小数尾巴上的 0 不写：$750、$0.25、$1.5K、$100K、$2.5M。柱状图的纵轴和额度的短写法都是它；
+    图例挑了几项、纵轴跟着缩放时，app.js 的 axisMoney 照这个写法重写刻度，两边要一样。"""
+    text = compact_money(value, symbol)
+    unit = text[-1] if text[-1] in "KMB" else ""
+    number = text[: len(text) - len(unit)]
+    if "." in number:
+        number = number.rstrip("0").rstrip(".")
+    return number + unit
+
+
 def compact_number(value: float) -> str:
     """非金额的紧凑数字：46.2K 次 / 308.4M token。"""
     sign = "-" if value < 0 else ""
@@ -984,6 +995,7 @@ def _round_top(x: float, top: float, w: float, bottom: float, radius: float) -> 
 
 BAR_MAX_W = 96.0   # 柱子占一格的六成，剩下的是留白；格子少（近 7 天）时也粗得起来，不会细成一根、中间空一大片
 BAR_GAP = 2.0      # 堆叠的段与段之间留 2px 底色的缝，靠缝分开，不靠描边
+BAR_RADIUS = 4.0   # 柱子顶上的圆角（app.js 重新叠的时候照着画，两边要一样）
 MARK_R = 7.0       # 竖虚线线头上的小头像
 MARK_LANE = 19.0   # 线头一排多高：挨得近的往下一排放，最多三排，再挤就压着
 MARK_LANES = 3
@@ -1082,8 +1094,9 @@ def render_bars(
     时候——比如「AWS 原价在下、毛利在上，整根是收入」，不能因为毛利比原价多就颠倒过来。fmt 把数值写成悬浮提示里的样子（金额或次数），axis 是纵轴刻度
     的写法（要短，金额用 compact_money），两个默认都是紧凑数字。
     交互和动效：进场时一根根长出来；鼠标划到哪一格，那一格亮、其余变淡，提示里列出
-    这一格的全部序列；点图例挑几项就只看这几项（再点一次放回去）。脚本在 app.js，
-    动画在 CSS 里，系统开了「减弱动画」就不动。
+    这一格的全部序列；点图例挑几项就只看这几项（再点一次放回去），纵轴按它们重新算、柱子跟着变高。
+    脚本在 app.js（重新叠和纵轴照这里的 BAR_GAP、BAR_RADIUS、_nice_step、short_money 算），
+    系统开了「减弱动画」就不动。
     marks 是竖虚线（BarMark）：线头排在绘图区上面，图跟着高出几排；图例挑了几项时，别人的线藏起来。
     """
     fmt = fmt or compact_number
@@ -1118,10 +1131,11 @@ def render_bars(
     ticks = max(1, math.ceil((max(totals) or 1.0) / step - 1e-9))
     scale = plot_h / (step * ticks)
 
-    # data-base 是基线的纵坐标：图例挑了几项时，这几项的段子从这里起重新叠起来（app.js）
+    # data-base、data-top 是绘图区底边、顶边的纵坐标：图例挑了几项时，app.js 按这几项重新算纵轴，
+    # 它们的段子从基线起重新叠、跟着变高（刻度和这里一样取整，字照纵轴第一个刻度的写法）
     parts = [
         f'<svg class="chart-svg bar-chart" viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
-        f'{_zoom_attrs(pad_l, width - pad_r, count, band, 44.0)} data-base="{plot_bottom:.2f}" '
+        f'{_zoom_attrs(pad_l, width - pad_r, count, band, 44.0)} data-base="{plot_bottom:.2f}" data-top="{pad_t:.2f}" '
         f'role="img" aria-label="堆叠柱状图，{count} 格，{len(live)} 条序列">',
         '<g class="chart-grid">',
     ]
@@ -1143,20 +1157,19 @@ def render_bars(
         for n, (k, s, value) in enumerate(stack):
             top = bottom - value * scale
             last = n == len(stack) - 1
-            # 上面还有段的，顶端让出一道缝
+            # 上面还有段的，顶端让出一道缝。薄得看不见的也画上：图例只挑它的时候纵轴放大，它就看得见了
             seg_top = top if last else min(bottom, top + BAR_GAP)
-            if bottom - seg_top >= 0.4:
-                colour = _colour(s)
-                if last:
-                    parts.append(
-                        f'<path data-s="{k}" d="{_round_top(x, seg_top, bar_w, bottom, 4.0)}" '
-                        f'fill="{colour}"></path>'
-                    )
-                else:
-                    parts.append(
-                        f'<rect data-s="{k}" x="{x:.2f}" y="{seg_top:.2f}" width="{bar_w:.2f}" '
-                        f'height="{bottom - seg_top:.2f}" fill="{colour}"></rect>'
-                    )
+            colour = _colour(s)
+            if last:
+                parts.append(
+                    f'<path data-s="{k}" d="{_round_top(x, seg_top, bar_w, bottom, BAR_RADIUS)}" '
+                    f'fill="{colour}"></path>'
+                )
+            else:
+                parts.append(
+                    f'<rect data-s="{k}" x="{x:.2f}" y="{seg_top:.2f}" width="{bar_w:.2f}" '
+                    f'height="{bottom - seg_top:.2f}" fill="{colour}"></rect>'
+                )
             bottom = top
         parts.append("</g>")
     parts.append("</g>")
