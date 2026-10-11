@@ -268,6 +268,8 @@ td.num, th.num, .tab-num { font-variant-numeric: tabular-nums; }
 .btn-sm { height: 30px; padding: 0 11px; font-size: 12.5px; }
 .btn-danger { color: var(--danger); border-color: var(--danger-edge); }
 .btn-danger:hover { background: var(--danger-tint); border-color: var(--danger); }
+/* 「导出 CSV」在查的时候（app.js 加 .is-busy）：按钮写「正在导出…」，鼠标转圈，再点不重复导出 */
+.btn[data-export].is-busy { cursor: progress; color: var(--text-dim); }
 /* 确认弹窗里那颗真正执行停用 / 删除的按钮，要比列表里的入口更显眼 */
 .btn-danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; }
 .btn-danger-solid:hover { background: #a33222; border-color: #a33222; }

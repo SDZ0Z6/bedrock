@@ -270,6 +270,13 @@ def fake_costs(monkeypatch):
                 "Claude Opus 5 (Amazon Bedrock Edition)": [cell(tagged, True) for _ in range(width)],
                 "Claude Sonnet 5 (Amazon Bedrock Edition)": [cell(untagged, False) for _ in range(width)],
             }
+        elif dimension == usage_explorer.LINE:
+            # 导出 CSV 用的：(服务, 标签值) 一组，和上面「按服务」是同一笔钱
+            rows = {
+                ("Claude Opus 5 (Amazon Bedrock Edition)", account.tag_value or "tagged"):
+                    [cell(tagged, True) for _ in range(width)],
+                ("Claude Sonnet 5 (Amazon Bedrock Edition)", ""): [cell(untagged, False) for _ in range(width)],
+            }
         elif dimension == "tag":
             rows = {
                 account.tag_value or "tagged": [cell(tagged, True) for _ in range(width)],

@@ -9,6 +9,7 @@
 
 为了拿到逐格的比率归属，「服务」维度用两级 GroupBy：[SERVICE, TAG]。
 Cost Explorer 最多支持两级，刚好够用，一个账号仍然只发一次请求。
+账号页的「导出 CSV」也是这个请求，只是标签值不并掉（内部维度 LINE，见 export_lines）。
 """
 
 from __future__ import annotations
@@ -38,6 +39,9 @@ GRANULARITIES: dict[str, str] = {
     "daily": "按日",
     "monthly": "按月",
 }
+
+# 内部用的维度：服务和标签值都留着，一组一条（成本页签的「导出 CSV」，见 export_lines），不在页面的下拉里
+LINE = "line"
 
 UNTAGGED_LABEL = "未打标签"
 OTHER_LABEL = "其他"
@@ -231,16 +235,26 @@ def _cache_key(account: Account, start, end, dimension: str, granularity: str) -
     )
 
 
+def is_tagged(account: Account, tag_value: str) -> bool:
+    """这一笔算 TAG 还是 UNTAG：台账写了标签值的要一模一样，没写的有值就算。"""
+    expected = account.tag_value
+    return bool(tag_value) if expected is None else tag_value == expected
+
+
+def ratio_for(account: Account, tag_value: str) -> float:
+    """这一笔乘哪个比率：算 TAG 的乘 TAG 比率，其余乘 UNTAG 比率。"""
+    return account.tag_ratio if is_tagged(account, tag_value) else account.untag_ratio
+
+
 def _query_account(
     account: Account, start: date, end: date, dimension: str, granularity: str,
     dates: list[str],
 ) -> tuple[dict[str, list[list[float]]], str]:
-    """返回 {序列名: [[raw, marked], ...]}，长度与 dates 一致。"""
+    """返回 {序列名: [[raw, marked], ...]}，长度与 dates 一致。LINE 维度的序列名是 (服务, 标签值)。"""
     tag_key = account.tag_key
-    expected = account.tag_value
 
     group_by: list[dict] = []
-    if dimension == "service":
+    if dimension in ("service", LINE):
         group_by.append({"Type": "DIMENSION", "Key": "SERVICE"})
     group_by.append({"Type": "TAG", "Key": tag_key})
 
@@ -291,18 +305,16 @@ def _query_account(
                 amount = float(metric.get("Amount") or 0.0)
                 currency = metric.get("Unit") or currency
 
-                # GroupBy 顺序：service 维度是 [SERVICE, TAG]，其余是 [TAG]
+                # GroupBy 顺序：service、LINE 维度是 [SERVICE, TAG]，其余是 [TAG]
                 tag_value = split_group_key(keys[-1] if keys else "")
-                if expected is None:
-                    is_tag = bool(tag_value)
-                else:
-                    is_tag = tag_value == expected
-                marked = amount * (account.tag_ratio if is_tag else account.untag_ratio)
+                marked = amount * ratio_for(account, tag_value)
 
                 if dimension == "service":
                     name = keys[0] if keys else "(未知服务)"
                 elif dimension == "tag":
                     name = tag_value or UNTAGGED_LABEL
+                elif dimension == LINE:
+                    name = (keys[0] if keys else "(未知服务)", tag_value)
                 else:
                     name = account_label
 
@@ -439,3 +451,40 @@ def build_usage(
         )
 
     return report
+
+
+# --------------------------------------------------------------- 导出
+@dataclass
+class Line:
+    """导出的一行：某一天、某个服务、某个标签值的消费。"""
+
+    day: str            # ISO 日期
+    service: str
+    tag_value: str      # 空 = 没打标签
+    tagged: bool        # 算 TAG 还是 UNTAG，决定乘哪个比率
+    ratio: float
+    raw: float
+    marked: float
+
+
+def export_lines(
+    account: Account, start: date, end: date, refresh: bool = False,
+) -> tuple[list[Line], str, QueryError | None]:
+    """这个账号 start~end 每天、每个服务、每个标签值的消费，按日期、服务、标签值排。返回 (行, 货币, 错误)。
+
+    和成本页签同一个查询（按 [SERVICE, TAG] 分组，一个账号一次请求，结果多了翻页），只是标签不并掉：
+    每一行算 TAG 还是 UNTAG、乘的哪个比率都看得到。金额到小数点后 6 位都是 0 的不出行。
+    """
+    dates, _ = build_buckets(start, end, "daily")
+    data, currency, _, error = _fetch_account(account, start, end, LINE, "daily", dates, refresh)
+    if error:
+        return [], currency, as_query_error(error, account=account.account, partner=account.partner)
+    lines = [
+        Line(dates[position], service, tag_value, is_tagged(account, tag_value), ratio_for(account, tag_value),
+             raw, marked)
+        for (service, tag_value), cells in data.items()
+        for position, (raw, marked) in enumerate(cells)
+        if round(raw, 6) or round(marked, 6)
+    ]
+    lines.sort(key=lambda line: (line.day, line.service, line.tag_value))
+    return lines, currency, None

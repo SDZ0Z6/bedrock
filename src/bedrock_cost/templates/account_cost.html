@@ -2,6 +2,7 @@
    拆开的消费，金额是按台账比率折算后的。 #}
 {% extends "account_base.html" %}
 {% from "_macros.html" import range_picker, refresh_link %}
+{% from "_customer_macros.html" import cicon %}
 {% block loading_label %}正在查各维度消费{% endblock %}
 
 {% block tab_content %}
@@ -92,6 +93,13 @@
       <div class="card-title">
         <h2>成本明细</h2>
         <span class="card-note">按{{ report.dimension_label }} · {{ report.details | length }} 项 · 日期列是折算后金额</span>
+      </div>
+      {# 导出所选时间里的全部：每天、每个服务、每个标签值一行，不管上面选的维度和粒度（account_pages.cost_csv）。
+         app.js 用 fetch 取（data-export）：等的时候写「正在导出」，出错在右上角说；没开 JS 就是普通下载 #}
+      <div class="page-actions">
+        <a class="btn btn-sm" href="{{ url_for('account.cost_csv', number=account.account, start=start.isoformat(), end=end.isoformat()) }}"
+           download data-export title="{{ start.isoformat() }} ~ {{ end.isoformat() }} 每天、每个服务、每个标签值一行：算 TAG 还是 UNTAG、比率、AWS 原价、折算后">
+          {{- cicon('download') }}<span data-export-label>导出 CSV</span></a>
       </div>
     </div>
     <div class="table-scroll">

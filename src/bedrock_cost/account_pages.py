@@ -9,10 +9,12 @@
 
 from __future__ import annotations
 
+import csv
+import io
 from datetime import date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
 
-from flask import Blueprint, flash, redirect, render_template, request, session, url_for
+from flask import Blueprint, Response, flash, redirect, render_template, request, session, url_for
 
 from . import (
     activity, chart, cloudwatch_metrics, config, cost_estimate, cost_explorer, customers, dashboard, excel_source, quotas,
@@ -325,6 +327,50 @@ def cost(number: str):
         date_min=_date_min(account, today),
     )
     return render_template("account_cost.html", **context)
+
+
+@bp.route("/<number>/cost.csv")
+@login_required
+def cost_csv(number: str):
+    """成本页签的「导出 CSV」：所选时间里（和页面同一段，不早于启用日期）每天、每个服务、每个标签值一行，
+    算 TAG 还是 UNTAG、乘的比率、AWS 原价、折算后都在。页面上选的维度、粒度不管：导出的总是最细的那一层。
+    Excel 直接打开（带 BOM）。
+
+    出了错回一句纯文本、不跳页面：按钮是 app.js 用 fetch 取的，拿到报错就在右上角弹出来。
+    """
+    try:
+        account = _find(_all_accounts(), number)
+    except ExcelSourceError as exc:
+        return _export_error(str(exc), 500)
+    if account is None:
+        return _export_error(f"台账里没有账号 {number}。", 404)
+    today = date.today()
+    start, end, notes = resolve_range(request.args, today)
+    start, end = _clamp_dates(account, start, end, today, notes)
+    lines, currency, error = usage_explorer.export_lines(account, start, end)
+    if error:
+        return _export_error(f"查不到 Cost Explorer：{error.message}", 502)
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["日期", "服务", f"标签值（{account.tag_key}）", "算作", "比率",
+                     f"AWS 原价（{currency}）", f"折算后（{currency}）"])
+    for line in lines:
+        writer.writerow([line.day, line.service, line.tag_value, "TAG" if line.tagged else "UNTAG",
+                         _plain(line.ratio), _plain(line.raw), _plain(line.marked)])
+    filename = f"{account.account}-cost-{start.isoformat()}_{end.isoformat()}.csv"
+    return Response("\ufeff" + out.getvalue(), mimetype="text/csv",       # Flask 自己补上 charset=utf-8
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+def _plain(value: float) -> str:
+    """CSV 里的数：最多 6 位小数，尾巴上的 0 不写（1.05、12.5、0）。"""
+    text = f"{value:.6f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def _export_error(message: str, status: int) -> Response:
+    """导出失败：一句纯文本。app.js 拿到就在右上角弹出来；没开 JS 时浏览器会说下载失败。"""
+    return Response(message, status=status, mimetype="text/plain")
 
 
 # ---------------------------------------------------------------- 用量
