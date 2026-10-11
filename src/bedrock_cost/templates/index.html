@@ -1,5 +1,5 @@
 {% extends "shell.html" %}
-{% from "_macros.html" import avatar, refresh_link %}
+{% from "_macros.html" import avatar, refresh_link, spend_switch %}
 {% from "_customer_macros.html" import cicon %}
 {% block title %}概览 · Bedrock 成本监控{% endblock %}
 {% block page_title %}概览{% endblock %}
@@ -53,7 +53,7 @@
   <div class="alert alert-error"><div><strong>无法生成报表：</strong>{{ fatal }}</div></div>
 {% elif report %}
 
-  <!-- ------------------------------------------------ 图：额度、调用走势、消费构成 -->
+  <!-- ------------------------------------------------ 图：额度使用、消费构成、Top 账号 / 每日消费（整行，右上角选看多久） -->
   <section class="bento" aria-label="全部账号的图表">
     <article class="viz-card">
       <div class="viz-head">
@@ -62,60 +62,32 @@
           <p class="viz-sub">{{ report.rows | length }} 个账号 · 截至 {{ report.end.strftime('%m-%d') }}</p>
         </div>
       </div>
-      <div class="gauge">
-        {{ gauge | safe }}
-        <div class="gauge-center">
-          <span class="gauge-value" data-countup>{{ report.total_cost | money0 }}</span>
-          <span class="gauge-of">额度 {{ report.total_budget | money0 }}</span>
-        </div>
-      </div>
-      <div class="gauge-facts">
-        <span>使用率<strong class="tone-{{ report.total_level }}">{{ report.total_usage_pct | pct }}</strong></span>
-        <span>余额<strong class="{% if report.total_balance < 0 %}tone-danger{% endif %}">{{ report.total_balance | money }}</strong></span>
-        <span>查询失败<strong>{{ report.missing_count }} 个</strong></span>
-      </div>
-      {% if near_limit %}
-        <div class="near-list">
-          <p class="near-title">快用完的账号</p>
-          {% for row in near_limit %}
-            <div class="bar-item near-item">
-              {# 卡片窄，和旁边两张图的图例一样写短名（邮箱 @ 前面那段），全称和号码在悬停提示里 #}
-              <span class="bar-item-name" title="{% if row.email %}{{ row.email }} · {% endif %}{{ row.account }}">
-                {{- avatar(row.avatar, small=true) }}<span class="near-name">{{ row.label }}</span></span>
-              <span class="bar-item-value">{{ row.usage_pct | pct }}</span>
-              {# 进场时一条接一条长到位（--delay 错开） #}
-              <div class="meter tone-{{ row.level }}" aria-hidden="true"><i style="width: {{ row.bar_width }}%; --delay: {{ 300 + loop.index0 * 120 }}ms"></i></div>
-            </div>
-          {% endfor %}
-        </div>
-      {% endif %}
-    </article>
-
-    <article class="viz-card span-2">
-      <div class="viz-head">
-        <div>
-          <h2 class="viz-title">近 {{ trend.days }} 天成本</h2>
-          <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 每天一根柱，按账号分色 ·
-            Cost Explorer 晚 1~2 天出数，最近两天可能还不全</p>
-        </div>
-        {% if config.OPS_DASHBOARD %}
-          <a class="viz-link" href="{{ url_for('ops.index') }}" data-loading="正在汇总各账号的数">收入和毛利</a>
-        {% endif %}
-      </div>
       <div>
-        <p class="viz-big">{{ trend.total | money0 }}</p>
-        <p class="viz-meta">日均 <strong>{{ trend.average | money }}</strong> · 最多的一天是 {{ trend.peak_label }}（{{ trend.peak_value | money }}）</p>
+        <p class="viz-big"><span data-countup>{{ report.total_cost | money0 }}</span> <small>已用</small></p>
+        <p class="viz-meta">额度 <strong>{{ report.total_budget | money0 }}</strong>
+          · 使用率 <strong class="tone-{{ report.total_level }}">{{ report.total_usage_pct | pct }}</strong>
+          · 余额 <strong class="{% if report.total_balance < 0 %}tone-danger{% endif %}">{{ report.total_balance | money0 }}</strong>
+          {%- if report.missing_count %} · 查询失败 <strong>{{ report.missing_count }} 个</strong>{% endif %}</p>
       </div>
-      <div class="viz-chart" id="trend-chart" data-tip-src="trend-data">{{ trend.chart.svg | safe }}</div>
-      {# 图例可以点：点一下只看这个账号，再点一下恢复 #}
-      <div class="legend-toggles" data-legend-for="trend-chart" role="group" aria-label="只看某个账号">
-        {% for item in trend.chart.legend %}
-          <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
-                  title="{{ item.name }} 近 {{ trend.days }} 天 {{ item.total | money }}">
-            <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
+      {# 和客户页「账号」那张一个样子：按生命周期（风控、正常……）一档一根横条，长短按占全部账号的比例，颜色是标签的颜色；
+         后面是这一档的账号头像（最多 5 个，使用率高的在前），鼠标放上去写全名。和下面「生命周期」筛选签的数一样：
+         打了两个标签的两档都算 #}
+      <div class="stage-bars">
+        {% for life in life_rows %}
+          <div class="stage-row{% if not life.count %} is-zero{% endif %}" style="--i: {{ loop.index0 }}">
+            <div class="stage-line">
+              <span class="stage-name">{{ life.name }}</span>
+              <span class="stage-faces">
+                {%- for row in life.rows[:5] %}<span class="mini-av {{ row.avatar.css }}" data-tip="{{ row.email or row.account }}"
+                  data-tip-sub="{{ row.account }}{% if row.has_numbers and row.usage_pct is not none %} · 使用率 {{ row.usage_pct | pct }}{% endif %}">{{ row.avatar.text }}</span>{% endfor -%}
+                {%- if life.count > 5 %}<span class="stage-more">+{{ life.count - 5 }}</span>{% endif -%}
+              </span>
+              <b>{{ life.count }}</b>
+            </div>
+            <div class="stage-bar" data-reveal aria-hidden="true"><i style="width: {{ '%.1f' % (life.count / (report.rows | length) * 100 if report.rows else 0) }}%; background: {{ life.color }}"></i></div>
+          </div>
         {% endfor %}
       </div>
-      <script id="trend-data" type="application/json">{{ trend.chart.tooltip | tojson }}</script>
     </article>
 
     <article class="viz-card">
@@ -134,6 +106,71 @@
           </div>
         {% endfor %}
       </div>
+    </article>
+
+    {# 累计消费最多的账号：默认前 5 个，右上角点「全部」看剩下的（记在这个浏览器里）。横条长短按第一名，颜色和旁边两张图一样 #}
+    <article class="viz-card span-2" id="top-card">
+      <div class="viz-head">
+        <div>
+          <h2 class="viz-title">Top 账号</h2>
+          <p class="viz-sub">按累计消费 · 各自从启用日起 · 后面是占全部消费的比例</p>
+        </div>
+        {% if top_spenders | length > 5 %}
+          <div class="seg seg-sm" role="group" aria-label="列几个">
+            <button class="seg-item is-on" type="button" data-top="5" aria-pressed="true">Top 5</button>
+            <button class="seg-item" type="button" data-top="all" aria-pressed="false">全部 <span class="seg-val">{{ top_spenders | length }}</span></button>
+          </div>
+        {% endif %}
+      </div>
+      {% if top_spenders %}
+        <ol class="top-list">
+          {% for item in top_spenders %}
+            {% set row = item.row %}
+            <li class="top-row"{% if loop.index > 5 %} data-more hidden{% endif %} style="--i: {{ loop.index0 }}">
+              <span class="top-rank">{{ loop.index }}</span>
+              <span class="mini-av {{ row.avatar.css }}" data-tip="{{ row.email or row.account }}"
+                    data-tip-sub="{{ row.account }} · 上游 {{ row.partner }}">{{ row.avatar.text }}</span>
+              <a class="top-name" href="{{ url_for('account.summary', number=row.account) }}" data-loading="正在读这个账号"
+                 title="{{ row.email or row.account }}">{{ row.email or row.account }}</a>
+              <span class="top-bar" data-reveal aria-hidden="true"><i style="width: {{ '%.1f' % item.width }}%; background: {{ item.color }}"></i></span>
+              <b class="top-amount">{{ row.total_cost | money0 }}</b>
+              <span class="top-share">{{ '%.0f' % item.share }}%</span>
+            </li>
+          {% endfor %}
+        </ol>
+      {% else %}
+        <p class="viz-empty">还没有查到消费。</p>
+      {% endif %}
+    </article>
+
+    <article class="viz-card span-all" id="spend">
+      <div class="viz-head">
+        <div>
+          <h2 class="viz-title">每日消费</h2>
+          <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 每天一根柱，按账号分色 ·
+            Cost Explorer 晚 1~2 天出数，最近两天可能还不全</p>
+        </div>
+        <div class="viz-actions">
+          {{ spend_switch(spend_links) }}
+          {% if config.OPS_DASHBOARD %}
+            <a class="viz-link" href="{{ url_for('ops.index') }}" data-loading="正在汇总各账号的数">收入和毛利</a>
+          {% endif %}
+        </div>
+      </div>
+      <div>
+        <p class="viz-big">{{ trend.total | money0 }} <small>{{ spend.label }}</small></p>
+        <p class="viz-meta">日均 <strong>{{ trend.average | money }}</strong> · 最多的一天是 {{ trend.peak_label }}（{{ trend.peak_value | money }}）</p>
+      </div>
+      <div class="viz-chart wide-chart" id="trend-chart" data-tip-src="trend-data">{{ trend.chart.svg | safe }}</div>
+      {# 图例可以点：点一下只看这个账号，再点一下恢复 #}
+      <div class="legend-toggles" data-legend-for="trend-chart" role="group" aria-label="只看某个账号">
+        {% for item in trend.chart.legend %}
+          <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
+                  title="{{ item.name }} {{ spend.label }} {{ item.total | money }}">
+            <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
+        {% endfor %}
+      </div>
+      <script id="trend-data" type="application/json">{{ trend.chart.tooltip | tojson }}</script>
     </article>
   </section>
 
@@ -284,7 +321,7 @@
 
         {% if row.has_numbers %}
           <div class="acct-usage">
-            <div class="meter tone-{{ row.level }}" aria-hidden="true"><i style="width: {{ row.bar_width }}%"></i></div>
+            <div class="meter tone-{{ row.level }}" data-reveal aria-hidden="true"><i style="width: {{ row.bar_width }}%"></i></div>
             <div class="acct-usage-row">
               <span>使用率 <strong>{{ row.usage_pct | pct }}</strong></span>
               <span>余额 <strong class="{% if row.overspent %}tone-danger{% endif %}">{{ row.balance | money }}</strong></span>
@@ -326,6 +363,28 @@
 {% if report and report.rows %}
 <script>
 (function () {
+  // ---- Top 账号：前 5 个 / 全部，记在这个浏览器里（读不到就是前 5 个）
+  const topCard = document.getElementById('top-card');
+  if (topCard) {
+    const showTop = function (which) {
+      for (const b of topCard.querySelectorAll('[data-top]')) {
+        const on = b.dataset.top === which;
+        b.classList.toggle('is-on', on);
+        b.setAttribute('aria-pressed', String(on));
+      }
+      for (const row of topCard.querySelectorAll('[data-more]')) row.hidden = which !== 'all';
+    };
+    let saved = '5';
+    try { saved = localStorage.getItem('overview-top') || '5'; } catch (e) { /* 无痕模式之类：就前 5 个 */ }
+    if (saved === 'all' && topCard.querySelector('[data-top]')) showTop('all');
+    topCard.addEventListener('click', function (event) {
+      const button = event.target.closest('[data-top]');
+      if (!button) return;
+      showTop(button.dataset.top);
+      try { localStorage.setItem('overview-top', button.dataset.top); } catch (e) { /* 存不了就算了 */ }
+    });
+  }
+
   const grid = document.getElementById('acct-grid');
   const empty = document.getElementById('acct-empty');
   if (!grid) return;

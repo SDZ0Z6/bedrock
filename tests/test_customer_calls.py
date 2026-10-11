@@ -1,8 +1,8 @@
 """客户页「近 24 小时调用」：账单晚 1~2 天，这张看现在——CloudWatch 的调用次数，折线图，一个账号一条线
-（四区合计、每小时一个点），线尾是这个账号的头像。只查还在用的账号；颜色和「每天消费」一样，一个账号一个颜色。
+（四区合计、每小时一个点），线尾是这个账号的头像。只查还在用的账号；颜色和「每日消费」一样，一个账号一个颜色。
 客户页的「账号」卡片是按阶段的横条（长短按占全部账号的比例，后面是这一档的账号头像）。
 
-账号页摘要页签的「近 7 天调用」下面补一行「今天预估花费」（用量 × 牌价，和「预估」页签一个算法）。
+账号页摘要页签的「近 24 小时调用」下面补一行「今天预估花费」（用量 × 牌价，和「预估」页签一个算法）。
 """
 
 from __future__ import annotations
@@ -82,14 +82,19 @@ def test_近24小时调用_一个账号一条线_线尾是头像(admin, fake_cos
     assert "data-line-src=\"cust-calls-data\"" in html
 
 
-def test_放在每天消费和还能用几天下面_时间线上面(admin, fake_costs):
+def test_和每日消费换了位置_在还能用几天左边(admin, fake_costs):
+    """近 24 小时调用和「还能用几天」一排（占三分之二宽）；每日消费挪到图的最后，整行宽。"""
     make(admin)
     html = detail(admin)
-    assert html.index(">还能用几天<") < html.index(">近 24 小时调用<") < html.index('id="tl-title"')
-    assert 'class="viz-card col-6"' in html                   # 整行宽
+    assert (html.index(">近 24 小时调用<") < html.index(">还能用几天<") < html.index(">每日消费<")
+            < html.index('id="tl-title"'))
+    calls = html.rindex("<article", 0, html.index(">近 24 小时调用<"))
+    spend = html.rindex("<article", 0, html.index(">每日消费<"))
+    assert html.startswith('<article class="viz-card col-4"', calls)
+    assert html.startswith('<article class="viz-card col-6" id="spend"', spend)
 
 
-def test_和每天消费一个颜色(admin, fake_costs, real_calls, monkeypatch):
+def test_和每日消费一个颜色(admin, fake_costs, real_calls, monkeypatch):
     from bedrock_cost import usage_explorer
 
     from .test_customers import series_for
@@ -177,12 +182,12 @@ def test_每个账号四区合计_不分模型(ledger, monkeypatch):
 def test_摘要页签_今天预估花费(pages):
     """fake_estimate：每个区每天 100 万输入 token 的 Opus 5（$5/M），四个区一天 $20。"""
     html = get(pages, f"/account/{ALPHA_NO_PAGES}/")
-    calls = scrape(html[html.index(">近 7 天调用<"):html.index(">配额</h2>")])
+    calls = scrape(html[html.index(">近 24 小时调用<"):html.index(">配额</h2>")])
     assert "今天预估花费 $20.00" in calls and "以账单为准" in calls
     assert f'href="/account/{ALPHA_NO_PAGES}/estimate"' in html
 
 
-def test_近7天没有调用_今天就不用估了(pages, monkeypatch):
+def test_近24小时没有调用_今天就不用估了(pages, monkeypatch):
     monkeypatch.setattr(cloudwatch_metrics, "_fetch_region", lambda account, region, win, key: ({}, False, None))
     asked = []
     monkeypatch.setattr(cost_estimate, "build_estimate", lambda *a, **k: asked.append(a))
@@ -233,9 +238,9 @@ def test_账号卡片是按阶段的横条(admin, fake_costs):
     rows = re.findall(r'<div class="stage-row( is-zero)?"[^>]*>(.*?)</i></div>', box, re.S)
     assert [(scrape(body).split()[0], bool(zero)) for zero, body in rows] == [
         ("使用中", False), ("风控", False), ("待结算", True), ("已结算", True)]
-    widths = re.findall(r'<div class="stage-bar" aria-hidden="true"><i style="width: ([\d.]+)%', box)
+    widths = re.findall(r'<div class="stage-bar" data-reveal aria-hidden="true"><i style="width: ([\d.]+)%', box)
     assert widths == ["50.0", "50.0", "0.0", "0.0"]
-    assert re.search(r'<span class="mini-av av-\d+" title="acct-two@example.com"', rows[1][1])   # 风控那一档是 B
+    assert re.search(r'<span class="mini-av av-\d+" data-tip="acct-two@example.com"', rows[1][1])   # 风控那一档是 B
 
 
 # ====================================================================== 今日预估

@@ -1,4 +1,4 @@
-"""换下、风控的账号离开以后还有零星的账：客户页「每天消费」、近 7 天日均（「还能用几天」）、客户列表的近 30 天
+"""换下、风控的账号离开以后还有零星的账：客户页「每日消费」、近 7 天日均（「还能用几天」）、客户列表的近 30 天
 消费都不算它离开以后的（只算它算这个客户的那几天）；历史消费、对账单、结算照样按这个账号全部的账算。
 """
 
@@ -44,7 +44,7 @@ def swapped(monkeypatch):
     return view
 
 
-def test_离开以后的账不画进每天消费(swapped):
+def test_离开以后的账不画进每日消费(swapped):
     stamps, per_account = swapped.daily(30)
     by_day = dict(zip(stamps, per_account[OLD]))
     assert by_day[REPLACED - timedelta(days=1)] == 1000.0         # 换下前一天照算
@@ -73,7 +73,7 @@ def test_在用的账号_从分过来那天起都算():
     assert holding.active_daily(REPLACED - timedelta(days=1), REPLACED + timedelta(days=2)) == [0.0, 5.0, 5.0, 5.0]
 
 
-def test_客户页每天消费的图(admin, fake_costs, monkeypatch):
+def test_客户页每日消费的图(admin, fake_costs, monkeypatch):
     today = date.today()
     left = today - timedelta(days=5)
     numbers = {ALPHA: str(LEDGER_ROWS[0][1]), BETA: str(LEDGER_ROWS[1][1])}

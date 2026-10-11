@@ -1,5 +1,16 @@
 {# 几个页面共用的小部件。用法：{% from "_macros.html" import account_picker, avatar %} #}
 
+{# 「每日消费」右上角看多久：近 7 天 / 近 30 天 / 近 90 天 / 全部（views.spend_links 给的 [(名字, 网址, 选中)]）。
+   点了整页重新打开，停回这张图（卡片上要有 id="spend"） #}
+{% macro spend_switch(links) -%}
+  <div class="seg seg-sm" role="group" aria-label="看多久">
+    {%- for label, href, on in links %}
+      <a class="seg-item{% if on %} is-on{% endif %}" href="{{ href }}#spend" data-loading="正在读每日消费"
+         {%- if on %} aria-current="true"{% endif %}>{{ label }}</a>
+    {%- endfor %}
+  </div>
+{%- endmacro %}
+
 {# 头像：见 avatars.py。small 是下拉框、表格里用的小号，large 是账号页页头的大号 #}
 {% macro avatar(av, small=false, large=false) -%}
   <span class="avatar {{ av.css }}{% if small %} avatar-sm{% endif %}{% if large %} avatar-lg{% endif %}" aria-hidden="true"><span>{{ av.text }}</span></span>

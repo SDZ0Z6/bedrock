@@ -83,9 +83,9 @@ def test_parse_date(raw, expected):
 
 
 class TestResolveRange:
-    def test_defaults_to_month_to_date(self):
+    def test_defaults_to_last_7_days(self):
         start, end, notes = resolve_range({}, TODAY)
-        assert (start, end) == (date(2026, 8, 1), TODAY)
+        assert (start, end) == (date(2026, 8, 11), TODAY) == preset_range("last7", TODAY)
         assert notes == []
 
     def test_preset_wins_over_explicit_dates(self):
@@ -106,8 +106,8 @@ class TestResolveRange:
 
     def test_bad_dates_fall_back_and_warn(self):
         start, end, notes = resolve_range({"start": "notadate", "end": "也不是日期"}, TODAY)
-        assert (start, end) == (date(2026, 8, 1), TODAY)
-        assert len(notes) == 2
+        assert (start, end) == (date(2026, 8, 11), TODAY)
+        assert notes == ["开始日期格式无法识别，已从 2026-08-11 起算（近 7 天）。", "结束日期格式无法识别，已使用今天。"]
 
     def test_narrows_to_cost_explorer_retention(self):
         start, _, notes = resolve_range({"start": "2000-01-01"}, TODAY)

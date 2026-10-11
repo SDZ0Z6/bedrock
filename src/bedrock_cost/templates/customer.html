@@ -1,5 +1,6 @@
 {% extends "shell.html" %}
 {% from "_customer_macros.html" import cicon, cust_avatar, status_pill, mini, customer_fields, timeline_box with context %}
+{% from "_macros.html" import spend_switch %}
 {% block title %}{{ customer.name }} · 客户 · Bedrock 成本监控{% endblock %}
 {% block page_header %}{% endblock %}
 {% block loading_label %}正在处理{% endblock %}
@@ -73,7 +74,7 @@
     {{ view.stale | map(attribute='series.stale_as_of') | min }}）。</p>
 {% endif %}
 
-<!-- ------------------------------------------------ 五张图 -->
+<!-- ------------------------------------------------ 五张图：账号、余额 / 近 24 小时调用、还能用几天 / 每日消费 -->
 <section class="detail-bento" aria-label="这个客户的图表">
   <article class="viz-card col-2" data-reveal>
     <div class="viz-head">
@@ -83,35 +84,47 @@
       </div>
     </div>
     <p class="viz-big"><span data-countup>{{ counts.total }}</span> <small>个账号</small></p>
-    {# 横条：一个阶段一根，长短按占全部账号的比例；名字后面是这一档里的账号头像（最多 5 个） #}
+    {# 横条：一个阶段一根，长短按占全部账号的比例；名字后面是这一档里的账号头像（最多 5 个），鼠标放上去写全名 #}
     <div class="stage-bars">
       {% for row in stage_rows %}
         <div class="stage-row{% if not row.count %} is-zero{% endif %}" style="--i: {{ loop.index0 }}">
           <div class="stage-line">
             <span class="stage-name">{{ row.label }}</span>
             <span class="stage-faces">
-              {%- for h in row.holdings[:5] %}<span class="mini-av {{ h.account.avatar.css }}" title="{{ h.account.email or h.number }}"
-                aria-hidden="true">{{ h.account.avatar.text }}</span>{% endfor -%}
+              {%- for h in row.holdings[:5] %}<span class="mini-av {{ h.account.avatar.css }}" data-tip="{{ h.account.email or h.number }}"
+                data-tip-sub="{{ h.number }} · 上游 {{ h.account.partner }}">{{ h.account.avatar.text }}</span>{% endfor -%}
               {%- if row.holdings | length > 5 %}<span class="stage-more">+{{ (row.holdings | length) - 5 }}</span>{% endif -%}
             </span>
             <b>{{ row.count }}</b>
           </div>
-          <div class="stage-bar" aria-hidden="true"><i style="width: {{ '%.1f' % (row.count / counts.total * 100 if counts.total else 0) }}%; background: {{ row.color }}"></i></div>
+          <div class="stage-bar" data-reveal aria-hidden="true"><i style="width: {{ '%.1f' % (row.count / counts.total * 100 if counts.total else 0) }}%; background: {{ row.color }}"></i></div>
         </div>
       {% endfor %}
     </div>
   </article>
 
-  <article class="viz-card col-2" data-reveal>
+  {# 余额：还剩多少、用了多少（原来「额度使用」那张仪表并到这里）。总条和下面每个账号的条一样画「还剩」 #}
+  <article class="viz-card col-4" data-reveal>
     <div class="viz-head">
       <div>
         <h2 class="viz-title">余额</h2>
-        <p class="viz-sub">使用中的账号还剩多少</p>
+        <p class="viz-sub">使用中的账号还剩多少、用了多少 · 截至 {{ today.strftime('%m-%d') }}</p>
       </div>
     </div>
     <div>
-      <p class="viz-big"><span data-countup>{{ view.balance | money0 }}</span> <small>{{ view.in_use | length }} 个使用中的账号</small></p>
-      <p class="viz-meta">预算 <strong>{{ view.budget | money0 }}</strong> − 消费 <strong>{{ view.spent | money0 }}</strong></p>
+      <div class="calls-kpis">
+        <p class="viz-big"><span data-countup>{{ view.balance | money0 }}</span> <small>余额</small></p>
+        <p class="viz-big"><span data-countup>{{ view.spent | money0 }}</span> <small>已使用
+          {%- if view.usage_pct is not none %} · <b class="tone-{{ view.level }}">{{ view.usage_pct | pct }}</b>{% endif %}</small></p>
+      </div>
+      {% if view.in_use %}
+        {% set left_all = [[(view.balance / view.budget * 100) if view.budget > 0 else 0, 0] | max, 100] | min %}
+        <div class="bal-bar bal-bar-total {% if left_all <= 100 - 90 %}tone-danger{% elif left_all <= 100 - 70 %}tone-warn{% endif %}" data-reveal
+             aria-hidden="true"><i style="width: {{ left_all | round(1) }}%"></i></div>
+      {% endif %}
+      <p class="viz-meta">预算 <strong>{{ view.budget | money0 }}</strong> = 已使用 <strong>{{ view.spent | money0 }}</strong>
+        + 余额 <strong class="{% if view.balance < 0 %}tone-danger{% endif %}">{{ view.balance | money0 }}</strong>
+        · {{ view.in_use | length }} 个使用中的账号</p>
     </div>
     {% if view.in_use %}
       <div class="bal-rows">
@@ -119,8 +132,8 @@
           {% set left_pct = [[(h.remaining / h.account.budget * 100) if h.account.budget > 0 else 0, 0] | max, 100] | min %}
           <div class="bal-row" style="--i: {{ loop.index0 }}">
             <div class="bal-label">{{ mini(h.account) }}<span class="bal-mail">{{ h.account.email or h.number }}</span><b>{{ h.remaining | money0 }}</b></div>
-            <div class="bal-bar {% if left_pct <= 100 - 90 %}tone-danger{% elif left_pct <= 100 - 70 %}tone-warn{% endif %}" aria-hidden="true"><i style="width: {{ left_pct | round(1) }}%"></i></div>
-            <div class="bal-sub">还剩 {{ left_pct | round | int }}% · 额度 {{ h.account.budget | money0 }}</div>
+            <div class="bal-bar {% if left_pct <= 100 - 90 %}tone-danger{% elif left_pct <= 100 - 70 %}tone-warn{% endif %}" data-reveal aria-hidden="true"><i style="width: {{ left_pct | round(1) }}%"></i></div>
+            <div class="bal-sub">已使用 {{ h.spent | money0 }} · 还剩 {{ left_pct | round | int }}% · 额度 {{ h.account.budget | money0 }}</div>
           </div>
         {% endfor %}
       </div>
@@ -137,73 +150,8 @@
     {% endif %}
   </article>
 
-  <article class="viz-card col-2" data-reveal>
-    <div class="viz-head">
-      <div>
-        <h2 class="viz-title">额度使用</h2>
-        <p class="viz-sub">{{ view.in_use | length }} 个使用中的账号 · 截至 {{ today.strftime('%m-%d') }}</p>
-      </div>
-    </div>
-    <div class="gauge">
-      {{ gauge | safe }}
-      <div class="gauge-center">
-        <span class="gauge-value" data-countup>{{ view.spent | money0 }}</span>
-        <span class="gauge-of">预算 {{ view.budget | money0 }}</span>
-      </div>
-    </div>
-    <div class="gauge-facts">
-      <span>使用率<strong class="tone-{{ view.level }}">{{ view.usage_pct | pct }}</strong></span>
-      <span>余额<strong class="{% if view.balance < 0 %}tone-danger{% endif %}">{{ view.balance | money }}</strong></span>
-    </div>
-  </article>
-
+  {# 账单要晚 1~2 天，这张看现在：CloudWatch 的调用次数，晚几分钟。颜色和「每日消费」一样，一个账号一个颜色 #}
   <article class="viz-card col-4" data-reveal>
-    <div class="viz-head">
-      <div>
-        <h2 class="viz-title">每天消费</h2>
-        <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 按账号叠起来，只算在用的那几天 · Cost Explorer 晚 1~2 天出数</p>
-      </div>
-    </div>
-    <div>
-      <p class="viz-big"><span data-countup>{{ trend.total | money0 }}</span> <small>近 30 天</small></p>
-      <p class="viz-meta">日均 <strong>{{ trend.average | money }}</strong> · 近 7 天日均 <strong>{{ view.avg7 | money }}</strong></p>
-    </div>
-    <div class="viz-chart" id="cust-spend" data-tip-src="cust-spend-data">{{ trend.chart.svg | safe }}</div>
-    <div class="legend-toggles" data-legend-for="cust-spend" role="group" aria-label="只看某个账号">
-      {% for item in trend.chart.legend %}
-        <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
-                title="{{ item.name }} 近 30 天 {{ item.total | money }}">
-          <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
-      {% endfor %}
-    </div>
-    <script id="cust-spend-data" type="application/json">{{ trend.chart.tooltip | tojson }}</script>
-  </article>
-
-  <article class="viz-card col-2" data-reveal>
-    <div class="viz-head">
-      <div>
-        <h2 class="viz-title">还能用几天</h2>
-        <p class="viz-sub">余额 ÷ 近 7 天日均，虚线是预测</p>
-      </div>
-    </div>
-    <div>
-      {% set left = view.days_left %}
-      {% if left is none %}
-        <p class="viz-big">— <small>最近 7 天没有消费</small></p>
-      {% elif left <= 0 %}
-        <p class="viz-big tone-warn">0 天 <small>没有余额了，该换账号了</small></p>
-      {% elif view.long_runway %}
-        <p class="viz-big">一年以上 <small>一年内用不完</small></p>
-      {% else %}
-        <p class="viz-big {% if left < 14 %}tone-warn{% endif %}">约 {{ left | int }} 天 <small>{{ view.runs_out_on.strftime('%m-%d') }} 前后用完</small></p>
-      {% endif %}
-      <p class="viz-meta">余额 <strong>{{ view.balance | money0 }}</strong> · 日均 <strong>{{ view.avg7 | money0 }}</strong></p>
-    </div>
-    <div class="viz-chart">{{ runway | safe }}</div>
-  </article>
-
-  {# 账单要晚 1~2 天，这张看现在：CloudWatch 的调用次数，晚几分钟。颜色和「每天消费」一样，一个账号一个颜色 #}
-  <article class="viz-card col-6" data-reveal>
     <div class="viz-head">
       <div>
         <h2 class="viz-title">近 24 小时调用</h2>
@@ -241,6 +189,51 @@
     {% else %}
       <p class="viz-empty">没有在用的账号。</p>
     {% endif %}
+  </article>
+
+  <article class="viz-card col-2" data-reveal>
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">还能用几天</h2>
+        <p class="viz-sub">余额 ÷ 近 7 天日均，虚线是预测</p>
+      </div>
+    </div>
+    <div>
+      {% set left = view.days_left %}
+      {% if left is none %}
+        <p class="viz-big">— <small>最近 7 天没有消费</small></p>
+      {% elif left <= 0 %}
+        <p class="viz-big tone-warn">0 天 <small>没有余额了，该换账号了</small></p>
+      {% elif view.long_runway %}
+        <p class="viz-big">一年以上 <small>一年内用不完</small></p>
+      {% else %}
+        <p class="viz-big {% if left < 14 %}tone-warn{% endif %}">约 {{ left | int }} 天 <small>{{ view.runs_out_on.strftime('%m-%d') }} 前后用完</small></p>
+      {% endif %}
+      <p class="viz-meta">余额 <strong>{{ view.balance | money0 }}</strong> · 日均 <strong>{{ view.avg7 | money0 }}</strong></p>
+    </div>
+    <div class="viz-chart">{{ runway | safe }}</div>
+  </article>
+
+  {# 每日消费：竖虚线是每个账号的启用、风控、换下、用完、结算、恢复（停的那条写着从启用起用了多少，悬浮看全）。
+     右上角选看多久；点下面的账号只看它，连同它的竖线 #}
+  <article class="viz-card col-6" id="spend" data-reveal>
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">每日消费</h2>
+        <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 按账号叠起来，只算在用的那几天 · 竖虚线是启用、风控这些事 · Cost Explorer 晚 1~2 天出数</p>
+      </div>
+      {{ spend_switch(spend_links) }}
+    </div>
+    <p class="viz-big"><span data-countup>{{ trend.total | money0 }}</span> <small>{{ trend.label }}</small></p>
+    <div class="viz-chart wide-chart" id="cust-spend" data-tip-src="cust-spend-data">{{ trend.chart.svg | safe }}</div>
+    <div class="legend-toggles" data-legend-for="cust-spend" role="group" aria-label="只看某个账号">
+      {% for item in trend.chart.legend %}
+        <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
+                title="{{ item.name }} {{ trend.label }} {{ item.total | money }}">
+          <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
+      {% endfor %}
+    </div>
+    <script id="cust-spend-data" type="application/json">{{ trend.chart.tooltip | tojson }}</script>
   </article>
 </section>
 
@@ -301,7 +294,7 @@
                 {% if h.has_numbers %}
                   <span title="{{ h.spent | money }} / {{ h.account.budget | money }}"><b>{{ '%.0f%%' % h.usage_pct if h.usage_pct is not none else '—' }}</b>
                     · {{ short_money(h.spent) }} / {{ short_money(h.account.budget) }}</span>
-                  <div class="meter tone-{{ h.level }}" aria-hidden="true"><i style="width: {{ [h.usage_pct or 0, 100] | min }}%"></i></div>
+                  <div class="meter tone-{{ h.level }}" data-reveal aria-hidden="true"><i style="width: {{ [h.usage_pct or 0, 100] | min }}%"></i></div>
                 {% else %}
                   <span class="tone-warn">查不到消费</span>
                 {% endif %}
@@ -1086,9 +1079,6 @@
     if (event.target.matches('#dlg-replace input')) replaceOutcome();
   });
   replaceOutcome();
-
-  // ---- 近 24 小时调用：手机上图比屏幕宽、能左右滑；一打开先停在最右边（最近那几个小时和线尾的头像）
-  for (const wrap of document.querySelectorAll('.calls-chart')) wrap.scrollLeft = wrap.scrollWidth;
 
   // ---- 名下账号：按阶段、搜邮箱或 ID 筛（两个同时满足）。排序是 app.js 的 data-sortable（点表头：升、降、回到默认）
   const holdingTable = document.getElementById('holding-table');

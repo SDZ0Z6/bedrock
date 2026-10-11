@@ -214,7 +214,7 @@ CUSTOMER_COSTS_PATH = Path(_text("CUSTOMER_COSTS_PATH", "customer-costs.json"))
 if not CUSTOMER_COSTS_PATH.is_absolute():
     CUSTOMER_COSTS_PATH = BASE_DIR / CUSTOMER_COSTS_PATH
 
-# 客户时间线上自动判断「开始上量 / 上量终止 / 恢复上量」的规则（按折算后的每天消费）：
+# 客户时间线上自动判断「开始上量 / 上量终止 / 恢复上量」的规则（按折算后的每日消费）：
 #   开始上量：分给客户以后，第一次有一天 ≥ RAMPUP_DAILY
 #   上量终止：上量以后，连续 STOP_DAYS 天都低于 STOP_DAILY，记在第一天
 #   恢复上量：终止以后，又有一天 ≥ RAMPUP_DAILY

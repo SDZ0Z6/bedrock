@@ -208,5 +208,5 @@ class TestOverviewPage:
         assert "有上一次数据的照常显示" in text(stack)
 
         # 合计含这个旧数：表上显示着它，合计不含它的话就对不上了
-        assert f"余额 ${600_000 - (1487.37 * 1.05 + 50.0):,.2f}" in text(html)
+        assert f"余额 ${600_000 - (1487.37 * 1.05 + 50.0):,.0f}" in text(html)     # 「额度使用」那张写整数
         assert 'class="alert' not in html                                  # 不再整行只写「查询失败」

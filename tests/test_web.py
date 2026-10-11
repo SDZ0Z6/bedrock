@@ -52,7 +52,7 @@ STATIC = Path(config.__file__).parent / "static"
 def page_env(monkeypatch):
     """页面层的几份模块级缓存换成空的，几个会被开发机 .env 改掉的口径钉死。
 
-    概览的「近 30 天成本」缓存 2 小时、看板的逐日账缓存 2 小时、用量状态缓存 5 分钟，键里
+    概览的「每日消费」缓存 2 小时、看板的逐日账缓存 2 小时、用量状态缓存 5 分钟，键里
     只有账号和日期：不换的话上一条用例查到的数会串到下一条（换成新 dict，用例结束自动换回）。
     货币符号、额度档位、缓存开关在 .env 里都能改，页面上的字跟着变，这里按默认值钉住。
     """
@@ -440,7 +440,7 @@ class TestOpsDashboardSwitch:
         assert logged_in.get("/ops/").status_code == 404
         html = logged_in.get("/").get_data(as_text=True)
         assert "运营看板" not in [title for _, title, _ in nav_items(html)]
-        assert 'href="/ops/' not in html                  # 概览「近 30 天成本」旁边的入口也不出现
+        assert 'href="/ops/' not in html                  # 概览「每日消费」旁边的入口也不出现
 
 
 class TestLoadingOverlay:
@@ -527,13 +527,14 @@ def spent_so_far(number: str) -> float:
 
 
 class TestOverviewPage:
-    def test_three_charts_on_top(self, logged_in, book, fake_costs):
-        """额度仪表、近 30 天每天的成本（按账号堆叠）、消费构成的气泡。"""
+    def test_four_cards_on_top(self, logged_in, book, fake_costs):
+        """额度使用（按用掉多少分档的横条）、消费构成的气泡、Top 账号，下面一整行是近 30 天每天的成本（按账号堆叠）。"""
         html = logged_in.get("/").get_data(as_text=True)
         bento = html[html.index('<section class="bento"') : html.index('<div class="overview-bar">')]
         assert [scrape(t) for t in re.findall(r'<h2 class="viz-title">(.*?)</h2>', bento)] == [
-            "额度使用", "近 30 天成本", "消费构成",
+            "额度使用", "消费构成", "Top 账号", "每日消费",
         ]
+        assert '<article class="viz-card span-all" id="spend">' in bento and 'class="viz-chart wide-chart" id="trend-chart"' in bento
         assert 'class="chart-svg bar-chart"' in bento
         assert 'class="bubble-svg"' in bento
 
@@ -560,15 +561,15 @@ class TestOverviewPage:
         for number, name in (("111111111111", "alpha"), ("222222222222", "beta")):
             assert f'data-name="{name}" data-value="${spent_so_far(number):,.2f}"' in share
 
-    def test_gauge_adds_up_the_cards(self, logged_in, book, fake_costs):
-        """仪表上的合计 = 各张卡片的累计消费相加；停用的 gamma 不算。"""
+    def test_usage_card_adds_up_the_cards(self, logged_in, book, fake_costs):
+        """「额度使用」的合计 = 各张卡片的累计消费相加；停用的 gamma 不算。都没查询失败就不写那一句。"""
         html = logged_in.get("/").get_data(as_text=True)
         spent = spent_so_far("111111111111") + spent_so_far("222222222222")
-        gauge = scrape(html[html.index(">额度使用<") : html.index(">近 30 天成本<")])
-        assert "额度 $600,000" in gauge
-        assert f"使用率 {spent / 600_000 * 100:.2f}%" in gauge
-        assert f"余额 ${600_000 - spent:,.2f}" in gauge
-        assert "查询失败 0 个" in gauge
+        card = scrape(html[html.index(">额度使用<") : html.index(">消费构成<")])
+        assert f"${spent:,.0f} 已用 额度 $600,000 · 使用率" in card
+        assert f"使用率 {spent / 600_000 * 100:.2f}%" in card
+        assert f"余额 ${600_000 - spent:,.0f}" in card
+        assert "查询失败" not in card and "gauge" not in html
 
     def test_one_card_per_enabled_account(self, logged_in, book, fake_costs):
         """停用的账号不上概览；每张卡片唯一的链接是「查看详情」，进这个账号的页面。"""
@@ -848,7 +849,7 @@ class TestCacheClear:
         assert logged_in.get("/cache/clear").headers["Location"] == "/"
 
     def test_drops_the_overview_trend(self, logged_in, ledger, fake_costs, monkeypatch):
-        """「近 30 天成本」单独缓存 2 小时，清空缓存也要清掉它。"""
+        """概览的「每日消费」单独缓存 2 小时，清空缓存也要清掉它。"""
         assert toasts(logged_in.get("/").get_data(as_text=True)) == []
         fail_daily(monkeypatch, {"111111111111"})
         assert toasts(logged_in.get("/").get_data(as_text=True)) == []          # 还是缓存里那份

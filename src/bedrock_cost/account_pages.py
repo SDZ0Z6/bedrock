@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
 
 from flask import Blueprint, flash, redirect, render_template, request, session, url_for
@@ -21,8 +21,9 @@ from . import (
 from .auth import csrf_protect, login_required, safe_next
 from .dates import cumulative_range, detect_preset, earliest_queryable, parse_date, resolve_range
 from .excel_source import Account, ExcelSourceError, lifecycle_colors, load_accounts, load_customers, load_events
+from .filters import money
 from .report import build_row
-from .views import flash_result, page_meta, tz_name
+from .views import flash_result, page_meta, spend_links, tz_name
 from .windows import PERIODS, WINDOWS, MetricWindow, detect_window, fit_period, floor_to_period, resolve_window
 
 bp = Blueprint("account", __name__, url_prefix="/account")
@@ -145,11 +146,14 @@ def summary(number: str):
             "error", "查不到 Cost Explorer", dashboard.who(account),
             row.issue + ("，下面显示的是上一次查到的数" if row.stale_as_of else ""), detail))
 
-    trend = dashboard.single_cost_trend(account, today, refresh=refresh)
+    # 「每日消费」右上角选看多久，「全部」从启用日期算起
+    spend = dashboard.spend_range(request.args.get("spend"), today, account.start_date)
+    trend = dashboard.single_cost_trend(account, today, days=spend.days, refresh=refresh,
+                                        marks=_summary_marks(account, today, spend.days, refresh))
     if trend.errors and not row.error:
         toasts += dashboard.region_toasts(trend.errors, account, "查不到每天的成本")
 
-    window, _ = resolve_window({"win": "7d", "period": "1h"})
+    window, _ = resolve_window({"win": "24h", "period": "1h"})
     calls_report = cloudwatch_metrics.build_metrics([account], list(cloudwatch_metrics.DEFAULT_REGIONS),
                                                      window, "invocations", refresh=refresh)
     view = chart.render_views(calls_report, width=820)[0]
@@ -160,7 +164,7 @@ def summary(number: str):
     toasts += dashboard.region_toasts(calls_report.errors, account, "读不到 CloudWatch")
 
     # 今天到现在的预估花费：CloudWatch 的 token × 牌价（和「预估」页签一个算法），晚几分钟，不用等账单。
-    # 近 7 天一次调用都没有，今天也就是 0，不用再查
+    # 近 24 小时一次调用都没有，今天也就是 0，不用再查
     today_cost = SimpleNamespace(total=0.0, partial=False)
     if calls_report.total > 0:
         estimate = cost_estimate.build_estimate([account], today, today, refresh=refresh)
@@ -169,10 +173,63 @@ def summary(number: str):
 
     context = _frame(account, accounts, "summary", refresh=refresh, row=row,
                      gauge=chart.render_gauge(None if row.usage_pct is None else row.usage_pct / 100, row.level),
-                     trend=trend, calls=calls, today_cost=today_cost, quota_top=_quota_top(account), toasts=toasts,
+                     trend=trend, spend=spend, spend_links=spend_links("account.summary", spend.key, number=account.account),
+                     calls=calls, today_cost=today_cost, quota_top=_quota_top(account), toasts=toasts,
                      notes=[])
     context["query_failed"] = bool(row.error)
     return render_template("account_summary.html", **context)
+
+
+# 「每日消费」上的竖虚线：这个账号自己的事（按 ACCOUNT 认；替换的时候换上来的那个按 PEER 认）。
+# 开始用的（启用、分给客户、换上、恢复、取消风控）画绿的，风控画红的，换下、结算、解绑画灰的
+_SUMMARY_MARKS = {"assign": ("start", "分给 {}"), "risk": ("stop", "风控"), "unrisk": ("start", "取消风控"),
+                  "restore": ("start", "恢复"), "settle": ("stop", "结算"), "replace": ("stop", "换下"),
+                  "unassign": ("", "解绑")}
+_STARTS = ("启用", "分给", "换上", "恢复", "取消风控")
+
+
+def _summary_marks(account: Account, today: date, days: int, refresh: bool) -> list[chart.BarMark]:
+    """摘要「每日消费」（近 days 天）上的竖虚线，和客户页的一个画法：同一天的并成一条，「停」的那条写着从上一次
+    开始用（启用、分给客户、恢复……）到前一天用了多少——那一段可能在图外，按这个账号全部的每日消费算；
+    要算的时候才查（和时间线页签、客户页同一份缓存）。"""
+    number = account.account
+    first = today - timedelta(days=days - 1)
+    owners = {customer.id: customer.name for customer in load_customers()}
+    moments = [(account.start_date, 0, "start", "启用")] if account.start_date else []
+    for event in load_events():
+        if event.deleted or event.source != "manual":
+            continue
+        whose = owners.get(event.customer, event.customer)
+        if event.type == "replace" and event.peer == number:
+            moments.append((event.date, event.id, "start", f"换上 {whose}"))
+        elif event.account == number and event.type in _SUMMARY_MARKS:
+            kind, label = _SUMMARY_MARKS[event.type]
+            moments.append((event.date, event.id, kind, label.format(whose)))
+
+    found: dict[str, float] = {}
+
+    def daily(start: date, end: date) -> list[float]:
+        # 图外的那几条不画，用不着算：免得白查一次 Cost Explorer
+        if not first <= end + timedelta(days=1) <= today:
+            return []
+        if not found:
+            series = customers.fetch_series([account], today, refresh).get(account.key) or customers.Series()
+            found.update(zip(series.dates, series.marked))
+        return [found.get((start + timedelta(days=i)).isoformat(), 0.0) for i in range((end - start).days + 1)]
+
+    marks = []
+    for day, labels, start, used in customers.mark_days(moments, daily):
+        if not first <= day <= today:
+            continue
+        what = "、".join(labels)
+        tone = ("danger" if "风控" in labels else "ok" if any(label.startswith(_STARTS) for label in labels)
+                else "none")
+        marks.append(chart.BarMark(
+            index=(day - first).days, label=what if used is None else f"{what} {customers.short_money(used)}",
+            color=chart.TONE_COLORS[tone], tip=account.email or number, tip_sub=f"{what} · {day.isoformat()}",
+            tip_foot="" if used is None else f"{start.strftime('%m-%d')} 起用了 {money(used)}",
+        ))
+    return marks
 
 
 def _quota_top(account: Account) -> list:

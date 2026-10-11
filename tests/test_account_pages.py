@@ -410,7 +410,7 @@ class TestStartDateClamp:
 class TestSummaryTab:
     def test_credit_counts_from_the_start_date(self, pages):
         html = get(pages, f"/account/{ALPHA}/")
-        card = scrape(html[html.index(">额度使用<") : html.index(">近 30 天成本<")])
+        card = scrape(html[html.index(">额度使用<") : html.index(">每日消费<")])
         spent = 152.5 * ((date.today() - RANGE_START).days + 1)       # 100 × 1 + 50 × 1.05 每天
         assert f"{RANGE_START.isoformat()} 起累计" in card
         assert "额度 $500,000" in card
@@ -419,18 +419,18 @@ class TestSummaryTab:
 
     def test_last_30_days_of_cost(self, pages):
         html = get(pages, f"/account/{ALPHA}/")
-        card = html[html.index(">近 30 天成本<") : html.index(">告警<")]
+        card = html[html.index(">每日消费<") : html.index(">告警<")]
         assert "$4,575" in scrape(card)                                  # 30 × 152.5
         assert f'href="/account/{ALPHA}/cost"' in card
         buckets = json.loads(re.search(r'<script id="trend-data" type="application/json">(.*?)</script>', html, re.S).group(1))
         assert len(buckets) == 30 and {b["total"] for b in buckets} == {"$152.50"}
 
-    def test_last_7_days_of_calls(self, pages):
-        """fake_cloudwatch：每小时每个区 Opus 5 直连 12 次、走推理配置的 Opus 4.8 7 次，7 × 24 个小时。"""
+    def test_last_24_hours_of_calls(self, pages):
+        """fake_cloudwatch：每小时每个区 Opus 5 直连 12 次、走推理配置的 Opus 4.8 7 次，24 个小时。"""
         html = get(pages, f"/account/{ALPHA}/")
-        card = scrape(html[html.index(">近 7 天调用<") : html.index(">配额</h2>")])
-        assert "12.8K 次" in card                                        # 168 × 4 × 19
-        assert "claude-opus-5 8.1K" in card and "claude-opus-4-8 4.7K" in card
+        card = scrape(html[html.index(">近 24 小时调用<") : html.index(">配额</h2>")])
+        assert "1.8K 次" in card                                         # 24 × 4 × 19
+        assert "claude-opus-5 1.2K" in card and "claude-opus-4-8 672" in card
 
     def test_alert_switches_and_ledger_facts(self, pages):
         html = get(pages, f"/account/{ALPHA}/")
@@ -496,9 +496,10 @@ class TestSummaryTab:
 
 
 # ====================================================================== 成本
-def month_days() -> int:
+def default_days() -> int:
+    """成本、预估页签默认近 7 天，不早于启用日期。"""
     today = date.today()
-    return (today - max(today.replace(day=1), RANGE_START)).days + 1
+    return (today - max(today - timedelta(days=6), RANGE_START)).days + 1
 
 
 class TestCostTab:
@@ -529,7 +530,7 @@ class TestCostTab:
     @pytest.mark.parametrize(
         "query, note",
         [
-            ("?start=abc&end=def", "开始日期格式无法识别，已使用本月 1 号。"),
+            ("?start=abc&end=def", "开始日期格式无法识别，已从 "),
             ("?start=2026-09-17&end=2026-09-01", "开始日期晚于结束日期，已自动调换。"),
             ("?start=2000-01-01", "Cost Explorer 仅保留约 14 个月历史数据"),
         ],
@@ -545,7 +546,7 @@ class TestCostTab:
 
     def test_shows_both_amount_bases(self, pages):
         """折算后（按台账比率逐格乘）和 AWS 原价都给：alpha 每天 152.5 / 150。"""
-        days = month_days()
+        days = default_days()
         tiles = scrape(re.search(r'<section class="summary summary-3">(.*?)</section>', get(pages, f"/account/{ALPHA}/cost"), re.S).group(1))
         assert f"折算后合计 ${152.5 * days:,.2f}" in tiles
         assert f"AWS 原价 ${150 * days:,.2f}" in tiles
@@ -563,7 +564,7 @@ class TestCostTab:
         legend = [scrape(n) for n in re.findall(r'<span class="legend-name">(.*?)</span>', html)]
         assert legend == ["Claude Opus 5 (Amazon Bedrock Edition)", "Claude Sonnet 5 (Amazon Bedrock Edition)"]
         table = html[html.index(">成本明细<") :]
-        assert table.count('<th class="num date-col">') == month_days()   # 每天一列
+        assert table.count('<th class="num date-col">') == default_days()  # 每天一列
         assert "chart-hit" in html and 'id="chart-data"' in html          # 面积图的悬浮
 
     def test_cost_explorer_failure_is_a_toast(self, pages, monkeypatch):
@@ -586,7 +587,7 @@ class TestCostTab:
 
 # ====================================================================== 用量
 class TestUsageTab:
-    """fake_cloudwatch：每个点每个区 Opus 5 直连 12、走推理配置的 Opus 4.8 7。默认近 7 天、每 1 小时。"""
+    """fake_cloudwatch：每个点每个区 Opus 5 直连 12、走推理配置的 Opus 4.8 7。默认近 24 小时、每 1 小时。"""
 
     def test_four_metric_cards_drive_the_main_chart(self, pages):
         html = get(pages, f"/account/{ALPHA}/usage")
@@ -596,8 +597,8 @@ class TestUsageTab:
             "invocations", "input_tokens", "output_tokens", "total_tokens",
         ]
         assert [scrape(body) for _, _, body in cards] == [
-            "调用次数 12.8K 次 0% 比前 7 天", "输入 Token 12.8K token 0% 比前 7 天",
-            "输出 Token 12.8K token 0% 比前 7 天", "总 Token 25.5K token 0% 比前 7 天",
+            "调用次数 1.8K 次 0% 比前 24 小时", "输入 Token 1.8K token 0% 比前 24 小时",
+            "输出 Token 1.8K token 0% 比前 24 小时", "总 Token 3.6K token 0% 比前 24 小时",
         ]
         assert [current for _, current, _ in cards] == ["aria-current=\"true\"", "", "", ""]
 
@@ -614,14 +615,15 @@ class TestUsageTab:
     def test_filters(self, pages, query, name, value):
         assert selected(get(pages, f"/account/{ALPHA}/usage{query}"), name) == value
 
-    @pytest.mark.parametrize("query, label", [("", "近 7 天"), ("?win=6h", "近 6 小时"), ("?win=30d", "近 30 天")])
+    @pytest.mark.parametrize("query, label", [("", "近 24 小时"), ("?win=7d", "近 7 天"), ("?win=6h", "近 6 小时"),
+                                              ("?win=30d", "近 30 天")])
     def test_time_window(self, pages, query, label):
         assert range_label(get(pages, f"/account/{ALPHA}/usage{query}")) == label
 
     def test_unreadable_times_fall_back_to_the_default_window(self, pages):
         html = get(pages, f"/account/{ALPHA}/usage?start=abc&end=def")
         assert "时间格式无法识别，已改用默认窗口。" in notes(html)
-        assert range_label(html) == "近 7 天"
+        assert range_label(html) == "近 24 小时"
 
     def test_long_window_at_fine_granularity_is_coarsened(self, pages):
         html = get(pages, f"/account/{ALPHA}/usage?win=30d&period=1m")
