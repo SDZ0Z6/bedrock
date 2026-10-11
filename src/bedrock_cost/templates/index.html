@@ -162,8 +162,8 @@
         <p class="viz-meta">日均 <strong>{{ trend.average | money }}</strong> · 最多的一天是 {{ trend.peak_label }}（{{ trend.peak_value | money }}）</p>
       </div>
       <div class="viz-chart wide-chart" id="trend-chart" data-tip-src="trend-data">{{ trend.chart.svg | safe }}</div>
-      {# 图例可以点：点一下只看这个账号，再点一下恢复 #}
-      <div class="legend-toggles" data-legend-for="trend-chart" role="group" aria-label="只看某个账号">
+      {# 图例可以点：点几个就只看这几个账号，再点一下放回去（挑了以后后面有「显示全部」） #}
+      <div class="legend-toggles" data-legend-for="trend-chart" role="group" aria-label="挑几个账号只看它们">
         {% for item in trend.chart.legend %}
           <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
                   title="{{ item.name }} {{ spend.label }} {{ item.total | money }}">

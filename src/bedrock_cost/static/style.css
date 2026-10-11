@@ -1940,15 +1940,17 @@ dialog.modal > form { display: flex; flex-direction: column; max-height: calc(10
 .bar-col { transform-box: fill-box; transform-origin: 50% 100%; transition: opacity .18s ease, transform .22s cubic-bezier(.34, 1.56, .64, 1); }
 .bar-chart.is-hovering .bar-col:not(.is-hover) { opacity: .35; }
 .bar-chart .bar-col.is-hover { transform: scale(1.5, 1.04); }
-/* 点了图例的某一项：只看这一项。别人的段子消失，这一项堆在上面的段子落到底（app.js 算好往下挪多少，写在 --drop）；
-   动画在下面 no-preference 里：先等别人消失，再越落越快地「跌」下来；回去的时候先升回原位，别人再出来 */
+/* 图例挑了几项：只看这几项。别人的段子消失，挑中的从基线起按原来的次序重新叠（app.js 算好每段往下挪多少，写在 --drop）。
+   没挑中的也挪到「挑上它该在的地方」藏着，再挑一项它就在原地出现。动画在下面 no-preference 里：先等别人消失，再越落
+   越快地「跌」下来；再挑一项时，压在它上面的马上往上让开（is-rising）；全放回来的时候先升回原位，别人再出来 */
 .bar-chart[data-focus] .chart-bars [data-s]:not(.is-focus) { opacity: 0; }
-.chart-bars [data-s].is-focus { transform: translateY(var(--drop, 0px)); }
+.bar-chart[data-focus] .chart-bars [data-s] { transform: translateY(var(--drop, 0px)); }
 @media (prefers-reduced-motion: no-preference) {
   .chart-bars [data-s] { transition: opacity .2s ease .22s, transform .32s cubic-bezier(.2, .8, .2, 1); }
   .bar-chart[data-focus] .chart-bars [data-s] { transition: opacity .18s ease, transform .42s cubic-bezier(.55, .05, .9, .4) .16s; }
+  .bar-chart[data-focus] .chart-bars [data-s].is-rising { transition: opacity .18s ease, transform .3s cubic-bezier(.2, .8, .2, 1); }
 }
-/* 竖虚线（客户页「每日消费」上的启用、风控……）：点了图例只留这一项的线，别人的藏起来；线头悬浮看详情（app.js 的 data-tip） */
+/* 竖虚线（客户页「每日消费」上的启用、风控……）：图例挑了几项时只留它们的线，别人的藏起来；线头悬浮看详情（app.js 的 data-tip） */
 .chart-marks [data-s] { transition: opacity .18s ease; }
 .bar-chart[data-focus] .chart-marks [data-s]:not(.is-focus) { opacity: 0; pointer-events: none; }
 .bubble { cursor: grab; outline: none; touch-action: none; }
@@ -2023,7 +2025,7 @@ svg.is-zoomed.is-panning { cursor: grabbing; }
   @keyframes refresh-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 }
 
-/* 图例做成可以点的签：点一下只看这一项 */
+/* 图例做成可以点的签：点几项就只看这几项，再点一下放回去 */
 .legend-toggles { display: flex; flex-wrap: wrap; gap: 6px; }
 .legend-toggle {
   display: inline-flex;
@@ -2045,6 +2047,22 @@ svg.is-zoomed.is-panning { cursor: grabbing; }
 .legend-toggle-value { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
 .legend-toggles.has-focus .legend-toggle:not([aria-pressed="true"]) { opacity: .5; }
 .legend-toggle[aria-pressed="true"] { border-color: var(--text); color: var(--text); }
+/* 挑了以后才出来（app.js 加的）：一下子全放回来 */
+.legend-reset {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.legend-reset:hover { background: var(--hover-strong); color: var(--text); }
+.legend-reset[hidden] { display: none; }
 
 /* ------------------------------------------------------- 账号卡片：整张可点
  * 卡片里只有一个链接，它的 ::after 盖住整张卡片，所以点哪里都是进这个账号 */

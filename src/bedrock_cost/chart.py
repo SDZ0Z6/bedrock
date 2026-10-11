@@ -996,7 +996,7 @@ class BarMark:
 
     index: int
     label: str
-    series: str = ""      # 属于哪条序列：点图例只看这一项时只留它的线。对不上的（这段时间没消费）不跟图例走
+    series: str = ""      # 属于哪条序列：图例挑了几项时只留它们的线。对不上的（这段时间没消费）不跟图例走
     color: str = ""       # 线的颜色，空着按序列的颜色，再没有就是灰
     face: object = None   # 头像（text / css / emoji），没有就画一个色点
     tip: str = ""
@@ -1082,9 +1082,9 @@ def render_bars(
     时候——比如「AWS 原价在下、毛利在上，整根是收入」，不能因为毛利比原价多就颠倒过来。fmt 把数值写成悬浮提示里的样子（金额或次数），axis 是纵轴刻度
     的写法（要短，金额用 compact_money），两个默认都是紧凑数字。
     交互和动效：进场时一根根长出来；鼠标划到哪一格，那一格亮、其余变淡，提示里列出
-    这一格的全部序列；点图例里的某一项，只亮这一项（再点一次恢复）。脚本在 app.js，
+    这一格的全部序列；点图例挑几项就只看这几项（再点一次放回去）。脚本在 app.js，
     动画在 CSS 里，系统开了「减弱动画」就不动。
-    marks 是竖虚线（BarMark）：线头排在绘图区上面，图跟着高出几排；点图例只看某一项时，别人的线藏起来。
+    marks 是竖虚线（BarMark）：线头排在绘图区上面，图跟着高出几排；图例挑了几项时，别人的线藏起来。
     """
     fmt = fmt or compact_number
     axis = axis or compact_number
@@ -1118,7 +1118,7 @@ def render_bars(
     ticks = max(1, math.ceil((max(totals) or 1.0) / step - 1e-9))
     scale = plot_h / (step * ticks)
 
-    # data-base 是基线的纵坐标：点图例只看一项时，这一项的段子从这里往下「跌」到底（app.js）
+    # data-base 是基线的纵坐标：图例挑了几项时，这几项的段子从这里起重新叠起来（app.js）
     parts = [
         f'<svg class="chart-svg bar-chart" viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
         f'{_zoom_attrs(pad_l, width - pad_r, count, band, 44.0)} data-base="{plot_bottom:.2f}" '
@@ -1181,12 +1181,13 @@ def render_bars(
         )
     parts.append("</g></svg>")
 
+    # 每行的 v 是没写成字的数：图例挑了几项时，提示里的合计只加这几项（app.js）
     tooltip = [
         {
             "label": labels[i],
             "total": fmt(totals[i]),
             "rows": [
-                {"name": s.name, "color": _colour(s), "value": fmt(s.values[i]), "s": k}
+                {"name": s.name, "color": _colour(s), "value": fmt(s.values[i]), "v": round(s.values[i], 4), "s": k}
                 for k, s in sorted(enumerate(live), key=lambda pair: -pair[1].values[i])
                 if s.values[i] > 0
             ],

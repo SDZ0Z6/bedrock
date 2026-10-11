@@ -79,7 +79,7 @@
             <span class="legend-value">{{ series.total_marked | money }}</span>
           </span>
         {% endfor %}
-        {% if report.folded_count %}<span class="legend-note">另有 {{ report.folded_count }} 项已折叠进「其他」</span>{% endif %}
+        {% if report.folded_count %}<span class="legend-note">另有 {{ report.folded_count }} 项并在「其他」里，下面的成本明细逐项列出</span>{% endif %}
       </div>
     {% endif %}
     {# 不用横向滚动时（画布没超过卡片宽）跟着卡片缩放；桶太多时画布变宽、横向滚动 #}
@@ -91,7 +91,7 @@
     <div class="card-head">
       <div class="card-title">
         <h2>成本明细</h2>
-        <span class="card-note">按{{ report.dimension_label }} · {{ report.series | length }} 项 · 日期列是折算后金额</span>
+        <span class="card-note">按{{ report.dimension_label }} · {{ report.details | length }} 项 · 日期列是折算后金额</span>
       </div>
     </div>
     <div class="table-scroll">
@@ -106,7 +106,8 @@
           </tr>
         </thead>
         <tbody>
-          {% for series in report.series %}
+          {# 逐项列全：图上并进「其他」的那几项这里一项项拆开（灰色块，图上它们就在那条灰的里） #}
+          {% for series in report.details %}
             <tr>
               <td class="sticky-col"><i class="swatch" style="background: {{ series_color(series.slot) }}"></i>{{ series.name }}</td>
               <td class="num tone-muted">{{ series.total_raw | money }}</td>
@@ -122,7 +123,7 @@
             <tr><td colspan="4" class="empty">所选区间没有消费数据。</td></tr>
           {% endfor %}
         </tbody>
-        {% if report.series %}
+        {% if report.details %}
           <tfoot>
             <tr>
               <td class="sticky-col">合计</td>

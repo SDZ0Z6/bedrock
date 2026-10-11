@@ -16,6 +16,9 @@
 再一轮：
 - 所有进度条滚进屏幕才从左往右长出来（每根条上都有 data-reveal，app.js 加 .in 之前动画停在第一帧）；
 - 概览、客户列表、客户页、账号页摘要的图都叫「每日消费」，右上角一排：近 7 天、近 30 天（默认）、近 90 天、全部。
+
+再一轮：图例能挑几个账号（点一个加一个，再点放回去，挑了以后有「显示全部」），挑中的从底下重新叠起来。
+账号页成本明细不并「其他」（在 test_account_pages、test_usage_explorer 里）。
 """
 
 from __future__ import annotations
@@ -322,17 +325,35 @@ def test_账号页每日消费_图外的事不用查每天的消费(admin, fake_
     assert summary_marks(html) == []
 
 
-# ====================================================================== 点图例：别人消失，它跌到底
-def test_柱状图写着基线_点图例时跌到底():
+# ====================================================================== 点图例：挑几项只看这几项，从基线起重新叠
+def test_柱状图写着基线_图例能挑几项():
+    """点一项加一项，再点一下放回去，挑了以后后面有「显示全部」。别人的段子消失，挑中的从基线（data-base）起按原来的
+    次序重新叠：每段往下挪「它下面没挑中的那几段」有多高；没挑中的也挪到「挑上它该在的地方」藏着，所以再挑一项它
+    就在原地出现，压在它上面的马上往上让开（is-rising）。提示里只列挑中的，两项以上写它们的合计（每行带着 v）。"""
     series = [SimpleNamespace(name="kite", slot=0, values=[1.0, 2.0]), SimpleNamespace(name="kumo", slot=1, values=[3.0, 1.0])]
     svg = chart.render_bars(["10-01", "10-02"], series, width=300, height=150).svg
     assert re.search(r'<svg class="chart-svg bar-chart"[^>]* data-base="([\d.]+)"', svg).group(1) == f"{150 - 26.0:.2f}"
     js = (STATIC / "app.js").read_text(encoding="utf-8")
-    assert "svg.dataset.base" in js and "seg.style.setProperty('--drop'" in js
-    assert "'合计 ' + item.total : rows.length ? '' : '这天没有'" in js          # 只看一项时不写全部的合计
+    assert "const picked = new Set();" in js and "if (picked.has(index)) picked.delete(index); else picked.add(index);" in js
+    assert "reset.textContent = '显示全部';" in js and "reset.hidden = picked.size === 0;" in js
+    assert "let below = base - bottoms[0][0];" in js and "seg.style.setProperty('--drop', below.toFixed(2) + 'px');" in js
+    assert "below += i + 1 < segs.length ? bottoms[i][0] - bottoms[i + 1][0] : bottoms[i][1];" in js
+    assert "seg.classList.toggle('is-rising', below < was - 0.01);" in js
+    # 没挑：全部的合计；挑了一项：不写合计；两项以上：只加挑中的
+    assert "const head = !picked.size ? '合计 ' + item.total : sum ? '合计 ' + sum : rows.length ? '' : '这天没有';" in js
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     assert ".bar-chart[data-focus] .chart-bars [data-s]:not(.is-focus) { opacity: 0; }" in css
-    assert ".chart-bars [data-s].is-focus { transform: translateY(var(--drop, 0px)); }" in css
+    assert ".bar-chart[data-focus] .chart-bars [data-s] { transform: translateY(var(--drop, 0px)); }" in css
+    assert ".bar-chart[data-focus] .chart-bars [data-s].is-rising { transition: opacity .18s ease, transform .3s" in css
+    assert ".legend-reset[hidden] { display: none; }" in css
+
+
+def test_图例能挑几项_四张图都是():
+    """概览、客户页（按账号）、客户列表（按客户）、收入和毛利（按项）的图例是同一套：签上没有写死「只看一个」。"""
+    for name, label in (("index.html", "挑几个账号只看它们"), ("customer.html", "挑几个账号只看它们"),
+                        ("customers.html", "挑几个客户只看它们"), ("ops.html", "挑几项只看它们")):
+        html = (STATIC.parent / "templates" / name).read_text(encoding="utf-8")
+        assert re.search(rf'<div class="legend-toggles" data-legend-for="[^"]+" role="group" aria-label="{label}">', html), name
 
 
 def test_进度条是长出来的_不是到一半才蹦出来():

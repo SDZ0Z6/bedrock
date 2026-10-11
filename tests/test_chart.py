@@ -897,7 +897,7 @@ class TestBars:
         assert widths and all(w <= chart.BAR_MAX_W + 0.01 for w in widths)
 
     def test_tooltip_shape(self):
-        """app.js 读的形状：每格一项，提示里列出这一格的全部序列，大的在上。"""
+        """app.js 读的形状：每格一项，提示里列出这一格的全部序列，大的在上。v 是没写成字的数（图例挑了几项时加合计用）。"""
         rendered = chart.render_bars(
             ["08-01", "08-02"],
             [bar("small", [1.0, 2.0], slot=0), bar("big", [5.0, 0.0], slot=1)],
@@ -905,11 +905,11 @@ class TestBars:
         )
         assert rendered.tooltip == [
             {"label": "08-01", "total": "$6.00", "rows": [
-                {"name": "big", "color": chart.color_for(1), "value": "$5.00", "s": 0},
-                {"name": "small", "color": chart.color_for(0), "value": "$1.00", "s": 1},
+                {"name": "big", "color": chart.color_for(1), "value": "$5.00", "v": 5.0, "s": 0},
+                {"name": "small", "color": chart.color_for(0), "value": "$1.00", "v": 1.0, "s": 1},
             ]},
             {"label": "08-02", "total": "$2.00", "rows": [
-                {"name": "small", "color": chart.color_for(0), "value": "$2.00", "s": 1},
+                {"name": "small", "color": chart.color_for(0), "value": "$2.00", "v": 2.0, "s": 1},
             ]},
         ]
 

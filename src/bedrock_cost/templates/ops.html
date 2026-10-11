@@ -104,7 +104,7 @@
             毛利率 <strong>{{ trend.rate | pct }}</strong></p>
         </div>
         <div class="viz-chart" id="ops-trend" data-tip-src="ops-trend-data">{{ trend.chart.svg | safe }}</div>
-        <div class="legend-toggles" data-legend-for="ops-trend" role="group" aria-label="只看某一项">
+        <div class="legend-toggles" data-legend-for="ops-trend" role="group" aria-label="挑几项只看它们">
           {% for item in trend.chart.legend %}
             <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
                     title="{{ item.name }} 近 {{ trend.months }} 个月 {{ item.total | money }}">
