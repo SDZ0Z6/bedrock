@@ -78,6 +78,9 @@ class UsageReport:
     currency: str = "USD"
     any_cached: bool = False
     folded_count: int = 0  # 被折叠进「其他」的序列数
+    # 逐项列全的序列（账号页「成本明细」那张表用）：series 里并进「其他」的也一项项拆开，按金额排，
+    # 拆出来的用「其他」的灰色块——图上它们就在那条灰的里
+    details: list[Series] = field(default_factory=list)
 
     @property
     def dimension_label(self) -> str:
@@ -420,13 +423,17 @@ def build_usage(
             )
         )
 
+    report.details = list(report.series)
     if folded:
         raw_total = [0.0] * width
         marked_total = [0.0] * width
-        for _, cells in folded:
+        for name, cells in folded:
             for position, (raw, marked) in enumerate(cells):
                 raw_total[position] += raw
                 marked_total[position] += marked
+            report.details.append(
+                Series(name=name, raw=[cell[0] for cell in cells], marked=[cell[1] for cell in cells], slot=-1)
+            )
         report.series.append(
             Series(name=OTHER_LABEL, raw=raw_total, marked=marked_total, slot=-1)
         )

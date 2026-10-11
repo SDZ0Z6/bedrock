@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from bedrock_cost import cloudwatch_metrics, config, cost_estimate, excel_source, pricing, quotas, usage_explorer
+from bedrock_cost import chart, cloudwatch_metrics, config, cost_estimate, excel_source, pricing, quotas, usage_explorer
 from bedrock_cost.aws_errors import QueryError
 from bedrock_cost.dates import earliest_queryable
 
@@ -566,6 +566,28 @@ class TestCostTab:
         table = html[html.index(">成本明细<") :]
         assert table.count('<th class="num date-col">') == default_days()  # 每天一列
         assert "chart-hit" in html and 'id="chart-data"' in html          # 面积图的悬浮
+
+    def test_detail_table_lists_every_item(self, pages, monkeypatch):
+        """图最多 8 种颜色，多出来的并成灰的「其他」；成本明细不并：一项项列全，没有「其他」这一行，
+        拆出来的几项用「其他」的灰色块（图上它们就在那条灰的里）。合计照旧。"""
+        def many(account, start, end, dimension, granularity, dates, refresh):
+            return {f"svc-{i:02d}": [[float(20 - i), float(20 - i)] for _ in dates] for i in range(12)}, "USD", False, None
+
+        monkeypatch.setattr(usage_explorer, "_fetch_account", many)
+        html = get(pages, f"/account/{ALPHA}/cost")
+        legend = [scrape(n) for n in re.findall(r'<span class="legend-name">(.*?)</span>', html)]
+        assert legend == [f"svc-{i:02d}" for i in range(8)] + ["其他"]
+        assert "另有 4 项并在「其他」里，下面的成本明细逐项列出" in scrape(html)
+        table = html[html.index(">成本明细<") :]
+        rows = re.findall(r'<td class="sticky-col"><i class="swatch" style="background: ([^"]+)"></i>(.*?)</td>', table)
+        assert [name for _, name in rows] == [f"svc-{i:02d}" for i in range(12)]
+        colours = [colour for colour, _ in rows]
+        assert colours[8:] == [chart.OTHER_COLOR] * 4 and chart.OTHER_COLOR not in colours[:8]
+        assert "按服务 · 12 项" in scrape(table)
+        days = default_days()
+        total = sum(20 - i for i in range(12)) * days
+        assert re.search(r'<tfoot>\s*<tr>\s*<td class="sticky-col">合计</td>\s*<td class="num">\$([\d,.]+)</td>', table).group(1) \
+            == f"{total:,.2f}"
 
     def test_cost_explorer_failure_is_a_toast(self, pages, monkeypatch):
         fail_daily(monkeypatch, {ALPHA})

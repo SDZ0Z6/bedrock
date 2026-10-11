@@ -303,6 +303,16 @@
   }
   function hideTip() { if (tip) tip.hidden = true; }
 
+  // 照着 sample 的样子写一个数：'$1,234.56' 是前缀 + 千分位 + 两位小数（服务端 money 的写法）。
+  // 认不出的样子（比如 1.2K）不硬写，给空的
+  function writeLike(sample, value) {
+    const parts = /^-?([^\d-]*)[\d,]+(?:\.(\d+))?$/.exec(sample);
+    if (!parts) return '';
+    const digits = parts[2] ? parts[2].length : 0;
+    return (value < 0 ? '-' : '') + parts[1] +
+      Math.abs(value).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  }
+
   function fillTip(head, total, rows, foot) {
     const box = tipBox();
     box.replaceChildren();
@@ -463,14 +473,14 @@
     });
   }
 
-  // ---- 堆叠柱状图：划到哪一格那一格亮、其余变淡；点图例只看那一项
+  // ---- 堆叠柱状图：划到哪一格那一格亮、其余变淡；点图例挑几项，只看这几项
   for (const holder of document.querySelectorAll('[data-tip-src]')) {
     const source = document.getElementById(holder.dataset.tipSrc);
     const svg = holder.querySelector('.bar-chart');
     if (!source || !svg) continue;
     const data = JSON.parse(source.textContent);
     const columns = [...svg.querySelectorAll('.bar-col')];
-    let focus = null;   // 图例选中的那一项（序号），null = 全看
+    const picked = new Set();   // 图例里挑中的那几项（序号），空的 = 全看
 
     const leave = function () {
       svg.classList.remove('is-hovering');
@@ -484,9 +494,11 @@
         if (!item) return;
         svg.classList.add('is-hovering');
         columns.forEach(function (col, i) { col.classList.toggle('is-hover', i === index); });
-        // 只看一项的时候只列这一项，不写全部的合计（图上已经只剩它了）
-        const rows = focus === null ? item.rows : item.rows.filter(function (r) { return r.s === focus; });
-        fillTip(item.label, focus === null ? '合计 ' + item.total : rows.length ? '' : '这天没有', rows);
+        // 挑了几项的时候只列这几项，合计也只加这几项；只剩一行就不写合计（图上已经只剩它了）
+        const rows = picked.size ? item.rows.filter(function (r) { return picked.has(r.s); }) : item.rows;
+        const sum = rows.length > 1 ? writeLike(item.total, rows.reduce(function (t, r) { return t + (r.v || 0); }, 0)) : '';
+        const head = !picked.size ? '合计 ' + item.total : sum ? '合计 ' + sum : rows.length ? '' : '这天没有';
+        fillTip(item.label, head, rows);
         placeTip((columns[index] || hit).getBoundingClientRect());
       };
       hit.addEventListener('mouseenter', show);
@@ -498,29 +510,60 @@
     const legend = document.querySelector('[data-legend-for="' + holder.id + '"]');
     if (!legend) continue;
     const toggles = [...legend.querySelectorAll('.legend-toggle')];
-    legend.addEventListener('click', function (event) {
-      const button = event.target.closest('.legend-toggle');
-      if (!button) return;
-      const index = Number(button.dataset.s);
-      focus = focus === index ? null : index;
-      for (const t of toggles) t.setAttribute('aria-pressed', String(Number(t.dataset.s) === focus));
-      legend.classList.toggle('has-focus', focus !== null);
-      if (focus === null) {
+    // 挑了以后才出来：一下子全放回来，不用一个个点掉
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'legend-reset';
+    reset.textContent = '显示全部';
+    reset.hidden = true;
+    legend.append(reset);
+    const base = Number(svg.dataset.base);
+
+    const apply = function () {
+      for (const t of toggles) t.setAttribute('aria-pressed', String(picked.has(Number(t.dataset.s))));
+      legend.classList.toggle('has-focus', picked.size > 0);
+      reset.hidden = picked.size === 0;
+      for (const el of svg.querySelectorAll('[data-s]')) el.classList.toggle('is-focus', picked.has(Number(el.dataset.s)));
+      if (!picked.size) {
         delete svg.dataset.focus;
-      } else {
-        svg.dataset.focus = String(focus);
-      }
-      // 只看一项：别人的段子消失，这一项堆在上面的段子「跌」到底（style.css 按 --drop 往下挪，先等别人消失）。
-      // 往下挪多少 = 基线（data-base）减去这一段的底边，纵坐标放大、拖动都不变
-      const base = Number(svg.dataset.base);
-      for (const seg of svg.querySelectorAll('[data-s]')) {
-        const on = Number(seg.dataset.s) === focus;
-        if (on && base && seg.closest('.chart-bars')) {
-          const box = seg.getBBox();
-          seg.style.setProperty('--drop', Math.max(0, base - box.y - box.height).toFixed(2) + 'px');
+        for (const seg of svg.querySelectorAll('.chart-bars [data-s]')) {
+          seg.style.removeProperty('--drop');
+          seg.classList.remove('is-rising');
         }
-        seg.classList.toggle('is-focus', on);
+        return;
       }
+      svg.dataset.focus = [...picked].join(' ');
+      if (!base) return;
+      // 挑中的几项从基线起按原来的次序重新叠：每一段往下挪「它下面没挑中的那几段」有多高（style.css 按 --drop 挪，
+      // 先等别人消失再落）。没挑中的也挪到「挑上它该在的地方」再藏着，所以再挑一项，它就在原地出现，压在它上面的
+      // 往上让开（is-rising：不等，马上让）。段的位置用 getBBox 量：不含 --drop 本身，纵坐标放大、拖动都不变
+      for (const col of columns) {
+        const segs = [...col.querySelectorAll('[data-s]')];
+        if (!segs.length) continue;
+        const bottoms = segs.map(function (seg) { const box = seg.getBBox(); return [box.y + box.height, box.height]; });
+        let below = base - bottoms[0][0];   // 太薄没画出来的段也占着地方
+        segs.forEach(function (seg, i) {
+          const was = parseFloat(seg.style.getPropertyValue('--drop')) || 0;
+          seg.style.setProperty('--drop', below.toFixed(2) + 'px');
+          seg.classList.toggle('is-rising', below < was - 0.01);
+          if (picked.has(Number(seg.dataset.s))) return;
+          // 这一段占的高度：到上面那一段的底边（含段和段之间的缝），最上面那段就是它自己的高
+          below += i + 1 < segs.length ? bottoms[i][0] - bottoms[i + 1][0] : bottoms[i][1];
+        });
+      }
+    };
+    legend.addEventListener('click', function (event) {
+      if (event.target.closest('.legend-reset')) {
+        picked.clear();
+        // 用键盘按的：按钮马上藏起来，焦点交给第一个签，不丢到页面开头
+        if (document.activeElement === reset && toggles[0]) toggles[0].focus();
+      } else {
+        const button = event.target.closest('.legend-toggle');
+        if (!button) return;
+        const index = Number(button.dataset.s);
+        if (picked.has(index)) picked.delete(index); else picked.add(index);
+      }
+      apply();
     });
   }
 

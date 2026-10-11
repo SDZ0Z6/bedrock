@@ -54,7 +54,7 @@
         <p class="viz-meta">日均 <strong>{{ trend.average | money }}</strong></p>
       </div>
       <div class="viz-chart" id="cust-trend" data-tip-src="cust-trend-data">{{ trend.chart.svg | safe }}</div>
-      <div class="legend-toggles" data-legend-for="cust-trend" role="group" aria-label="只看某个客户">
+      <div class="legend-toggles" data-legend-for="cust-trend" role="group" aria-label="挑几个客户只看它们">
         {% for item in trend.chart.legend %}
           <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
                   title="{{ item.name }} {{ trend.label }} {{ item.total | money }}">

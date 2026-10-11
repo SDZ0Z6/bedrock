@@ -134,6 +134,15 @@ class TestBuildUsage:
         assert round(sum(s.total_marked for s in usage.series), 4) == round(
             sum(20 - i for i in range(14)) * len(usage.dates), 4
         )
+        # 成本明细逐项列全：前 8 项就是图上那 8 条，后面拆开的用「其他」的灰，没有「其他」这一项
+        assert [s.name for s in usage.details] == [f"svc-{i:02d}" for i in range(14)]
+        assert usage.details[:MAX_SERIES] == usage.series[:MAX_SERIES]
+        assert {s.slot for s in usage.details[MAX_SERIES:]} == {-1}
+        assert round(sum(s.total_marked for s in usage.details), 4) == round(usage.total_marked, 4)
+
+    def test_details_are_the_series_when_nothing_is_folded(self, ledger, fake_costs, accounts):
+        usage = build_usage(accounts, START, END, "service", "daily")
+        assert usage.folded_count == 0 and usage.details == usage.series
 
     def test_series_sorted_by_amount_descending(self, ledger, fake_costs, accounts):
         usage = build_usage(accounts, START, END, "service", "daily")

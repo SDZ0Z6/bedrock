@@ -215,7 +215,7 @@
   </article>
 
   {# 每日消费：竖虚线是每个账号的启用、风控、换下、用完、结算、恢复（停的那条写着从启用起用了多少，悬浮看全）。
-     右上角选看多久；点下面的账号只看它，连同它的竖线 #}
+     右上角选看多久；点下面的账号挑几个只看它们，连同它们的竖线 #}
   <article class="viz-card col-6" id="spend" data-reveal>
     <div class="viz-head">
       <div>
@@ -226,7 +226,7 @@
     </div>
     <p class="viz-big"><span data-countup>{{ trend.total | money0 }}</span> <small>{{ trend.label }}</small></p>
     <div class="viz-chart wide-chart" id="cust-spend" data-tip-src="cust-spend-data">{{ trend.chart.svg | safe }}</div>
-    <div class="legend-toggles" data-legend-for="cust-spend" role="group" aria-label="只看某个账号">
+    <div class="legend-toggles" data-legend-for="cust-spend" role="group" aria-label="挑几个账号只看它们">
       {% for item in trend.chart.legend %}
         <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
                 title="{{ item.name }} {{ trend.label }} {{ item.total | money }}">
