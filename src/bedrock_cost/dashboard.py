@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 from . import chart, config, usage_explorer
+from .dates import earliest_queryable
 from .excel_source import Account, LifecycleTag
 from .filters import money
 
@@ -185,15 +187,40 @@ def state_counts(rows) -> list[SimpleNamespace]:
     return out
 
 
-def near_limit(rows, limit: int = 3) -> list:
-    """使用率最高的几个（有额度、查到了数的）。"""
-    ranked = [row for row in rows if row.has_numbers and row.usage_pct is not None]
-    return sorted(ranked, key=lambda row: -row.usage_pct)[:limit]
+def _by_usage(row) -> float:
+    """档里的先后：使用率高的在前，查不到消费的放最后。"""
+    return -(row.usage_pct or 0.0) if row.has_numbers else 1.0
+
+
+def lifecycle_rows(rows, tags: list[LifecycleTag]) -> list[SimpleNamespace]:
+    """概览「额度使用」：按生命周期一档一根横条（风控、正常……，和客户页「账号」那张一个样子），后面是这一档的账号头像。
+    和下面「生命周期」那排筛选签一个算法：打了几个标签就在几档里（风控又结算的两档都有），清单里没人用的也列出来
+    （灰的），没打标签的有才列「未标记」。档里使用率高的在前。"""
+    out = [SimpleNamespace(name=item.name, color=item.color, count=item.count,
+                           rows=sorted((row for row in rows if item.name in row.lifecycle), key=_by_usage))
+           for item in lifecycle_counts(rows, tags)]
+    bare = sorted((row for row in rows if not row.lifecycle), key=_by_usage)
+    if bare:
+        out.append(SimpleNamespace(name="未标记", color=chart.TONE_COLORS["none"], count=len(bare), rows=bare))
+    return out
+
+
+def top_spenders(rows, slots: dict[str, int]) -> list[SimpleNamespace]:
+    """概览「Top 账号」：查到了数的账号按累计消费从多到少，全部列出来（页面上默认只亮前 5 个，点「全部」看剩下的）。
+    share 是占全部累计消费的百分比，width 是横条长短（第一名是满的），color 和「消费构成」「每日消费」里的
+    同一个账号一个颜色（其余是灰）。"""
+    ranked = sorted((row for row in rows if row.has_numbers), key=lambda row: -row.total_cost)
+    total = sum(max(row.total_cost, 0.0) for row in ranked)
+    first = max(ranked[0].total_cost, 0.0) if ranked else 0.0
+    return [SimpleNamespace(row=row, share=max(row.total_cost, 0.0) / total * 100 if total else 0.0,
+                            width=max(row.total_cost, 0.0) / first * 100 if first else 0.0,
+                            color=chart.color_for(slots.get(row.label, -1)))
+            for row in ranked]
 
 
 # ---------------------------------------------------------------- 按账号的颜色
 def account_slots(rows) -> dict[str, int]:
-    """消费最多的 8 个账号各占一个色槽，其余并进「其他」（灰）。概览的「近 30 天成本」和
+    """消费最多的 8 个账号各占一个色槽，其余并进「其他」（灰）。概览的「每日消费」和
     「消费构成」用同一份，同一个账号在两张图里是同一个颜色。"""
     ranked = sorted((row for row in rows if row.has_numbers and row.total_cost > 0), key=lambda r: -r.total_cost)
     top = [row.label for row in ranked[: usage_explorer.MAX_SERIES]]
@@ -219,7 +246,24 @@ def spend_share(rows, slots: dict[str, int]) -> SimpleNamespace:
     )
 
 
-# ---------------------------------------------------------------- 近 N 天成本（按账号）
+# ---------------------------------------------------------------- 每日消费看多久
+# 概览、客户列表、客户页、账号页摘要的「每日消费」右上角都是这一排，网址上是 ?spend=
+SPEND_RANGES = (("7", "近 7 天"), ("30", "近 30 天"), ("90", "近 90 天"), ("all", "全部"))
+
+
+def spend_range(picked: str | None, today: date, first: date | None) -> SimpleNamespace:
+    """「每日消费」看多久：key（7 / 30 / 90 / all，认不出是 30）、days、start、label（写在大数字旁边）。
+    「全部」从 first（最早启用、分过来的那天）起，不早于 Cost Explorer 能查的最早一天；没有 first 就和近 30 天一样长。"""
+    key = picked if picked in dict(SPEND_RANGES) else "30"
+    if key == "all":
+        start = min(max(first or today - timedelta(days=29), earliest_queryable(today)), today)
+        return SimpleNamespace(key=key, days=(today - start).days + 1, start=start,
+                               label=start.strftime("%m-%d") + " 起全部")
+    days = int(key)
+    return SimpleNamespace(key=key, days=days, start=today - timedelta(days=days - 1), label=dict(SPEND_RANGES)[key])
+
+
+# ---------------------------------------------------------------- 每日消费（近 N 天，按账号）
 # Cost Explorer 每次请求收 0.01 美元，一天也只更新几次，所以这张图单独缓存 2 小时
 TREND_TTL = 2 * 3600
 _trend_lock = threading.Lock()
@@ -247,13 +291,16 @@ def daily_cost(accounts: list[Account], start: date, end: date, refresh: bool = 
 
 
 def money_axis(value: float) -> str:
-    """柱状图纵轴上的金额：一千以下写整数（$750），以上用紧凑写法（$1.2K）。"""
-    return f"{config.CURRENCY_SYMBOL}{value:,.0f}" if value < 1000 else chart.compact_money(value, config.CURRENCY_SYMBOL)
+    """柱状图纵轴上的金额：一千以下写整数（$750），以上用紧凑写法（$1.5K、$100K、$2M），整的不写 .0，
+    和客户页的一样。「$100.0K」七个字在纵轴那一栏里放不下，头一个字会被切掉。"""
+    if value < 1000:
+        return f"{config.CURRENCY_SYMBOL}{value:,.0f}"
+    return re.sub(r"\.0+(?=[KMB]$)", "", chart.compact_money(value, config.CURRENCY_SYMBOL))
 
 
 def cost_trend(accounts: list[Account], today: date, slots: dict[str, int], days: int = 30,
-               refresh: bool = False) -> SimpleNamespace:
-    """概览的「近 30 天成本」：每天一根柱，按账号堆叠，账号用邮箱前缀显示。"""
+               refresh: bool = False, width: int = 560) -> SimpleNamespace:
+    """概览的「每日消费」（近 30 天）：每天一根柱，按账号堆叠，账号用邮箱前缀显示。width 是图的宽（整行宽的卡片画宽一点）。"""
     start = today - timedelta(days=days - 1)
     report = daily_cost(accounts, start, today, refresh)
     label_of = {f"{a.partner} / {a.account}": a.label for a in accounts}
@@ -271,7 +318,7 @@ def cost_trend(accounts: list[Account], today: date, slots: dict[str, int], days
             other = [x + y for x, y in zip(other, values)]
     if any(other):
         series_list.append(SimpleNamespace(name=usage_explorer.OTHER_LABEL, slot=-1, values=other))
-    bars = chart.render_bars(report.labels, series_list, height=230, fmt=money, axis=money_axis)
+    bars = chart.render_bars(report.labels, series_list, width=width, height=230, fmt=money, axis=money_axis)
     totals = [sum(s.values[i] for s in series_list) for i in range(len(report.labels))]
     peak = max(range(len(totals)), key=totals.__getitem__) if totals else -1
     return SimpleNamespace(
@@ -283,13 +330,14 @@ def cost_trend(accounts: list[Account], today: date, slots: dict[str, int], days
     )
 
 
-def single_cost_trend(account: Account, today: date, days: int = 30, refresh: bool = False) -> SimpleNamespace:
-    """账号页摘要的「近 30 天成本」：一个账号，单色柱子（陶土色）。"""
+def single_cost_trend(account: Account, today: date, days: int = 30, refresh: bool = False,
+                      marks: list[chart.BarMark] | None = None) -> SimpleNamespace:
+    """账号页摘要的「每日消费」（近 30 天）：一个账号，单色柱子（陶土色）；marks 是竖虚线（启用、风控……）。"""
     start = today - timedelta(days=days - 1)
     report = daily_cost([account], start, today, refresh)
     values = report.column_totals
     series = [SimpleNamespace(name="成本", slot=0, color="#d97757", values=values)]
-    bars = chart.render_bars(report.labels, series, height=210, fmt=money, axis=money_axis)
+    bars = chart.render_bars(report.labels, series, height=210, fmt=money, axis=money_axis, marks=marks)
     peak = max(range(len(values)), key=values.__getitem__) if values else -1
     return SimpleNamespace(
         days=days, start=report.labels[0] if report.labels else "", end=report.labels[-1] if report.labels else "",

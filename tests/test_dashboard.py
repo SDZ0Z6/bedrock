@@ -1,5 +1,5 @@
 """概览、账号页、运营看板共用的拼装（dashboard.py）：报错弹窗、概览卡片、筛选签上的计数、
-按账号的颜色、消费构成、近 30 天成本。只拼装不碰 Flask，所以这里全用假数据直接调。"""
+按账号的颜色、消费构成、每日消费（近 30 天）。只拼装不碰 Flask，所以这里全用假数据直接调。"""
 
 from __future__ import annotations
 
@@ -302,12 +302,31 @@ class TestFilterCounts:
         assert counts == [("active", "活跃", 2), ("stopped", "已中断", 1), ("error", "异常", 2)]   # 无调用没人，不列
         assert sum(count for *_, count in counts) == len(rows)          # 一个账号只落在一个状态里
 
-    def test_near_limit(self):
-        rows = [SimpleNamespace(label=name, has_numbers=ok, usage_pct=used)
-                for name, ok, used in [("a", True, 50.0), ("b", True, 99.0), ("c", False, 120.0),
-                                       ("d", True, None), ("e", True, 70.0), ("f", True, 10.0)]]
-        assert [row.label for row in dashboard.near_limit(rows)] == ["b", "e", "a"]
-        assert [row.label for row in dashboard.near_limit(rows, limit=1)] == ["b"]
+    def test_lifecycle_rows(self):
+        """概览「额度使用」：按生命周期一档一根横条，和筛选签一个算法——两个标签的两档都有，清单里没人用的也列出来，
+        清单外的老标签灰色，没打标签的有才列「未标记」。档里使用率高的在前，查不到消费的放最后。"""
+        rows = [SimpleNamespace(label=name, lifecycle=tags, has_numbers=ok, usage_pct=used)
+                for name, tags, ok, used in [("a", ("正常",), True, 50.0), ("b", ("风控", "结算"), True, 99.0),
+                                             ("c", ("风控",), False, None), ("d", ("正常",), True, 80.0),
+                                             ("e", ("老标签",), True, 1.0), ("f", (), True, 5.0)]]
+        lines = dashboard.lifecycle_rows(rows, TAGS)
+        assert [(line.name, line.color, line.count, [r.label for r in line.rows]) for line in lines] == [
+            ("正常", "#2c7652", 2, ["d", "a"]), ("结算", "#87867f", 1, ["b"]), ("风控", "#bc3b2e", 2, ["b", "c"]),
+            ("老标签", chart.TONE_COLORS["none"], 1, ["e"]), ("未标记", chart.TONE_COLORS["none"], 1, ["f"]),
+        ]
+        assert [line.name for line in dashboard.lifecycle_rows(rows[:1], TAGS)] == ["正常", "结算", "风控"]
+
+    def test_top_spenders(self):
+        """概览「Top 账号」：查到了数的全部按累计消费排（页面上默认只亮前 5 个）；占比按全部，横条按第一名，颜色跟着色槽。"""
+        rows = [SimpleNamespace(label=name, has_numbers=ok, total_cost=cost)
+                for name, ok, cost in [("a", True, 300.0), ("b", True, 600.0), ("c", False, 900.0),
+                                       ("d", True, 0.0), ("e", True, 100.0)]]
+        top = dashboard.top_spenders(rows, {"b": 0})
+        assert [(t.row.label, round(t.share), round(t.width)) for t in top] == [
+            ("b", 60, 100), ("a", 30, 50), ("e", 10, 17), ("d", 0, 0)]               # c 查不到消费，不列
+        assert top[0].color == chart.color_for(0) and top[1].color == chart.color_for(-1)
+        assert dashboard.top_spenders([], {}) == []
+        assert [t.share for t in dashboard.top_spenders(rows[3:4], {})] == [0.0]      # 全是 0 也不除以 0
 
 
 def spender(label: str, cost: float, ok: bool = True) -> SimpleNamespace:
@@ -342,7 +361,7 @@ class TestAccountColours:
         assert "没有数据" in share.svg
 
 
-# ---------------------------------------------------------------- 近 30 天成本
+# ---------------------------------------------------------------- 每日消费（近 30 天）
 class FakeCE:
     """usage_explorer._fetch_account 的替身：每个账号每天的 (原价, 折算后)，按「上游 / 账号」出一条。"""
 
@@ -425,7 +444,7 @@ class TestCostTrend:
         trend = dashboard.cost_trend([ALPHA], TODAY, usage_explorer.assign_slots(["alpha"]))
         assert trend.chart.tooltip[0]["total"] == "$1,000.00"
         ticks = re.findall(r">([^<]+)</text>", trend.chart.svg[trend.chart.svg.index("chart-grid"):])
-        assert "$0" in ticks and "$1.0K" in ticks
+        assert "$0" in ticks and "$1K" in ticks
 
 
 class TestSingleCostTrend:
@@ -487,7 +506,8 @@ class TestDailyCostCache:
 class TestMisc:
     @pytest.mark.parametrize(
         "value, expected",
-        [(0, "$0"), (750, "$750"), (999, "$999"), (1000, "$1.0K"), (1500, "$1.5K"), (2_000_000, "$2.00M")],
+        [(0, "$0"), (750, "$750"), (999, "$999"), (1000, "$1K"), (1500, "$1.5K"), (100_000, "$100K"),
+         (2_000_000, "$2M"), (2_500_000, "$2.50M")],
     )
     def test_money_axis(self, value, expected):
         assert dashboard.money_axis(value) == expected

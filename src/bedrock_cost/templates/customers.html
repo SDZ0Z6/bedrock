@@ -1,5 +1,5 @@
 {% extends "shell.html" %}
-{% from "_macros.html" import refresh_link %}
+{% from "_macros.html" import refresh_link, spend_switch %}
 {% from "_customer_macros.html" import cicon, cust_avatar, status_pill, customer_fields with context %}
 {% block title %}客户 · Bedrock 成本监控{% endblock %}
 {% block page_title %}客户{% endblock %}
@@ -39,24 +39,25 @@
   </div></div>
 {% else %}
 
-  <!-- ------------------------------------------------ 三张图：近 30 天消费、快用完的客户、按区域 -->
+  <!-- ------------------------------------------------ 三张图：每日消费（右上角选看多久）、快用完的客户、按区域（近 30 天） -->
   <section class="bento" aria-label="全部客户的图表">
-    <article class="viz-card span-2" data-reveal>
+    <article class="viz-card span-2" id="spend" data-reveal>
       <div class="viz-head">
         <div>
-          <h2 class="viz-title">近 30 天消费</h2>
+          <h2 class="viz-title">每日消费</h2>
           <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 每天一根柱，按客户分色 · 折算后</p>
         </div>
+        {{ spend_switch(spend_links) }}
       </div>
       <div>
-        <p class="viz-big" data-countup>{{ trend.total | money0 }}</p>
+        <p class="viz-big"><span data-countup>{{ trend.total | money0 }}</span> <small>{{ trend.label }}</small></p>
         <p class="viz-meta">日均 <strong>{{ trend.average | money }}</strong></p>
       </div>
       <div class="viz-chart" id="cust-trend" data-tip-src="cust-trend-data">{{ trend.chart.svg | safe }}</div>
       <div class="legend-toggles" data-legend-for="cust-trend" role="group" aria-label="只看某个客户">
         {% for item in trend.chart.legend %}
           <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
-                  title="{{ item.name }} 近 30 天 {{ item.total | money }}">
+                  title="{{ item.name }} {{ trend.label }} {{ item.total | money }}">
             <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
         {% endfor %}
       </div>
@@ -81,7 +82,7 @@
                 {%- if view.long_runway %}一年以上{% else %}约 {{ view.days_left | int }} 天{% endif %}</span>
               <span class="rank-sub">
                 <span>余额 {{ view.balance | money0 }} · 日均 {{ view.avg7 | money0 }}</span>
-                <span class="meter tone-{{ view.level }}" aria-hidden="true"><i style="width: {{ [view.usage_pct or 0, 100] | min }}%; --delay: {{ 300 + loop.index0 * 120 }}ms"></i></span>
+                <span class="meter tone-{{ view.level }}" data-reveal aria-hidden="true"><i style="width: {{ [view.usage_pct or 0, 100] | min }}%; --delay: {{ 300 + loop.index0 * 120 }}ms"></i></span>
               </span>
             </li>
           {% endfor %}
@@ -103,7 +104,7 @@
           {% for code, value in by_region %}
             <div class="region-row">
               {{ flag(code) | safe }}<span>{{ region_name(code) or '没填地区' }}</span><b>{{ value | money0 }}</b>
-              <span class="meter" aria-hidden="true"><i style="width: {{ (value / region_top * 100) | round(1) }}%; --delay: {{ 300 + loop.index0 * 120 }}ms"></i></span>
+              <span class="meter" data-reveal aria-hidden="true"><i style="width: {{ (value / region_top * 100) | round(1) }}%; --delay: {{ 300 + loop.index0 * 120 }}ms"></i></span>
             </div>
           {% endfor %}
         </div>
@@ -173,13 +174,13 @@
 
           <div class="acct-usage">
             {% if view.budget > 0 %}
-              <div class="meter tone-{{ view.level }}" aria-hidden="true"><i style="width: {{ [view.usage_pct or 0, 100] | min }}%"></i></div>
+              <div class="meter tone-{{ view.level }}" data-reveal aria-hidden="true"><i style="width: {{ [view.usage_pct or 0, 100] | min }}%"></i></div>
               <div class="acct-usage-row">
                 <span>使用率 <strong>{{ view.usage_pct | pct }}</strong></span>
                 <span>余额 <strong class="{% if view.balance < 0 %}tone-danger{% endif %}">{{ view.balance | money }}</strong></span>
               </div>
             {% else %}
-              <div class="meter tone-none" aria-hidden="true"><i style="width: 0"></i></div>
+              <div class="meter tone-none" data-reveal aria-hidden="true"><i style="width: 0"></i></div>
               <div class="acct-usage-row">
                 <span>{{ '没有使用中的账号' if counts.total else '还没有账号' }}</span>
                 <span>余额 <strong>{{ 0 | money }}</strong></span>

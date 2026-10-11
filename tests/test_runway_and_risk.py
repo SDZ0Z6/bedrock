@@ -53,7 +53,7 @@ def test_一年内但画不下_虚线停在右边_写用完的日期():
 
 # ====================================================================== 还能用几天
 def view_with(daily: float) -> customers.CustomerView:
-    """一个客户、一个在用的账号（额度 100 万），近 30 天每天消费 daily。"""
+    """一个客户、一个在用的账号（额度 100 万），近 30 天每日消费 daily。"""
     spend = {"100000000009": {(TODAY - timedelta(days=i)).isoformat(): daily for i in range(1, 31)}}
     usage_explorer_fake = series_for(spend)
     accounts = [account("100000000009", lifecycle=["正常"], start=date(2026, 6, 1))]

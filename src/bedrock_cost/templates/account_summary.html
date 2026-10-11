@@ -1,6 +1,7 @@
-{# 账号页的「摘要」页签：这个账号一眼看全——额度、近 30 天成本、告警、近 7 天调用、
+{# 账号页的「摘要」页签：这个账号一眼看全——额度、每日消费（右上角选看多久，竖虚线是启用、分给客户、风控这些事）、告警、近 24 小时调用、
    配额最高的几个模型、台账里的资料。要细看就点各卡片右上角去对应的页签。 #}
 {% extends "account_base.html" %}
+{% from "_macros.html" import spend_switch %}
 {% block loading_label %}正在读这个账号{% endblock %}
 
 {% block tab_content %}
@@ -35,16 +36,19 @@
     {% endif %}
   </article>
 
-  <article class="viz-card span-2">
+  <article class="viz-card span-2" id="spend">
     <div class="viz-head">
       <div>
-        <h2 class="viz-title">近 {{ trend.days }} 天成本</h2>
-        <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · Cost Explorer 晚 1~2 天出数，最近两天可能还不全</p>
+        <h2 class="viz-title">每日消费</h2>
+        <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 竖虚线是启用、分给客户、风控这些事 · Cost Explorer 晚 1~2 天出数，最近两天可能还不全</p>
       </div>
-      <a class="viz-link" href="{{ url_for('account.cost', number=account.account) }}" data-loading="正在查各维度消费">成本页签</a>
+      <div class="viz-actions">
+        {{ spend_switch(spend_links) }}
+        <a class="viz-link" href="{{ url_for('account.cost', number=account.account) }}" data-loading="正在查各维度消费">成本页签</a>
+      </div>
     </div>
     <div>
-      <p class="viz-big">{{ trend.total | money0 }}</p>
+      <p class="viz-big">{{ trend.total | money0 }} <small>{{ spend.label }}</small></p>
       <p class="viz-meta">日均 <strong>{{ trend.average | money }}</strong>
         {%- if trend.peak_label %} · 最多的一天是 {{ trend.peak_label }}（{{ trend.peak_value | money }}）{% endif %}</p>
     </div>
@@ -88,7 +92,7 @@
   <article class="viz-card span-3 chart-card">
     <div class="viz-head">
       <div>
-        <h2 class="viz-title">近 7 天调用</h2>
+        <h2 class="viz-title">近 24 小时调用</h2>
         <p class="viz-sub">{{ calls.start }} ~ {{ calls.end }} · 四区合计 · 按模型分色</p>
       </div>
       <a class="viz-link" href="{{ url_for('account.usage', number=account.account) }}" data-loading="正在拉 CloudWatch 指标">用量页签</a>

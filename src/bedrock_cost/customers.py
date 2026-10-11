@@ -428,7 +428,7 @@ class Holding:
         """start 到 end 每天算这个客户的消费：分给它那天起，到不算进余额（风控、换下、用完、结算）的前一天，
         之外的天是 0。
 
-        「每天消费」、近 7 天日均（「还能用几天」）用这个：风控、换下来的账号后来还有零星的账，不该画进这个客户
+        「每日消费」、近 7 天日均（「还能用几天」）用这个：风控、换下来的账号后来还有零星的账，不该画进这个客户
         每天花了多少，也不该把还能用几天拉短。历史消费、对账单、结算照样按这个账号全部的账算（上游按整个账号收钱）。
         """
         first, stop = self.joined or date.min, self.left or date.max
@@ -1151,6 +1151,27 @@ def account_timeline(account: Account, events: list[CustomerEvent], series: Seri
         items.append(item)
     items.sort(key=lambda item: (item.date, _TYPE_ORDER.get(item.kind, 50), item.order))
     return items
+
+
+def mark_days(moments, daily) -> list[tuple[date, list[str], date | None, float | None]]:
+    """「每日消费」上的竖虚线（客户页按账号画，账号页画一个账号）：几件事按日子排好，同一天的并成一条。
+
+    moments 是 [(哪天, 同一天里的先后, "start" / "stop" / "", 写什么)]；「停」的那天算出从上一次「开始」到前一天
+    用了多少，daily(起, 止) 给这段每天的消费。返回 [(哪天, [几件事], 从哪天起, 用了多少)]，不是「停」的后两个是 None。
+    """
+    days: list[tuple[date, list[str], date | None, float | None]] = []
+    since: date | None = None
+    for day, _, kind, label in sorted(moments, key=lambda m: (m[0], m[1])):
+        if not days or days[-1][0] != day:
+            days.append((day, [], None, None))
+        labels, used = days[-1][1], days[-1][3]
+        labels.append(label)
+        if kind == "start":
+            since = day
+        elif kind == "stop" and since is not None and used is None:
+            days[-1] = (day, labels, since, sum(daily(since, day - timedelta(days=1))))
+            since = None
+    return days
 
 
 def stock(accounts: list[Account]) -> list[Account]:

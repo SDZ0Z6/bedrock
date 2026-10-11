@@ -12,7 +12,6 @@ from flask import Blueprint, flash, redirect, render_template, request, session,
 
 from . import (
     activity,
-    chart,
     cloudwatch_metrics,
     config,
     cost_estimate,
@@ -52,6 +51,12 @@ def flash_result(title: str, who: str = "", text: str = "", tone: str = "ok") ->
     存进 flash 的是一个 dict，shell.html 认得出来、分三段画；别处 flash 的一句话照旧是标题。
     """
     flash({"title": title, "sub": who, "text": text}, tone)
+
+
+def spend_links(endpoint: str, current: str, **params) -> list[tuple[str, str, bool]]:
+    """「每日消费」右上角那一排（dashboard.SPEND_RANGES）：(名字, 网址, 是不是选中的)。近 30 天是默认，网址上不带。"""
+    return [(label, url_for(endpoint, **params, **({} if key == "30" else {"spend": key})), key == current)
+            for key, label in dashboard.SPEND_RANGES]
 
 
 def tz_name() -> str:
@@ -96,8 +101,10 @@ def index():
         report.rows = cards
 
         slots = dashboard.account_slots(cards)
-        trend = dashboard.cost_trend(accounts, today, slots, refresh=refresh)
-        pct = report.total_usage_pct
+        # 「每日消费」整行宽，画宽一点（字和柱子不会被拉大）；右上角选看多久，「全部」从最早启用的账号算起
+        spend = dashboard.spend_range(request.args.get("spend"), today,
+                                      min((a.start_date for a in accounts if a.start_date), default=None))
+        trend = dashboard.cost_trend(accounts, today, slots, days=spend.days, refresh=refresh, width=1100)
         # 筛选签上的「客户」：有账号的客户各一个签，没分给客户的算库存
         owners = {c.id: c for c in load_customers()}
         customer_chips = [
@@ -110,10 +117,12 @@ def index():
             lifecycle_counts=dashboard.lifecycle_counts(cards, tags),
             state_counts=dashboard.state_counts(cards),
             lifecycle_colors={tag.name: tag.hex for tag in tags},
-            gauge=chart.render_gauge(None if pct is None else pct / 100, report.total_level),
+            life_rows=dashboard.lifecycle_rows(cards, tags),
+            top_spenders=dashboard.top_spenders(cards, slots),
             trend=trend,
+            spend=spend,
+            spend_links=spend_links("main.index", spend.key),
             share=dashboard.spend_share(cards, slots),
-            near_limit=dashboard.near_limit(cards),
             activity_days=activity.LOOKBACK_DAYS,
         )
         failed = [card for card in cards if card.error]

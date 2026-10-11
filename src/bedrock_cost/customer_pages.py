@@ -20,7 +20,7 @@ from .auth import csrf_protect, login_required
 from .dates import parse_date
 from .excel_source import Account, ExcelSourceError
 from .filters import money, money0
-from .views import flash_result, page_meta
+from .views import flash_result, page_meta, spend_links
 from .windows import resolve_window
 
 bp = Blueprint("customers", __name__, url_prefix="/customers")
@@ -84,6 +84,26 @@ def _slots(names: list[str]) -> dict[str, int]:
     return usage_explorer.assign_slots(names[: usage_explorer.MAX_SERIES])
 
 
+def _stable_slots(ranked: list[str], everyone) -> dict[str, int]:
+    """「每日消费」的颜色：近 30 天花得最多的几个各占一个色槽，换看多久也不变；只在别的时间、别的图上有的
+    （30 天里没花钱）拿剩下的色槽。"""
+    slots = _slots(ranked[: usage_explorer.MAX_SERIES])
+    for name in sorted(set(everyone) - set(slots)):
+        free = [slot for slot in range(usage_explorer.MAX_SERIES) if slot not in slots.values()]
+        slots[name] = free[0] if free else -1
+    return slots
+
+
+def _per_customer(cards, start: date, end: date) -> dict[str, list[float]]:
+    """客户列表：每个客户每天的消费（只算在用的那几天，见 Holding.active_daily）。"""
+    width = (end - start).days + 1
+    out = {}
+    for view in cards:
+        columns = [h.active_daily(start, end) for h in view.holdings]
+        out[view.customer.id] = [sum(day) for day in zip(*columns)] if columns else [0.0] * width
+    return out
+
+
 def _stacked_rows(series: dict[str, list[float]], names: dict[str, str], width: int,
                   slots: dict[str, int] | None = None) -> list:
     """堆叠柱的序列：按总量排，8 个以外并进「其他」。slots 给了就照它配色（同一页上几张图，同一个账号同一个颜色）。"""
@@ -98,11 +118,12 @@ def _stacked_rows(series: dict[str, list[float]], names: dict[str, str], width: 
 
 
 def _spend_chart(series: dict[str, list[float]], stamps: list[date], names: dict[str, str], height: int = 230,
-                 width: int = 560, slots: dict[str, int] | None = None):
-    """近 30 天每天的消费：一根柱一天，按客户（或账号）堆叠。8 个以外并进「其他」。"""
+                 width: int = 560, slots: dict[str, int] | None = None, marks: list[chart.BarMark] | None = None):
+    """每天的消费（默认近 30 天）：一根柱一天，按客户（或账号）堆叠。8 个以外并进「其他」。marks 是竖虚线。"""
     rows = _stacked_rows(series, names, len(stamps), slots)
     labels = [stamp.strftime("%m-%d") for stamp in stamps]
-    bars = chart.render_bars(labels, rows, width=width, height=height, fmt=money, axis=customers.short_money)
+    bars = chart.render_bars(labels, rows, width=width, height=height, fmt=money, axis=customers.short_money,
+                             marks=marks)
     total = sum(sum(values) for values in series.values())
     return SimpleNamespace(chart=bars, total=total, average=total / len(stamps) if stamps else 0.0,
                            start=labels[0] if labels else "", end=labels[-1] if labels else "")
@@ -125,13 +146,17 @@ def index(**extra):
 
     context: dict = {}
     if cards:
-        stamps = [today - timedelta(days=29 - i) for i in range(30)]
-        per_customer = {}
-        for view in cards:
-            columns = [h.active_daily(stamps[0], today) for h in view.holdings]
-            per_customer[view.customer.id] = [sum(day) for day in zip(*columns)] if columns else [0.0] * 30
+        # 近 30 天：「按区域」和每张客户卡片用这一份
+        per_customer = _per_customer(cards, today - timedelta(days=29), today)
         names = {view.customer.id: view.customer.name for view in cards}
-        trend = _spend_chart(per_customer, stamps, names)
+        # 「每日消费」右上角选看多久，「全部」从最早分过来的那个账号算起；颜色按近 30 天花得最多的几个客户分，换时间不变
+        spend = dashboard.spend_range(request.args.get("spend"), today,
+                                      min((h.joined for view in cards for h in view.holdings if h.joined), default=None))
+        series = per_customer if spend.days == 30 else _per_customer(cards, spend.start, today)
+        stamps = [spend.start + timedelta(days=i) for i in range(spend.days)]
+        ranked = sorted((cid for cid in per_customer if sum(per_customer[cid]) > 0), key=lambda cid: -sum(per_customer[cid]))
+        trend = _spend_chart(series, stamps, names, slots=_stable_slots([names[cid] for cid in ranked], names.values()))
+        trend.label = spend.label
         soon = sorted((view for view in cards if view.days_left is not None and view.balance > 0
                        and view.customer.status != "gone"), key=lambda view: view.days_left)[:4]
         regions: dict[str, float] = {}
@@ -139,7 +164,8 @@ def index(**extra):
             code = view.customer.region or "OTHER"
             regions[code] = regions.get(code, 0.0) + sum(per_customer[view.customer.id])
         by_region = sorted(((code, value) for code, value in regions.items() if value > 0), key=lambda kv: -kv[1])
-        context = dict(trend=trend, soon=soon, by_region=by_region,
+        context = dict(trend=trend, spend=spend, spend_links=spend_links("customers.index", spend.key), soon=soon,
+                       by_region=by_region,
                        region_top=by_region[0][1] if by_region else 1.0, per_customer=per_customer)
 
     region_counts: dict[str, int] = {}
@@ -256,7 +282,7 @@ def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dic
             slot=-1))
     report = SimpleNamespace(labels=hours.labels, timestamps=hours.timestamps, window=window, series=lines,
                              metric_label="调用次数", unit="次", dimension_label="账号")
-    drawn = chart.render_lines(report, unit="次", width=1100, uid="calls",
+    drawn = chart.render_lines(report, unit="次", width=760, uid="calls",
                                ends={names[number]: by_number[number].account.avatar for number in keep})
     totals = [sum(values[i] for values in series.values()) for i in range(width)]
     peak = max(range(width), key=lambda i: totals[i]) if any(totals) else None
@@ -276,6 +302,45 @@ def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dic
         end=window.end.astimezone().strftime("%m-%d %H:00") if width else "",
         errors=hours.errors, accounts=[h.account for h in watched],
     )
+
+
+# ---------------------------------------------------------------- 每日消费：竖虚线
+# 竖虚线：手动记的事里这几类（启用另算，是分过来那天；用完另算，是累计消费到额度那天）。
+# 「停」的那条写上从启用（或恢复）到前一天用了多少；同一个账号同一天的几件事并成一条
+_MARK_EVENTS = {"risk": ("stop", "风控"), "replace": ("stop", "换下"), "settle": ("stop", "结算"),
+                "restore": ("start", "恢复"), "unrisk": ("start", "取消风控")}
+
+
+def _spend_marks(view: customers.CustomerView, stamps: list[date], names: dict[str, str],
+                 slots: dict[str, int]) -> list[chart.BarMark]:
+    """「每日消费」上每个账号的竖虚线：哪天启用、哪天风控 / 换下 / 用完 / 结算、哪天恢复。只画落在图里的那几天，
+    「用了多少」照样从图外的启用日算起。"""
+    where = {day: i for i, day in enumerate(stamps)}
+    events = [e for e in view.events if not e.deleted and e.source == "manual"]
+    marks = []
+    for h in view.holdings:
+        moments = [(h.joined, 0, "start", "启用")] if h.joined else []
+        moments += [(e.date, e.id) + _MARK_EVENTS[e.type] for e in events
+                    if e.account == h.number and e.type in _MARK_EVENTS]
+        if h.left_why == "用完" and h.used_up_on:
+            moments.append((h.used_up_on, 10**9, "stop", "用完"))
+        name = names[h.number]
+        # 同一天的几件事并成一条线（风控换下的那天是「风控、换下」）
+        for day, labels, start, used in customers.mark_days(moments, h.daily):
+            if day not in where:
+                continue
+            what = "、".join(labels)
+            sub = f"{what} · {day.isoformat()}"
+            if "启用" in labels and h.via:
+                peer = view.accounts_by_number.get(h.via)
+                sub += f" · 换下 {peer.label if peer else h.via}"
+            marks.append(chart.BarMark(
+                index=where[day], label=what if used is None else f"{what} {customers.short_money(used)}",
+                series=name, color=chart.color_for(slots.get(name, -1)), face=h.account.avatar,
+                tip=h.account.email or h.number, tip_sub=sub,
+                tip_foot="" if used is None else f"{start.strftime('%m-%d')} 起用了 {money(used)}",
+            ))
+    return marks
 
 
 # ---------------------------------------------------------------- 客户详情
@@ -313,19 +378,21 @@ def detail(cid: str, **extra):
                                   ("risk", "风控 · 待替换", chart.TONE_COLORS["danger"]),
                                   ("pending", "待结算", "#de9a92"), ("settled", "已结算", "#c2c0b6"))
     ]
-    pct = view.usage_pct
-    gauge = chart.render_gauge(None if pct is None else pct / 100, view.level)
     stamps, per_account = view.daily(30)
     names = {h.number: h.account.label for h in view.holdings}
-    # 「每天消费」的颜色照旧（按近 30 天有消费的账号分色槽）；「近 24 小时调用」用同一套，一个账号一个颜色。
-    # 只在那张图上有的账号（30 天没消费、24 小时里有调用）拿剩下的色槽
+    # 「每日消费」的颜色照旧（按近 30 天有消费的账号分色槽，换成近 90 天、全部也不变）；「近 24 小时调用」用同一套，
+    # 一个账号一个颜色。只在别的时间、别的图上有的账号（30 天没消费）拿剩下的色槽
     spenders = sorted((number for number in per_account if sum(per_account[number]) > 0),
                       key=lambda number: -sum(per_account[number]))
-    slots = _slots([names[number] for number in spenders[: usage_explorer.MAX_SERIES]])
-    for name in sorted(set(names.values()) - set(slots)):
-        free = [slot for slot in range(usage_explorer.MAX_SERIES) if slot not in slots.values()]
-        slots[name] = free[0] if free else -1
-    trend = _spend_chart(per_account, stamps, names, height=230, width=760, slots=slots)
+    slots = _stable_slots([names[number] for number in spenders], names.values())
+    # 右上角选看多久，「全部」从最早分过来的那个账号算起
+    spend = dashboard.spend_range(request.args.get("spend"), today,
+                                  min((h.joined for h in view.holdings if h.joined), default=None))
+    if spend.days != 30:
+        stamps, per_account = view.daily(spend.days)
+    trend = _spend_chart(per_account, stamps, names, height=230, width=1100, slots=slots,
+                         marks=_spend_marks(view, stamps, names, slots))
+    trend.label = spend.label
     calls = _calls_chart(view, names, slots, refresh=refresh)
     runway = chart.render_runway(view.balance_history(21), view.burn, fmt=money, axis=customers.short_money)
 
@@ -358,8 +425,9 @@ def detail(cid: str, **extra):
         view=view,
         hero_av=avatar_info(customer),
         stage_rows=stage_rows,
-        gauge=gauge,
         trend=trend,
+        spend=spend,
+        spend_links=spend_links("customers.detail", spend.key, cid=customer.id),
         calls=calls,
         runway=runway,
         timeline=timeline,

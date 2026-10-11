@@ -276,5 +276,5 @@ def test_详情页对账单对得上余额(admin, fake_costs):
     html = detail(admin)
     found = re.search(r"= <b>(-?\$[\d,]+)</b>，和现在的余额一样", html)
     assert found
-    balance = re.search(r'<span data-countup>(-?\$[\d,]+)</span> <small>\d+ 个使用中的账号', html).group(1)
+    balance = re.search(r'<span data-countup>(-?\$[\d,]+)</span> <small>余额</small>', html).group(1)
     assert found.group(1) == balance

@@ -352,6 +352,34 @@
   }
   window.addEventListener('scroll', hideTip, { passive: true });
 
+  // ---- 带 data-tip 的（小头像、图上竖虚线的线头）：鼠标放上去立刻弹出全名，手机上点一下。
+  //      不用 title：浏览器自带的要停一会儿才出来，划过去常常什么都没有。三行：data-tip、data-tip-sub、data-tip-foot
+  let tipOwner = null, tipShownAt = 0;
+  function showHint(el) {
+    tipOwner = el;
+    tipShownAt = performance.now();
+    fillTip(el.dataset.tip, el.dataset.tipSub || '', [], el.dataset.tipFoot || '');
+    placeTip(el.getBoundingClientRect());
+  }
+  function hideHint() { if (tipOwner) { tipOwner = null; hideTip(); } }
+  document.addEventListener('mouseover', function (event) {
+    const el = event.target instanceof Element ? event.target.closest('[data-tip]') : null;
+    if (el && el !== tipOwner) showHint(el);
+  });
+  document.addEventListener('mouseout', function (event) {
+    const el = event.target instanceof Element ? event.target.closest('[data-tip]') : null;
+    const into = event.relatedTarget instanceof Element ? event.relatedTarget : null;
+    if (el && el === tipOwner && !(into && el.contains(into))) hideHint();
+  });
+  // 手机上点一下：点的时候会先来一个 mouseover 已经弹出来了，紧跟着的这一下不收
+  document.addEventListener('click', function (event) {
+    const el = event.target instanceof Element ? event.target.closest('[data-tip]') : null;
+    if (!el) { hideHint(); return; }
+    if (el !== tipOwner) showHint(el);
+    else if (performance.now() - tipShownAt > 400) hideHint();
+  });
+  window.addEventListener('scroll', function () { tipOwner = null; }, { passive: true });
+
   // ---- 折线图：一条虚线准线跟着鼠标找最近的时间点，每条线上一个带白圈的点，
   //      提示里列出这一刻的全部序列（值在前、名字在后，大的在上）。
   //      也能 Tab 进图里用左右方向键逐点看。数据见 chart.render_lines 的 tooltip
@@ -456,8 +484,9 @@
         if (!item) return;
         svg.classList.add('is-hovering');
         columns.forEach(function (col, i) { col.classList.toggle('is-hover', i === index); });
+        // 只看一项的时候只列这一项，不写全部的合计（图上已经只剩它了）
         const rows = focus === null ? item.rows : item.rows.filter(function (r) { return r.s === focus; });
-        fillTip(item.label, '合计 ' + item.total, rows);
+        fillTip(item.label, focus === null ? '合计 ' + item.total : rows.length ? '' : '这天没有', rows);
         placeTip((columns[index] || hit).getBoundingClientRect());
       };
       hit.addEventListener('mouseenter', show);
@@ -481,8 +510,16 @@
       } else {
         svg.dataset.focus = String(focus);
       }
+      // 只看一项：别人的段子消失，这一项堆在上面的段子「跌」到底（style.css 按 --drop 往下挪，先等别人消失）。
+      // 往下挪多少 = 基线（data-base）减去这一段的底边，纵坐标放大、拖动都不变
+      const base = Number(svg.dataset.base);
       for (const seg of svg.querySelectorAll('[data-s]')) {
-        seg.classList.toggle('is-focus', Number(seg.dataset.s) === focus);
+        const on = Number(seg.dataset.s) === focus;
+        if (on && base && seg.closest('.chart-bars')) {
+          const box = seg.getBBox();
+          seg.style.setProperty('--drop', Math.max(0, base - box.y - box.height).toFixed(2) + 'px');
+        }
+        seg.classList.toggle('is-focus', on);
       }
     });
   }
@@ -712,6 +749,9 @@
   }
 
   for (const svg of document.querySelectorAll('svg[data-zoom]')) zoomable(svg);
+
+  // 手机上比屏幕宽、能左右滑的图（客户页「近 24 小时调用」、整行宽的柱状图）：一打开先停在最右边，最近的那几个小时、那几天
+  for (const wrap of document.querySelectorAll('.calls-chart, .wide-chart')) wrap.scrollLeft = wrap.scrollWidth;
 
   // ---- 气泡：悬浮的那个放大、其余变淡，提示里写名字、数和占比；
   //      还可以按住拖着走：拖着的泡跟着鼠标，挤到别的泡就把它们推开，

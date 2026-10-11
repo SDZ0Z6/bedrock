@@ -264,7 +264,7 @@
                 {% if credit_row and credit_row.has_numbers and credit_row.usage_pct is not none %}
                   <td class="usage-col" data-sort="{{ credit_row.usage_pct }}">
                     <span class="usage-pct tone-{{ credit_row.level }}">{{ credit_row.usage_pct | pct }}</span>
-                    <div class="meter tone-{{ credit_row.level }}" aria-hidden="true"><i style="width: {{ credit_row.bar_width }}%"></i></div>
+                    <div class="meter tone-{{ credit_row.level }}" data-reveal aria-hidden="true"><i style="width: {{ credit_row.bar_width }}%"></i></div>
                   </td>
                 {% else %}
                   <td class="usage-col tone-muted" data-sort="">—</td>
@@ -400,7 +400,7 @@
                 <div class="bar-item">
                   <span class="bar-item-name" title="{{ model.name }}"><i class="swatch" style="background: {{ model.color }}"></i>{{ model.name | short_model }}</span>
                   <span class="bar-item-value">{{ model.value | compact }}<small>次 · {{ model.share | pct }}</small></span>
-                  <div class="meter" style="--meter: {{ model.color }}" aria-hidden="true"><i style="width: {{ [model.share, 0.6] | max }}%"></i></div>
+                  <div class="meter" style="--meter: {{ model.color }}" data-reveal aria-hidden="true"><i style="width: {{ [model.share, 0.6] | max }}%"></i></div>
                   {% if model.tokens is not none %}<span class="bar-item-sub">{{ model.tokens | compact }} token</span>{% endif %}
                 </div>
               {% endfor %}
@@ -421,7 +421,7 @@
               <div class="bar-item {% if not region.value %}is-empty{% endif %}">
                 <span class="bar-item-name">{{ region.name }}<small>{{ region.region }}</small></span>
                 <span class="bar-item-value">{{ region.value | compact }}<small>次 · {{ region.share | pct }}</small></span>
-                <div class="meter" aria-hidden="true"><i style="width: {{ region.share }}%"></i></div>
+                <div class="meter" data-reveal aria-hidden="true"><i style="width: {{ region.share }}%"></i></div>
                 <span class="bar-item-sub">{{ region.tokens | compact }} token</span>
               </div>
             {% endfor %}

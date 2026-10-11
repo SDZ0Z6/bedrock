@@ -184,7 +184,7 @@ def _scratch_last_known(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _scratch_customer_costs(tmp_path, monkeypatch):
-    """客户页存下来的每天消费也写到临时目录，不能动项目目录里的文件。"""
+    """客户页存下来的每日消费也写到临时目录，不能动项目目录里的文件。"""
     monkeypatch.setattr(config, "CUSTOMER_COSTS_PATH", tmp_path / "customer-costs.json")
 
 

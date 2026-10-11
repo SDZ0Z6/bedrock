@@ -982,8 +982,88 @@ def _round_top(x: float, top: float, w: float, bottom: float, radius: float) -> 
     )
 
 
-BAR_MAX_W = 24.0   # 柱子最粗 24px，不把一格填满，剩下的是留白
+BAR_MAX_W = 96.0   # 柱子占一格的六成，剩下的是留白；格子少（近 7 天）时也粗得起来，不会细成一根、中间空一大片
 BAR_GAP = 2.0      # 堆叠的段与段之间留 2px 底色的缝，靠缝分开，不靠描边
+MARK_R = 7.0       # 竖虚线线头上的小头像
+MARK_LANE = 19.0   # 线头一排多高：挨得近的往下一排放，最多三排，再挤就压着
+MARK_LANES = 3
+
+
+@dataclass
+class BarMark:
+    """柱状图上的一条竖虚线（客户页「每日消费」上的启用、风控……）：画在第 index 格的左边，「从这天起」。
+    线头是一个小头像加一句话，悬浮提示三行：tip（谁）、tip_sub（什么事、哪天）、tip_foot（用了多少）。"""
+
+    index: int
+    label: str
+    series: str = ""      # 属于哪条序列：点图例只看这一项时只留它的线。对不上的（这段时间没消费）不跟图例走
+    color: str = ""       # 线的颜色，空着按序列的颜色，再没有就是灰
+    face: object = None   # 头像（text / css / emoji），没有就画一个色点
+    tip: str = ""
+    tip_sub: str = ""
+    tip_foot: str = ""
+
+
+def _mark_width(label: str) -> float:
+    """线头那句话大概多宽：中文按 11px 一个字，其余 6.5px。"""
+    return sum(11.0 if ord(ch) > 0x2E80 else 6.5 for ch in label)
+
+
+def _place_marks(marks: list[BarMark], left: float, band: float, count: int, right: float) -> list[tuple]:
+    """[(mark, 横坐标, 第几排, 字是不是写在左边)]：从左到右，放进第一排放得下的（不和前一个叠）；都放不下就放
+    最空的那排。靠右边的字写在头像左边，免得出了图。"""
+    placed = []
+    ends = [-1e9] * MARK_LANES
+    for mark in sorted((m for m in marks if 0 <= m.index < count), key=lambda m: m.index):
+        x = left + band * mark.index
+        width = _mark_width(mark.label) + MARK_R + 4
+        flip = x + width > right
+        start, stop = (x - width, x + MARK_R) if flip else (x - MARK_R, x + width)
+        lane = next((i for i, end in enumerate(ends) if start > end + 4), None)
+        if lane is None:
+            lane = min(range(MARK_LANES), key=ends.__getitem__)
+        ends[lane] = max(ends[lane], stop)
+        placed.append((mark, x, lane, flip))
+    return placed
+
+
+def _bar_marks(placed: list[tuple], index_of: dict[str, int], live: list, plot_bottom: float) -> str:
+    """竖虚线一组一条：线、线头的小头像（底色字色是页面上 .av-N 的那一套，外圈是线的颜色）、一句话。
+    data-s 是它属于第几条序列（-1 = 对不上）；data-tip 那三行是悬浮提示（app.js）。"""
+    out = ['<g class="chart-marks">']
+    for mark, x, lane, flip in placed:
+        k = index_of.get(mark.series, -1)
+        colour = mark.color or (_colour(live[k]) if k >= 0 else OTHER_COLOR)
+        cy = 4 + MARK_R + lane * MARK_LANE
+        face = mark.face
+        css = f"chart-mark {face.css}" if face else "chart-mark"
+        words = " · ".join(bit for bit in (mark.tip, mark.tip_sub, mark.tip_foot) if bit)
+        out.append(
+            f'<g class="{html.escape(css)}" data-s="{k}" data-tip="{html.escape(mark.tip)}" '
+            f'data-tip-sub="{html.escape(mark.tip_sub)}" data-tip-foot="{html.escape(mark.tip_foot)}" '
+            f'role="img" aria-label="{html.escape(words)}">'
+            f'<line x1="{x:.2f}" y1="{cy + MARK_R:.2f}" x2="{x:.2f}" y2="{plot_bottom:.2f}" stroke="{colour}" '
+            f'stroke-width="1.3" stroke-dasharray="4 3"></line>'
+        )
+        if face:
+            size = 10 if face.emoji else 8.5
+            out.append(
+                f'<circle cx="{x:.2f}" cy="{cy:.2f}" r="{MARK_R:.0f}" style="fill: var(--av-bg)" stroke="{colour}" '
+                f'stroke-width="1.6"></circle>'
+                f'<text x="{x:.2f}" y="{cy + size * 0.36:.2f}" text-anchor="middle" font-size="{size}" '
+                f'font-weight="600" style="fill: var(--av-fg)">{html.escape(face.text)}</text>'
+            )
+        else:
+            out.append(f'<circle cx="{x:.2f}" cy="{cy:.2f}" r="{MARK_R - 3:.0f}" fill="{colour}"></circle>')
+        # 字的位置用 dx 偏开：放大时（app.js）只挪 x，字跟着头像走、不会越拉越远
+        shift = -(MARK_R + 4) if flip else MARK_R + 4
+        anchor = "end" if flip else "start"
+        out.append(
+            f'<text x="{x:.2f}" dx="{shift:.0f}" y="{cy + 4:.2f}" text-anchor="{anchor}" fill="{LABEL_TEXT}" '
+            f'font-size="11" font-weight="500">{html.escape(mark.label)}</text></g>'
+        )
+    out.append("</g>")
+    return "".join(out)
 
 
 def _colour(series) -> str:
@@ -994,6 +1074,7 @@ def _colour(series) -> str:
 
 def render_bars(
     labels: list[str], series, width: int = 560, height: int = 196, fmt=None, axis=None, sort: bool = True,
+    marks: list[BarMark] | None = None,
 ) -> Chart:
     """堆叠柱状图，每格一根柱。series 的元素要有 name / slot / values。
 
@@ -1003,6 +1084,7 @@ def render_bars(
     交互和动效：进场时一根根长出来；鼠标划到哪一格，那一格亮、其余变淡，提示里列出
     这一格的全部序列；点图例里的某一项，只亮这一项（再点一次恢复）。脚本在 app.js，
     动画在 CSS 里，系统开了「减弱动画」就不动。
+    marks 是竖虚线（BarMark）：线头排在绘图区上面，图跟着高出几排；点图例只看某一项时，别人的线藏起来。
     """
     fmt = fmt or compact_number
     axis = axis or compact_number
@@ -1024,14 +1106,22 @@ def render_bars(
         return Chart(svg=svg, width=width, height=height, empty=True)
 
     band = (width - pad_l - pad_r) / count
+    # 竖虚线的线头放在绘图区上面：用了几排，图就高出几排，绘图区本身不变矮
+    placed = _place_marks(marks or [], pad_l, band, count, width - 2)
+    if placed:
+        extra = (max(lane for _, _, lane, _ in placed) + 1) * MARK_LANE
+        pad_t += extra
+        height += round(extra)
+        plot_bottom = pad_t + plot_h
     bar_w = min(BAR_MAX_W, band * 0.6)
     step = _nice_step(max(totals) or 1.0, 3)
     ticks = max(1, math.ceil((max(totals) or 1.0) / step - 1e-9))
     scale = plot_h / (step * ticks)
 
+    # data-base 是基线的纵坐标：点图例只看一项时，这一项的段子从这里往下「跌」到底（app.js）
     parts = [
         f'<svg class="chart-svg bar-chart" viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
-        f'{_zoom_attrs(pad_l, width - pad_r, count, band, 44.0)} '
+        f'{_zoom_attrs(pad_l, width - pad_r, count, band, 44.0)} data-base="{plot_bottom:.2f}" '
         f'role="img" aria-label="堆叠柱状图，{count} 格，{len(live)} 条序列">',
         '<g class="chart-grid">',
     ]
@@ -1069,7 +1159,10 @@ def render_bars(
                     )
             bottom = top
         parts.append("</g>")
-    parts.append('</g><g class="chart-xaxis">')
+    parts.append("</g>")
+    if placed:
+        parts.append(_bar_marks(placed, {s.name: k for k, s in enumerate(live)}, live, plot_bottom))
+    parts.append('<g class="chart-xaxis">')
     stride = max(1, math.ceil(44.0 / band))
     # 每一格的字都画上，隔几格才显示一个：放大以后（app.js）放得下就多显示几个
     for i in range(count):

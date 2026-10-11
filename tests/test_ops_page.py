@@ -174,7 +174,7 @@ class TestEntry:
 
     def test_overview_links_to_it_next_to_the_cost_trend(self, board):
         html = board.get("/").get_data(as_text=True)
-        trend = html[html.index(">近 30 天成本<") : html.index(">消费构成<")]
+        trend = html[html.index(">每日消费<") : html.index("</article>", html.index(">每日消费<"))]
         assert re.search(r'<a class="viz-link" href="/ops/"[^>]*>收入和毛利</a>', trend)
 
     def test_missing_ledger_shows_a_message_not_a_500(self, board, tmp_path, monkeypatch):

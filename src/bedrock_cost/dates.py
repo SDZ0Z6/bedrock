@@ -29,6 +29,8 @@ PRESET_LABELS = {
     "last30": "近 30 天",
     "ytd": "今年",
 }
+# 没选区间时：近 7 天（账号页的「成本」「预估」页签一打开先看最近一周）
+DEFAULT_PRESET = "last7"
 
 
 def parse_date(raw: str | None) -> date | None:
@@ -119,11 +121,12 @@ def resolve_range(args: Mapping[str, str], today: date) -> tuple[date, date, lis
     else:
         start = parse_date(args.get("start"))
         end = parse_date(args.get("end"))
+        default_start, _ = preset_range(DEFAULT_PRESET, today)
         if args.get("start") and start is None:
-            notes.append("开始日期格式无法识别，已使用本月 1 号。")
+            notes.append(f"开始日期格式无法识别，已从 {default_start.isoformat()} 起算（近 7 天）。")
         if args.get("end") and end is None:
             notes.append("结束日期格式无法识别，已使用今天。")
-        start = start or today.replace(day=1)
+        start = start or default_start
         end = end or today
 
     if start > end:
