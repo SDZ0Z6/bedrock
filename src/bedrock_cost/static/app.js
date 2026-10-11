@@ -79,6 +79,48 @@
     for (const link of document.querySelectorAll('[data-refresh].is-busy')) link.classList.remove('is-busy');
   });
 
+  // ------------------------------------------------------------ 导出 CSV
+  // 带 data-export 的下载链接用 fetch 取：要查几秒钟，等的时候按钮写「正在导出…」；拿到 CSV 就存下来，
+  // 拿到的是报错（服务端回一句纯文本）就在右上角说——不让浏览器把报错存成一个文件。没开 JS 就是普通下载
+  document.addEventListener('click', function (event) {
+    const link = event.target instanceof Element ? event.target.closest('a[data-export]') : null;
+    if (!link || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    if (link.classList.contains('is-busy')) return;
+    const label = link.querySelector('[data-export-label]');
+    const idle = label ? label.textContent : '';
+    link.classList.add('is-busy');
+    link.setAttribute('aria-busy', 'true');
+    if (label) label.textContent = '正在导出…';
+    fetch(link.href, { credentials: 'same-origin' }).then(function (response) {
+      const type = response.headers.get('Content-Type') || '';
+      if (response.ok && type.indexOf('text/csv') === 0) {
+        const named = /filename="([^"]+)"/.exec(response.headers.get('Content-Disposition') || '');
+        return response.blob().then(function (blob) {
+          const url = URL.createObjectURL(blob);
+          const save = document.createElement('a');
+          save.href = url;
+          save.download = named ? named[1] : 'export.csv';
+          document.body.append(save);
+          save.click();
+          save.remove();
+          setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+        });
+      }
+      // 不是 CSV：服务端说的原因（纯文本），或者登录过期被带去了登录页（HTML）
+      return response.text().then(function (text) {
+        const reason = type.indexOf('text/plain') === 0 ? text.trim() : '';
+        window.appToast('error', '导不出来', reason || '登录可能过期了，刷新页面再试。');
+      });
+    }).catch(function () {
+      window.appToast('error', '导不出来', '连不上服务器，等一下再试。');
+    }).finally(function () {
+      link.classList.remove('is-busy');
+      link.removeAttribute('aria-busy');
+      if (label) label.textContent = idle;
+    });
+  });
+
   // ------------------------------------------------------------ 滚进屏幕才放进场动画
   // 带 data-reveal 的卡片（客户页）：里面的进场动画先停在第一帧（CSS 暂停），卡片滚进屏幕时
   // 加上 .in 再放；数字从 0 数上来也等到那时候。没有 IntersectionObserver 的浏览器直接放
