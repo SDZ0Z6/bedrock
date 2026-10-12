@@ -7,7 +7,8 @@
   · 每个人在资料页（/me）改显示名和头像（一个字或表情 + 底色），只读用户在那里改密码；看自己的在线时间和登录记录，
     管理员在用户管理里点开别人也能看；
   · 在线时间：页面开着就算（每 30 秒报一次到，离上次不超过 GAP 秒才算），几个标签不重复算，报到不续登录有效期；
-  · 概览顶上：欢迎回来、今天在线多久、一小片像素风景上走来走去的小家伙（各有脾气，说的话看场合）；
+  · 概览顶上：欢迎回来、今天在线多久、一小片像素风景上走来走去的小家伙（各有脾气，说的话看场合）；九种背景按时间、
+    季节自动挑，也能自己挑（记在资料里），小家伙跟着背景换台词、小道具、动作；
   · 管用户、改密码都记进操作日志（「用户」类），密码哪儿都不记。
 """
 
@@ -384,7 +385,7 @@ def test_自己的资料页_改名字和头像(admin):
     response = admin.post("/me", data={"csrf": token(admin), "display": "老板", "avatar_text": "🦊", "avatar_color": "2"})
     assert response.status_code == 302 and response.headers["Location"] == "/me"
     saved = json.loads(config.USERS_PATH.read_text(encoding="utf-8"))["admin"]
-    assert saved == {"display": "老板", "avatar_text": "🦊", "avatar_color": 2}
+    assert saved == {"display": "老板", "avatar_text": "🦊", "avatar_color": 2, "scene": ""}
     page = admin.get("/").get_data(as_text=True)
     foot = page[page.index('<div class="side-foot">'):page.index("</aside>")]
     assert "🦊 老板 管理员" in scrape(foot) and "av-2 avatar-emoji" in foot
@@ -488,16 +489,135 @@ def test_概览上的数是从卡片上拿的(admin):
 
 
 # ---------------------------------------------------------------- 风景
-def test_小家伙脚下有风景_白天太阳_夜里月亮(admin, monkeypatch):
+def test_电脑宽屏上欢迎条大一号():
+    """一格多画几个像素、风景放大多少都由 CSS 定（--grow 整数，像素画才不糊）；脚本按 --zoom、--pan 走得快一点、挪得多一点。"""
+    static = config.BASE_DIR / "src" / "bedrock_cost" / "static"
+    css = (static / "style.css").read_text(encoding="utf-8")
+    wide = css[css.index("@media (min-width: 1180px) {"):]
+    wide = wide[:wide.index("\n}\n")]
+    assert ".welcome { --zoom: 1.4; --grow: 2;" in wide and ".mascot-stage { --pan: 76; min-height: 172px; }" in wide
+    assert ".welcome-hi { font-size: 32px; }" in wide
+    assert ".mascot-sprite { display: block; width: calc(var(--px) * 10px); height: calc(var(--px) * 8px);" in css
+    assert ".scene .px { width: calc(var(--w) * var(--c) * var(--zoom, 1) * 1px);" in css
+    js = (static / "mascots.js").read_text(encoding="utf-8")
+    assert "zoom = parseFloat(css.getPropertyValue('--zoom')) || 1;" in js and "const step = m.speed * zoom * dt * m.dir;" in js
+
+
+def test_小家伙脚下有风景(admin):
     banner = banner_of(admin.get("/").get_data(as_text=True))
-    assert '<div class="scene' in banner and 'aria-hidden="true"' in banner
+    assert '<div class="scene" data-scene aria-hidden="true">' in banner
     for layer in ("sky", "far", "mid"):
         assert f'data-layer="{layer}"' in banner
-    assert banner.count('class="scene-cloud"') == 3 and banner.count("data-tree") == 4
-    assert banner.count("data-tuft") >= 10 and "data-puffs" in banner
+    assert banner.count('class="scene-cloud px"') == 3 and banner.count("data-tree") == 4
+    assert banner.count("data-tuft") >= 10 and "data-puffs" in banner and "data-weather" in banner
+    # 九种背景用的是同一套东西：太阳、月亮、星星、彩虹、水坑都画着，哪样露出来由 CSS 按 data-kind 管
+    for part in ("scene-sun", "scene-moon", "scene-star", "scene-rainbow", "scene-puddle"):
+        assert f'class="{part}' in banner, part
     assert banner.index('<div class="scene') < banner.index('<button class="mascot"')    # 风景在小家伙后面
-    person = users.Person(name="lily", admin=False)
-    assert not welcome.context(person, at(15))["night"] and welcome.context(person, at(21))["night"]
+
+
+# ---------------------------------------------------------------- 背景
+def _day(rainy: bool, month: int) -> int:
+    """这个月里第一个（不）下雨的日子。"""
+    return next(day for day in range(1, 29) if welcome.rainy(at(9, day=day).replace(month=month).date()) == rainy)
+
+
+@pytest.mark.parametrize("month, hour, rainy, kind", [
+    (10, 3, False, "night"), (10, 20, False, "night"), (7, 22, False, "fireflies"), (7, 5, True, "fireflies"),
+    (10, 17, True, "dusk"), (1, 18, False, "dusk"),
+    (1, 10, False, "snow"), (12, 15, True, "snow"),                     # 冬天下的是雪
+    (5, 9, True, "rain"), (5, 15, True, "rainbow"), (3, 10, True, "rain"),
+    (3, 10, False, "sakura"), (4, 16, False, "sakura"),
+    (9, 10, False, "autumn"), (11, 13, False, "autumn"), (10, 15, True, "rainbow"),
+    (6, 12, False, "day"), (8, 16, False, "day"),
+])
+def test_背景按时间和季节自动挑(month, hour, rainy, kind):
+    now = at(hour, day=_day(rainy, month)).replace(month=month)
+    assert welcome.auto_scene(now) == kind
+
+
+def test_下雨的日子大约一周一天_同一天谁看都一样():
+    from datetime import date
+    days = [date(2026, 1, 1) + timedelta(days=offset) for offset in range(365)]
+    count = sum(1 for day in days if welcome.rainy(day))
+    assert 30 < count < 80 and welcome.rainy(days[0]) == welcome.rainy(date(2026, 1, 1))
+
+
+def test_彩虹是一圈一圈的():
+    bands = {band for *_, band in welcome.RAINBOW}
+    assert bands == set(range(6))
+    assert all(0 <= x and x + w <= 36 and 0 <= y < 18 for x, y, w, _ in welcome.RAINBOW)
+    top = sorted((x, w, band) for x, y, w, band in welcome.RAINBOW if y == 0)
+    assert top and all(band == 0 for *_, band in top)                    # 最上面一行是最外圈（红）
+
+
+def test_每个背景都有台词_睡着的有梦话():
+    assert set(welcome.SCENE_LINES) == set(welcome.SCENES)
+    assert all(len(lines) >= 5 for lines in welcome.SCENE_LINES.values()) and len(welcome.SLEEPY) >= 5
+    every = [line for lines in welcome.SCENE_LINES.values() for line in lines] + list(welcome.SLEEPY)
+    assert len(set(every)) == len(every)
+
+
+def test_欢迎条带着背景_右上角能换(admin):
+    html = admin.get("/").get_data(as_text=True)
+    banner = banner_of(html)
+    auto = welcome.auto_scene(datetime.now())
+    assert f'data-mascot-stage data-kind="{auto}" data-auto="{auto}"' in banner
+    picks = re.findall(r'data-scene-pick="(\w*)" aria-pressed="(\w+)"', banner)
+    assert picks == [("", "true")] + [(key, "false") for key in welcome.SCENES]     # 没挑过：自动
+    assert scrape(banner[banner.index('<button class="scene-pick"'):banner.index('</button>', banner.index('<button class="scene-pick"'))]) \
+        == f"{welcome.SCENES[auto]} · 自动"
+    conf = json.loads(re.search(r'<script id="scene-conf" type="application/json">(.*?)</script>', banner, re.S).group(1))
+    assert conf["url"] == "/me/scene" and conf["csrf"] and conf["labels"] == welcome.SCENES
+    talk = talk_of(banner)
+    assert talk["scenes"] == {kind: list(lines) for kind, lines in welcome.SCENE_LINES.items()}
+    assert talk["sleepy"] == list(welcome.SLEEPY)
+
+
+def test_挑背景_记在自己的资料里_只读用户也能挑(admin, lily):
+    response = lily.post("/me/scene", data={"csrf": token(lily), "scene": "snow"}, headers=FETCH)
+    assert response.status_code == 200 and response.get_json() == {"ok": True, "scene": "snow", "kind": "snow", "label": "下雪"}
+    assert users.find("lily").look.scene == "snow"
+    banner = banner_of(lily.get("/").get_data(as_text=True))
+    assert 'data-kind="snow"' in banner and 'data-scene-pick="snow" aria-pressed="true"' in banner
+    assert "data-scene-label>下雪</span>" in banner                                   # 自己挑的不写「自动」
+    # 改名字、头像不会把挑的背景冲掉
+    lily.post("/me", data={"csrf": token(lily), "display": "Lily", "avatar_text": "", "avatar_color": ""})
+    assert users.find("lily").look.scene == "snow"
+    # 换回自动
+    back = lily.post("/me/scene", data={"csrf": token(lily), "scene": ""}, headers=FETCH).get_json()
+    assert back["ok"] and back["scene"] == "" and back["kind"] == welcome.auto_scene(datetime.now())
+    assert users.find("lily").look.scene == ""
+    # 管理员挑的存在 admin 那一项
+    admin.post("/me/scene", data={"csrf": token(admin), "scene": "sakura"}, headers=FETCH)
+    assert json.loads(config.USERS_PATH.read_text(encoding="utf-8"))["admin"]["scene"] == "sakura"
+
+
+def test_没有的背景_没带令牌都不行(lily):
+    bad = lily.post("/me/scene", data={"csrf": token(lily), "scene": "volcano"}, headers=FETCH)
+    assert bad.status_code == 400 and bad.get_json()["message"] == "没有这个背景。"
+    assert lily.post("/me/scene", data={"scene": "snow"}, headers=FETCH).status_code == 403
+    assert users.find("lily").look.scene == ""
+
+
+def test_背景的颜色_小道具_天上掉的都在():
+    static = config.BASE_DIR / "src" / "bedrock_cost" / "static"
+    css = (static / "style.css").read_text(encoding="utf-8")
+    for kind in welcome.SCENES:
+        if kind != "day":
+            assert f'[data-kind="{kind}"]' in css, kind
+        assert f".scene-chip.is-{kind}" in css, kind
+    for rule in ('.mascot-stage[data-kind="rain"] .prop-umbrella { display: block; }',
+                 '.mascot-stage[data-kind="snow"] .mascot-sprite .m-scarf { display: inline; }',
+                 '.mascot-stage:is([data-kind="sakura"], [data-kind="autumn"]) .prop-petal { display: block; }',
+                 ".mascot.is-sleeping .mascot-zzz { display: block; }",
+                 ".mascot.is-slip .mascot-sprite { animation: mascot-slip .7s ease-in-out; }"):
+        assert rule in css, rule
+    js = (static / "mascots.js").read_text(encoding="utf-8")
+    for kind in ("rain", "snow", "sakura", "autumn", "fireflies"):
+        assert f"    {kind}: {{ cls: 'wx-" in js, kind
+    assert "const SLEEPY_KINDS = ['night', 'fireflies'];" in js
+    assert "if (stage.dataset.kind === 'rain' && trees.length && Math.random() < 0.6) {" in js     # 下雨往树底下躲
 
 
 def test_风景跟着小家伙动_减少动态效果时都不动():
@@ -505,10 +625,10 @@ def test_风景跟着小家伙动_减少动态效果时都不动():
     css = (static / "style.css").read_text(encoding="utf-8")
     js = (static / "mascots.js").read_text(encoding="utf-8")
     # 视差：三层按镜头各挪一点，越远挪得越多；镜头是几只小家伙站的地方平均一下
-    assert ".scene-sky { left: -32px; right: -32px; transform: translateX(calc(var(--cam, 0) * var(--pan) * 1px)); }" in css
-    assert ".scene-mid { left: -14px; right: -14px; transform: translateX(calc(var(--cam, 0) * var(--pan) * .4px)); }" in css
+    assert "transform: translateX(calc(var(--cam, 0) * var(--pan) * 1px)); }" in css                 # 天
+    assert "transform: translateX(calc(var(--cam, 0) * var(--pan) * .4px)); }" in css                # 树
     assert "stage.style.setProperty('--cam', cam.toFixed(4));" in js
-    assert "const MID_DEPTH = 0.4, PAN = 56;" in js and "--pan: 56;" in css
+    assert "const MID_DEPTH = 0.4;" in js and "return tree.x + cam * pan * MID_DEPTH;" in js and "--pan: 56;" in css
     # 踩草、树晃、扬灰
     assert "tuft.el.classList.toggle('is-pressed', tuft.pressed);" in js and "rustle(tree);" in js and "puff(m);" in js
     assert ("@media (prefers-reduced-motion: reduce) {\n"
@@ -595,7 +715,7 @@ def test_能导出CSV(lily, with_customer):
 
 
 # ====================================================================== 只读用户：改不了
-VIEWER_OK = ("auth.login", "auth.password", "profile.save", "profile.presence")
+VIEWER_OK = ("auth.login", "auth.password", "profile.save", "profile.scene", "profile.presence")
 
 
 def _post_rules(app) -> list[str]:

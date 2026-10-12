@@ -649,7 +649,8 @@ class TestOverviewPage:
             r'<button class="fchip" type="button" data-value="([^"]*)"[^>]*>(.*?)</button>', block, re.S)] == [
             ("", "全部 2"), ("stopped", "已中断 1"), ("error", "异常 1"),
         ]
-        assert html.count('aria-pressed="true"') == 2                          # 两组默认都是「全部」
+        pressed = re.findall(r'<button class="fchip" type="button" data-value="([^"]*)" aria-pressed="true"', html)
+        assert pressed == ["", ""]                                              # 两组默认都是「全部」
         # 卡片上带着筛选要用的值
         card = cards(html)["222222222222"]
         assert 'data-life="风控"' in card and 'data-state="stopped"' in card

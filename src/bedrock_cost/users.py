@@ -8,8 +8,8 @@
 （avatars.person_avatar）。没设显示名就显示用户名；登录、登录记录、操作日志里用的一直是用户名。
 
 存在 users.json（USERS_PATH）：
-  {"admin": {"display", "avatar_text", "avatar_color"},          管理员的资料（不存密码）
-   "users": [{"name", "note", "hash", "stamp", "disabled", "created", "display", "avatar_text", "avatar_color"}]}
+  {"admin": {"display", "avatar_text", "avatar_color", "scene"},            管理员的资料（不存密码）
+   "users": [{"name", "note", "hash", "stamp", "disabled", "created", "display", "avatar_text", "avatar_color", "scene"}]}
   name      用户名（登录用，不分大小写；不能和管理员重名；建了就不改）
   note      备注（是谁，管理员自己看的）
   hash      密码的哈希（werkzeug，和 AUTH_PASSWORD_HASH 同一种）。**明文密码哪儿都不存**
@@ -43,6 +43,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from . import avatars, config
 
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{2,31}")
+SCENE_RE = re.compile(r"[a-z]{1,16}")    # 背景的 key 长这样；有哪些由 welcome.SCENES 说了算
 NAME_RULE = "用户名 3 到 32 个字符：英文字母、数字和 . _ - @，开头是字母或数字。"
 MAX_NOTE = 60
 MAX_DISPLAY = 20
@@ -67,10 +68,11 @@ class WrongPassword(UserError):
 
 @dataclass(frozen=True)
 class Look:
-    """一个人在页面上的样子：显示名、头像（一个字或表情、八组底色里的第几组）。都可以空着。"""
+    """一个人在页面上的样子：显示名、头像（一个字或表情、八组底色里的第几组）、概览欢迎条的背景。都可以空着。"""
     display: str = ""
     avatar_text: str = ""
     avatar_color: int | None = None
+    scene: str = ""         # 背景（welcome.SCENES 的 key），空着是按时间、季节自动挑
 
 
 @dataclass(frozen=True)
@@ -153,12 +155,15 @@ def _look(raw) -> Look:
     if not isinstance(raw, dict):
         return Look()
     color = raw.get("avatar_color")
+    scene = str(raw.get("scene") or "")
     return Look(display=str(raw.get("display") or ""), avatar_text=str(raw.get("avatar_text") or ""),
-                avatar_color=color if isinstance(color, int) and 0 <= color < avatars.TONES else None)
+                avatar_color=color if isinstance(color, int) and 0 <= color < avatars.TONES else None,
+                scene=scene if SCENE_RE.fullmatch(scene) else "")
 
 
 def _look_json(look: Look) -> dict:
-    return {"display": look.display, "avatar_text": look.avatar_text, "avatar_color": look.avatar_color}
+    return {"display": look.display, "avatar_text": look.avatar_text, "avatar_color": look.avatar_color,
+            "scene": look.scene}
 
 
 def _read(path: Path, strict: bool = False) -> Book:

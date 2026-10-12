@@ -4,15 +4,17 @@
 
 还有在线时间的报到（POST /presence）：侧边栏那一套页面每 30 秒报一次（app.js），见 presence。
 它不续登录有效期（create_app 里的 _Sessions），页面开着不动，到点照样要重新登录。
+概览欢迎条右上角换背景（POST /me/scene，mascots.js 用 fetch 发）也记在自己的资料里。
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, jsonify, redirect, render_template, request, url_for
 
-from . import avatars, login_log, presence, users
+from . import avatars, login_log, presence, users, welcome
 from .auth import client_ip, csrf_ok, csrf_protect, current_user, login_required
 from .views import flash_result, page_meta
 
@@ -64,15 +66,35 @@ def me():
 @csrf_protect
 def save():
     """存自己的显示名和头像。只读用户也能存（auth.VIEWER_POSTS）——这是自己的资料，不是台账。"""
+    me = current_user()
     try:
         look = users.clean_look(request.form.get("display"), request.form.get("avatar_text"),
                                 request.form.get("avatar_color"))
-        person = users.save_look(current_user(), look)
+        person = users.save_look(me, replace(look, scene=me.look.scene))    # 挑过的背景不动
     except users.UserError as exc:
         flash_result("资料没保存", text=str(exc), tone="error")
         return redirect(url_for("profile.me"))
     flash_result("资料已保存", person.label, "侧边栏、概览上的欢迎语换成新的名字和头像了。")
     return redirect(url_for("profile.me"))
+
+
+@bp.route("/me/scene", methods=["POST"], endpoint="scene")
+@login_required
+def scene():
+    """换概览欢迎条的背景，记在自己的资料里；空着是自动（按时间、季节挑）。回 JSON：{ok, scene, kind, label}，
+    kind 是现在该画哪个（选了自动就是自动挑出来的那个）。令牌不对只回 403，不弹「表单已过期」。"""
+    if not csrf_ok():
+        return jsonify(ok=False), 403
+    chosen = (request.form.get("scene") or "").strip()
+    if chosen and chosen not in welcome.SCENES:
+        return jsonify(ok=False, message="没有这个背景。"), 400
+    me = current_user()
+    try:
+        users.save_look(me, replace(me.look, scene=chosen))
+    except users.UserError as exc:
+        return jsonify(ok=False, message=str(exc)), 400
+    kind = chosen or welcome.auto_scene(datetime.now())
+    return jsonify(ok=True, scene=chosen, kind=kind, label=welcome.SCENES[kind])
 
 
 @bp.route("/presence", methods=["POST"], endpoint="presence")
