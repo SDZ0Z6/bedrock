@@ -1,6 +1,7 @@
 {% extends "shell.html" %}
 {% from "_macros.html" import avatar, refresh_link, spend_switch %}
 {% from "_customer_macros.html" import cicon %}
+{% from "_mascot.html" import mascot, scene %}
 {% block title %}概览 · Bedrock 成本监控{% endblock %}
 {% block page_title %}概览{% endblock %}
 {% block loading_label %}正在查 Cost Explorer{% endblock %}
@@ -23,6 +24,28 @@
 
 {# 出不了报表时没有筛选条（也没有报错弹窗），刷新只能放在页头 #}
 {% block page_actions %}{% if not report %}{{ refresh_button() }}{% endif %}{% endblock %}
+
+{# 最上面一条欢迎：欢迎回来、今天在线多久（app.js 报到回来跟着变），右边一小片像素风景，几只小家伙在上面走来走去、
+   跳舞，鼠标移上去说一句、点一下蹦一下（welcome.py 的话，static/mascots.js 安排；风景跟着它们动）。在「概览」标题上面 #}
+{% block page_header %}
+  {% set w = welcome %}
+  <section class="welcome" aria-label="欢迎">
+    <div class="welcome-who">
+      {{ avatar(w.person.avatar, large=true) }}
+      <div>
+        <p class="welcome-hi">欢迎回来，<b>{{ w.person.label }}</b></p>
+        <p class="welcome-sub">今天在线 <b data-online-today>{{ w.online }}</b><span class="dot-sep" aria-hidden="true">·</span>{{ w.today }}</p>
+      </div>
+    </div>
+    <div class="mascot-stage" data-mascot-stage>
+      {{ scene(w.night) }}
+      {% for spec in w.mascots %}{{ mascot(spec) }}{% endfor %}
+    </div>
+    <script id="mascot-talk" type="application/json">{{ w.talk | tojson }}</script>
+    <script src="{{ url_for('static', filename='mascots.js') }}" defer></script>
+  </section>
+  {{ super() }}
+{% endblock %}
 
 {# 卡片小标签前面的图标：上游（一栋楼）、启用日期（日历）、已启用（钟）、客户（两个人） #}
 {% macro stat_icon(name) -%}
@@ -357,7 +380,7 @@
   <span>Cost Explorer + CloudWatch</span>
   <span>缓存 {{ cache_label }}</span>
   <span>生成于 {{ generated_at }}</span>
-  <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
+  {% if is_admin() %}<span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>{% endif %}
 </footer>
 
 {% if report and report.rows %}

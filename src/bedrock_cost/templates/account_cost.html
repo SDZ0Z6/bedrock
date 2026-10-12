@@ -153,7 +153,7 @@
   <span>Cost Explorer，已按台账比率折算</span>
   <span>缓存 {{ cache_label }}</span>
   <span>生成于 {{ generated_at }}</span>
-  <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
+  {% if is_admin() %}<span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>{% endif %}
 </footer>
 
 {% if not fatal %}

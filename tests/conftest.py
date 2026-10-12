@@ -16,7 +16,7 @@ import openpyxl
 import pytest
 from botocore.httpsession import URLLib3Session
 
-from bedrock_cost import auth, config, cost_explorer, create_app, excel_source, usage_explorer
+from bedrock_cost import auth, config, cost_explorer, create_app, excel_source, usage_explorer, users
 from bedrock_cost.cost_explorer import CostSplit
 
 TEST_USER = "tester"
@@ -192,6 +192,17 @@ def _scratch_customer_costs(tmp_path, monkeypatch):
 def _scratch_logins(tmp_path, monkeypatch):
     """登录记录也写到临时目录：每个登录的用例都会记一行，不能记进项目目录里的文件。"""
     monkeypatch.setattr(config, "LOGIN_EVENTS_PATH", tmp_path / "login-events.jsonl")
+
+
+@pytest.fixture(autouse=True)
+def _scratch_users(tmp_path, monkeypatch):
+    """只读用户、在线时间写到临时目录，不能动项目目录里的 users.json、presence.json；哈希换成快的（scrypt 一次要几十毫秒）。"""
+    monkeypatch.setattr(config, "USERS_PATH", tmp_path / "users.json")
+    monkeypatch.setattr(config, "PRESENCE_PATH", tmp_path / "presence.json")
+    monkeypatch.setattr(users, "HASH_METHOD", "pbkdf2:sha256:1000")
+    users._decoy.cache_clear()
+    yield
+    users._decoy.cache_clear()
 
 
 @pytest.fixture(autouse=True)

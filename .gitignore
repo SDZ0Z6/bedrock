@@ -19,6 +19,10 @@ customer-costs.json
 mail-state.json
 # 登录记录（设置页的「登录记录」，见 login_log.py）
 login-events.jsonl
+# 只读用户和每个人的名字、头像（用户管理，见 users.py），里面是密码的哈希
+users.json
+# 在线时间（见 presence.py）
+presence.json
 
 # Python
 __pycache__/

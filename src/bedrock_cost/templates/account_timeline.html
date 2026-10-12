@@ -12,9 +12,11 @@
 {% call timeline_box(timeline, categories,
                      ((account.start_date.isoformat() ~ ' 启用到今天 · ') if account.start_date else '') ~ (rows | length) ~ ' 件事',
                      timeline_fallback, '点卡片看详情') %}
-  {# 台账写进来之前的改动（比如上线前改过的额度）只在操作日志里 #}
+  {# 台账写进来之前的改动（比如上线前改过的额度）只在操作日志里。只读用户看不到设置、记不了事 #}
+  {% if is_admin() %}
   <a class="btn btn-sm" href="{{ url_for('settings.audit', q=account.account) }}" title="这个账号在操作日志里的每一条记录">操作日志</a>
   <button class="btn btn-sm btn-primary" type="button" data-open="dlg-note">记一笔</button>
+  {% endif %}
 {% endcall %}
 
 <section class="card" aria-labelledby="ev-table-title">
@@ -63,6 +65,7 @@
   {% endif %}
 </section>
 
+{% if is_admin() %}
 <dialog class="modal modal-sm" id="dlg-note">
   <form method="post" action="{{ url_for('account.add_event', number=account.account) }}" data-loading="正在保存">
     <input type="hidden" name="csrf" value="{{ csrf_token() }}">
@@ -97,6 +100,7 @@
     </footer>
   </form>
 </dialog>
+{% endif %}
 
 {# 库存里打着「风控」：点开库存时记的「标记风控」，提示怎么去掉这个标签（删掉那一条只是不显示） #}
 <dialog class="modal modal-sm" id="dlg-event"
@@ -107,7 +111,8 @@
   </div>
   <div class="modal-body">
     <dl class="ev-facts" data-fill="facts"></dl>
-    {# 「记一笔」那几类、在库存里时记的：这里就能改日期、删掉 #}
+    {# 「记一笔」那几类、在库存里时记的：这里就能改日期、删掉（只读用户只看详情，没有这两个表单） #}
+    {% if is_admin() %}
     <form method="post" action="{{ url_for('account.change_event', number=account.account) }}" id="event-date-form"
           data-loading="正在保存" style="margin-top: 16px" hidden>
       <input type="hidden" name="csrf" value="{{ csrf_token() }}">
@@ -118,9 +123,11 @@
           <input id="event-date" name="date" type="date" max="{{ today.isoformat() }}" required></div>
       </div>
     </form>
+    {% endif %}
     <p class="form-hint" data-fill="hint"></p>
   </div>
   <div class="modal-foot">
+    {% if is_admin() %}
     <form method="post" action="{{ url_for('account.change_event', number=account.account) }}" id="event-delete-form"
           data-loading="正在保存" hidden>
       <input type="hidden" name="csrf" value="{{ csrf_token() }}">
@@ -128,9 +135,10 @@
       <input type="hidden" name="action" value="delete">
       <button class="btn btn-danger" type="submit">删掉这条</button>
     </form>
+    {% endif %}
     <div class="modal-btns">
       <button class="btn" type="button" data-close>关闭</button>
-      <button class="btn btn-primary" type="submit" form="event-date-form" data-event-save hidden>保存日期</button>
+      {% if is_admin() %}<button class="btn btn-primary" type="submit" form="event-date-form" data-event-save hidden>保存日期</button>{% endif %}
     </div>
   </div>
 </dialog>
@@ -140,6 +148,8 @@
 (function () {
   'use strict';
   const dialog = document.getElementById('dlg-event');
+  // 只读用户：点卡片只看详情，不说「去哪改」
+  const canEdit = {{ is_admin() | tojson }};
   function fill(name, text) {
     const target = dialog.querySelector('[data-fill="' + name + '"]');
     if (target) target.textContent = text;
@@ -167,13 +177,15 @@
   const box = document.querySelector('[data-timeline]');
   if (box) box.addEventListener('timeline:pick', function (event) {
     const item = event.detail;
-    const mine = !!item.editable;
+    const mine = canEdit && !!item.editable;
     for (const form of dialog.querySelectorAll('form')) {
       form.hidden = !mine;
       form.querySelector('[name="id"]').value = mine ? item.id : '';
     }
-    dialog.querySelector('[data-event-save]').hidden = !mine;
-    dialog.querySelector('#event-date').value = item.date;
+    const save = dialog.querySelector('[data-event-save]');
+    if (save) save.hidden = !mine;
+    const date = dialog.querySelector('#event-date');
+    if (date) date.value = item.date;
     fill('title', item.title);
     const facts = dialog.querySelector('[data-fill="facts"]');
     facts.replaceChildren();
@@ -189,7 +201,8 @@
       value.textContent = pair[1];
       facts.append(term, value);
     }
-    fill('hint', mine && item.who ? '改日期、删掉都会写进操作日志。删掉只是不在时间线上显示。'
+    fill('hint', !canEdit ? ''
+      : mine && item.who ? '改日期、删掉都会写进操作日志。删掉只是不在时间线上显示。'
       : mine ? '在库存里时记的（没有客户），不连着哪个客户的钱，就在这里改。改日期、删掉都会写进操作日志；'
         + '删掉只是不在时间线上显示，生命周期、额度不会跟着变。' + (item.kind === 'risk' ? dialog.dataset.riskTip || '' : '')
       : item.id === 'start' ? '启用日期在账号管理里改。'

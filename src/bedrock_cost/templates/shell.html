@@ -15,8 +15,12 @@
      'model_quota':    ('正在拉四个区的配额', '首次约 45 秒，Service Quotas 限流；之后走缓存'),
      'cost_estimate':  ('正在拉用量和单价', ''),
      'accounts':       ('正在读台账', ''),
+     'people':         ('正在读用户', ''),
      'settings':       ('正在读记录', ''),
+     'me':             ('正在读你的资料', ''),
    } %}
+{# 谁在用：只读用户看不到账号管理、用户管理、设置的入口；侧边栏底下是自己的头像和名字，点了去自己的资料页 #}
+{% set me = current_user() %}
 
 {% macro nav_item(endpoint, key, label, icon) -%}
   {%- set hint = LOADING_HINTS.get(key, ('', '')) -%}
@@ -82,7 +86,8 @@
 
     {# 入口：概览看全部账号的卡片；客户看每个客户名下的账号、钱和时间线；运营看板看收入、毛利、
        风险和用量；「账号」是某一个账号的页面（摘要、成本、用量、预估、时间线、配额六个页签），点进去是
-       上次看的那个账号；账号管理改台账。设置（操作日志、登录记录）在最下面。 #}
+       上次看的那个账号；账号管理改台账；用户管理建只读用户。设置（操作日志、登录记录）在最下面。
+       账号管理、用户管理和设置只有 admin 看得到（只读用户直接开网址也会被 auth._gate 带回概览）。 #}
     <nav class="side-nav">
       {{ nav_item('main.index', 'overview', '概览',
          '<rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1"/>
@@ -107,19 +112,39 @@
           <circle cx="6" cy="7" r="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/>
           <path d="M3.8 11.2c.4-1.2 1.2-1.8 2.2-1.8s1.8.6 2.2 1.8M9.8 6.5h3M9.8 9h2.2" fill="none"
                 stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>') }}
+      {% if is_admin() %}
       {{ nav_item('accounts.index', 'accounts', '账号管理',
          '<circle cx="8" cy="5.5" r="2.75" fill="none" stroke="currentColor" stroke-width="1.5"/>
           <path d="M2.5 14c0-2.9 2.5-4.75 5.5-4.75s5.5 1.85 5.5 4.75" fill="none"
                 stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>') }}
+      {{ nav_item('people.index', 'people', '用户管理',
+         '<circle cx="6.5" cy="5.2" r="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M1.8 13.8c0-2.6 2.1-4.4 4.7-4.4 1 0 1.9.25 2.6.7" fill="none" stroke="currentColor"
+                stroke-width="1.5" stroke-linecap="round"/>
+          <circle cx="12" cy="11.6" r="2.7" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          <path d="m10.8 11.6.85.85 1.6-1.7" fill="none" stroke="currentColor" stroke-width="1.3"
+                stroke-linecap="round" stroke-linejoin="round"/>') }}
+      {% endif %}
     </nav>
 
     <div class="side-foot">
-      {# 设置：平台自己的记录（操作日志、登录记录），和上面看数的页面分开放 #}
+      {# 设置：平台自己的记录（操作日志、登录记录）和用户，和上面看数的页面分开放 #}
+      {% if is_admin() %}
       {{ nav_item('settings.index', 'settings', '设置',
          '<path d="M2 4.5h7.2M12.8 4.5H14M2 11.5h1.2M6.8 11.5H14" fill="none" stroke="currentColor" stroke-width="1.5"
                 stroke-linecap="round"/>
           <circle cx="11" cy="4.5" r="1.8" fill="none" stroke="currentColor" stroke-width="1.5"/>
           <circle cx="5" cy="11.5" r="1.8" fill="none" stroke="currentColor" stroke-width="1.5"/>') }}
+      {% endif %}
+      {# 现在是谁：头像 + 名字 + 角色，点了去自己的资料页（改名字、头像，只读用户在那里改密码）。
+         收起时只剩头像，悬浮看全名 #}
+      {% if me %}
+        <a class="nav-item side-user {% if active_page == 'me' %}nav-on{% endif %}" href="{{ url_for('profile.me') }}"
+           title="{{ me.label }}（{{ me.name }} · {{ me.role_label }}）：我的资料" data-loading="正在读你的资料">
+          <span class="avatar avatar-xs {{ me.avatar.css }}" aria-hidden="true"><span>{{ me.avatar.text }}</span></span>
+          <span class="nav-label side-user-name">{{ me.label }}<small class="role-tag{% if me.admin %} is-admin{% endif %}">{{ me.role_label }}</small></span>
+        </a>
+      {% endif %}
       {# 复用 nav-item：收起时和上面两个入口一样只剩图标 #}
       <a class="nav-item side-exit" href="{{ url_for('auth.logout') }}" title="退出登录">
         <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -303,6 +328,11 @@
   window.addEventListener('pageshow', function (event) { if (event.persisted) hide(); });
 })();
 </script>
+
+{# 在线时间：登录着的每个页面每 30 秒报一次到（app.js；presence.py）。报到不续登录有效期 #}
+{% if me %}
+<script id="presence" type="application/json">{{ {'url': url_for('profile.presence'), 'csrf': csrf_token(), 'every': 30} | tojson }}</script>
+{% endif %}
 
 {# 弹窗、账号选择器、柱状图提示这些几个页面共用的交互 #}
 <script src="{{ url_for('static', filename='app.js') }}"></script>

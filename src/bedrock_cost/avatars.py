@@ -93,3 +93,16 @@ def avatar_for(
     source = email or partner or number or "?"
     letter = next((ch for ch in source if ch.isalnum()), "?")
     return Avatar(text=_letter(letter), tone=tone, emoji=False)
+
+
+def person_avatar(name: str, label: str, chosen: str = "", color: int | None = None) -> Avatar:
+    """平台上的人（管理员、只读用户）的头像，规则和账号头像一样：选了字就用选的那一个字，没选用显示的名字的
+    第一个字；底色没选就按用户名定（改了显示名颜色也不变）。"""
+    tone = color if color is not None and 0 <= color < TONES else tone_for(name or "?")
+    picked = first_grapheme(chosen)
+    if picked:
+        if len(picked) == 1 and picked.isalnum():
+            return Avatar(text=_letter(picked), tone=tone, emoji=False)
+        return Avatar(text=picked, tone=tone, emoji=True)
+    letter = next((ch for ch in (label or name or "?") if ch.isalnum()), "?")
+    return Avatar(text=_letter(letter), tone=tone, emoji=False)

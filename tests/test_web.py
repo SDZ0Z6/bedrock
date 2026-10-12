@@ -387,6 +387,7 @@ class TestShell:
         # 「账号」进的是最近看的那个账号，所以链接是 /account/ 而不是某个号码
         assert [(href, title) for href, title, _ in items] == [
             ("/", "概览"), ("/customers/", "客户"), ("/account/", "账号"), ("/accounts/", "账号管理"),
+            ("/users/", "用户管理"),
             ("/settings/", "设置"),     # 在侧边栏底下，和看数的页面分开放
         ]
         assert [title for _, title, on in items if on] == [current]
@@ -608,10 +609,12 @@ class TestOverviewPage:
         assert re.search(r'<span class="acct-chip k-active">.*?活跃</span>', bottom, re.S)
         assert "查看详情" not in scrape(bottom)
 
-    def test_sidebar_does_not_print_the_user_name(self, logged_in, ledger, fake_costs):
+    def test_sidebar_shows_who_is_logged_in(self, logged_in, ledger, fake_costs):
+        """有了只读用户，侧边栏底下是现在是谁：头像、名字、角色，点了去自己的资料页。"""
         html = logged_in.get("/").get_data(as_text=True)
         foot = re.search(r'<div class="side-foot">(.*?)</aside>', html, re.S).group(1)
-        assert TEST_USER not in scrape(foot)
+        assert f"{TEST_USER[0].upper()} {TEST_USER} 管理员" in scrape(foot)
+        assert re.search(r'<a class="nav-item side-user " href="/me"', foot)
 
     def test_card_shows_usage_and_balance(self, logged_in, book, fake_costs):
         card = cards(logged_in.get("/").get_data(as_text=True))["222222222222"]

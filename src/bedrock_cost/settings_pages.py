@@ -1,11 +1,11 @@
-"""设置：平台自己的记录，两个页签。
+"""设置：平台自己的记录，两个页签，只有 admin 进得来（只读用户在 auth._gate 就挡掉了）。
 
   · 操作日志：台账的每一次改动（谁、什么时候、改了什么），就是台账旁边的 ledger-audit.log，凭证的值
     从来不写进去（见 excel_source._audit）。能搜、能按类筛：搜账号号码就是这个账号的全部改动，包括
-    时间线（EVENTS 表）出现之前改过的额度。
-  · 登录记录：每次登录成功、失败、被锁定、退出（见 login_log）。
+    时间线（EVENTS 表）出现之前改过的额度。用户管理里的改动、用户改自己的密码也记在这里（「用户」类）。
+  · 登录记录：所有人每次登录成功、失败、被锁定、退出（见 login_log）。一个人的记录在这个人的资料页上也有。
 
-只读本地文件，不调任何 AWS API，不花钱。
+只读本地文件，不调任何 AWS API，不花钱。用户的增删改在用户管理（people_pages）。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from pathlib import Path
 
 from flask import Blueprint, redirect, render_template, request, url_for
 
-from . import config, excel_source, login_log
+from . import config, excel_source, login_log, users
 from .auth import client_ip, login_required
 from .views import page_meta
 
@@ -28,7 +28,9 @@ TABS = (("audit", "操作日志", "settings.audit", "正在读操作日志"),
         ("logins", "登录记录", "settings.logins", "正在读登录记录"))
 AUDIT_TAIL = 5000     # 操作日志只读最后这么多行（一行一百来字，几年也就几兆）
 AUDIT_SHOW = 500      # 一次最多列这么多条，更早的用搜索找
-AUDIT_KINDS = ("账号", "客户", "标签", "告警", "其他")
+AUDIT_KINDS = ("账号", "客户", "标签", "告警", "用户", "其他")
+# 用户管理（people_pages）、用户改自己的密码（auth.password）写进操作日志的说法，归「用户」类
+USER_NOTES = ("新建用户 ", "重置用户 ", "停用用户 ", "恢复用户 ", "删除用户 ", "用户 ")
 _NUMBER = re.compile(r"(?<!\d)(\d{12})(?!\d)")
 # 操作日志最后一列的 IP（网页上改的才有，见 excel_source._audit）。老日志只有三列
 _IP = re.compile(r"[0-9A-Fa-f:.]{2,45}")
@@ -58,6 +60,8 @@ class AuditLine:
 
 def _kind(note: str) -> str:
     """按 excel_source 写日志时的说法归类。"""
+    if note.startswith(USER_NOTES):
+        return "用户"
     if note.endswith(("TG 告警", "邮件告警")):
         return "告警"
     if "生命周期" in note:
@@ -137,5 +141,7 @@ def logins():
     }
     return render_template(
         "settings.html", tab="logins", tabs=_tabs("logins"), active_page="settings",
-        entries=entries, summary=summary, my_ip=client_ip(), **page_meta(),
+        entries=entries, summary=summary, my_ip=client_ip(),
+        viewers={user.key for user in users.load()}, **page_meta(),
     )
+

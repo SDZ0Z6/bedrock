@@ -8,8 +8,8 @@ from pathlib import Path
 
 from flask import Flask
 
-from . import chart, config, customers
-from .auth import csrf_token
+from . import chart, config, customers, presence
+from .auth import csrf_token, current_user, is_admin
 
 # 等待动效的素材。webm 优先——带 alpha 通道的版本只能是 webm（mp4 的 alpha
 # 只有 Safari 认），有就用它；没有就退回 mp4。每次请求 stat 一下，换文件刷新
@@ -78,7 +78,7 @@ def loading_media(static_folder: str | None) -> str:
 
 def register_filters(app: Flask) -> None:
     app.jinja_env.filters.update(money=money, money0=money0, pct=pct, ratio=ratio, compact=compact,
-                                 short_model=short_model)
+                                 short_model=short_model, online=presence.label)
     # 图表色板的唯一来源是 chart.py，模板里的图例和表格色块取同一套值，
     # 不在 CSS 里重复维护一遍
     app.jinja_env.globals["series_color"] = chart.color_for
@@ -87,6 +87,9 @@ def register_filters(app: Flask) -> None:
     app.jinja_env.globals["heat_ramp"] = chart.HEAT_RAMP
     # 表单里的隐藏域直接调它，不用每个视图都往模板塞一遍
     app.jinja_env.globals["csrf_token"] = csrf_token
+    # 谁在用：只读用户的页面上不画改东西的按钮（is_admin()）。放全局而不是 context_processor，
+    # 这样 import 进来的宏里也能用
+    app.jinja_env.globals.update(is_admin=is_admin, current_user=current_user)
     # 客户：头像（插画或首字母）、国旗、地区名、按编号找客户——客户页、概览卡片、账号页都要画
     app.jinja_env.globals.update(
         avatar_info=customers.avatar_info,

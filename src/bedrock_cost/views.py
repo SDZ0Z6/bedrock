@@ -20,8 +20,9 @@ from . import (
     ops_report,
     quotas,
     usage_explorer,
+    welcome,
 )
-from .auth import login_required
+from .auth import current_user, login_required
 from .dates import earliest_queryable
 from .excel_source import ExcelSourceError, load_accounts, load_customers, load_lifecycle
 from .report import build_report
@@ -93,6 +94,7 @@ def index():
         fatal = f"{type(exc).__name__}: {exc}"
 
     context: dict = {}
+    facts = None      # 概览上的几个数，顶上的小家伙拿来说事（welcome.facts_from）
     if report:
         accounts = load_accounts()
         tags = load_lifecycle()
@@ -117,6 +119,7 @@ def index():
             SimpleNamespace(id=cid, name=owners[cid].name, count=sum(1 for card in cards if card.customer == cid))
             for cid in owners if any(card.customer == cid for card in cards)
         ]
+        facts = welcome.facts_from(cards, report, len(owners))
         context = dict(
             customer_chips=customer_chips,
             stock_cards=sum(1 for card in cards if card.customer not in owners),
@@ -148,6 +151,8 @@ def index():
     return render_template(
         "index.html",
         active_page="overview",
+        # 顶上的欢迎条：欢迎回来、今天在线多久、走来走去的小家伙（welcome.py）
+        welcome=welcome.context(current_user(), facts=facts),
         report=report,
         fatal=fatal,
         notes=notes,

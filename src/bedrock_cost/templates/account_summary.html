@@ -62,7 +62,7 @@
       <div>
         <h2 class="viz-title">告警</h2>
       </div>
-      <a class="viz-link" href="{{ url_for('accounts.index', edit=account.key) }}" data-loading="正在读台账">修改</a>
+      {% if is_admin() %}<a class="viz-link" href="{{ url_for('accounts.index', edit=account.key) }}" data-loading="正在读台账">修改</a>{% endif %}
     </div>
     <dl class="kv-list">
       <div class="kv-row">
@@ -173,7 +173,7 @@
       <h2 class="viz-title">账号资料</h2>
       <p class="viz-sub">{{ excel_name }} 里的这一行</p>
     </div>
-    <a class="viz-link" href="{{ url_for('accounts.index', edit=account.key) }}" data-loading="正在读台账">修改</a>
+    {% if is_admin() %}<a class="viz-link" href="{{ url_for('accounts.index', edit=account.key) }}" data-loading="正在读台账">修改</a>{% endif %}
   </div>
   <dl class="info-grid">
     <div><dt>账号邮箱</dt><dd>{{ account.email or '未填' }}</dd></div>
@@ -191,6 +191,6 @@
   <span>Cost Explorer + CloudWatch</span>
   <span>缓存 {{ cache_label }}</span>
   <span>生成于 {{ generated_at }}</span>
-  <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
+  {% if is_admin() %}<span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>{% endif %}
 </footer>
 {% endblock %}

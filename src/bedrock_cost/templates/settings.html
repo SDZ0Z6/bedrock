@@ -1,4 +1,4 @@
-{# 设置：平台自己的记录。两个页签：操作日志（台账的每一次改动）、登录记录。只读本地文件，不调 AWS #}
+{# 设置：平台自己的记录，只有 admin 进得来。两个页签：操作日志（台账和用户的每一次改动）、登录记录。不调 AWS #}
 {% extends "shell.html" %}
 {% from "_customer_macros.html" import cicon %}
 {% block title %}设置 · {{ '操作日志' if tab == 'audit' else '登录记录' }} · Bedrock 成本监控{% endblock %}
@@ -20,8 +20,8 @@
   <div class="card-head">
     <div class="card-title">
       <h2 id="audit-title">操作日志</h2>
-      <span class="card-note">台账的每一次改动：谁、什么时候、改了什么（账号管理、客户页上的操作都在）。原件是台账旁边的
-        {{ audit_name }}，凭证的值从来不写进去</span>
+      <span class="card-note">台账的每一次改动：谁、什么时候、改了什么（账号管理、客户页上的操作都在），用户管理里的改动也记在这里。原件是台账旁边的
+        {{ audit_name }}，凭证的值、密码从来不写进去</span>
     </div>
   </div>
   <form class="log-tools" method="get" action="{{ url_for('settings.audit') }}" role="search">
@@ -97,7 +97,8 @@
             <tr>
               <td class="tab-num log-when">{{ entry.when.astimezone().strftime('%Y-%m-%d %H:%M:%S') }}</td>
               <td><span class="login-kind k-{{ entry.tone }}"><i class="state-dot" aria-hidden="true"></i>{{ entry.label }}</span></td>
-              <td class="log-who {% if entry.failed %}tone-danger{% endif %}">{{ entry.user or '—' }}</td>
+              <td class="log-who {% if entry.failed %}tone-danger{% endif %}">{{ entry.user or '—' }}
+                {%- if entry.user and entry.user.casefold() in viewers %}<small>只读用户</small>{% endif %}</td>
               <td class="tab-num">{{ entry.ip or '—' }}{% if entry.ip and entry.ip == my_ip %}<span class="me-tag">你现在的 IP</span>{% endif %}</td>
               {# 别的平台一键登录：表单是从那个网站提交的 #}
               <td class="log-source">{% if entry.source %}{{ entry.source }}<small>从这个网站提交</small>

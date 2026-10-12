@@ -33,12 +33,14 @@
 
   {# 页头：和别的页面一样，左边是标题，右边是这一页的按钮。
      调整额度：就在这一页改（时间线上记一笔）；编辑资料：去账号管理打开这个账号的「修改」弹窗，改完、取消都回来。
-     按钮和别的页面页头上的一个样子（账号管理的「生命周期标签」「新增账号」）：图标 + 字，深色的是主按钮 #}
+     按钮和别的页面页头上的一个样子（账号管理的「生命周期标签」「新增账号」）：图标 + 字，深色的是主按钮。
+     只读用户没有这几个按钮，也没有它们的弹窗 #}
   <header class="page-head acct-page-head">
     <div>
       <h1>账号</h1>
       <p class="page-sub">一个账号一页：消费、用量、预估、时间线和配额。网址里就是号码，能收藏、发给别人</p>
     </div>
+    {% if is_admin() %}
     <div class="page-actions">
       {# 恢复使用：打着「风控」「结算」、还没结算的账号（AWS 解除了风控、换下来的又要接着用），和客户页名下账号里的一样 #}
       {% if restorable %}
@@ -48,6 +50,7 @@
       <a class="btn btn-primary" href="{{ url_for('accounts.index', edit=account.key, back=here) }}"
          data-loading="正在读台账">{{ cicon('pencil') }}编辑资料</a>
     </div>
+    {% endif %}
   </header>
 
   {# 切换账号（「当前账户」）：标题下面，跳到另一个账号的同一个页签。不开 JS 时是个普通的下拉 + 提交 #}
@@ -112,6 +115,7 @@
     {% endfor %}
   </nav>
 
+  {% if is_admin() %}
   {% if restorable %}
   <dialog class="modal modal-sm" id="dlg-acct-restore">
     <form method="post" action="{{ url_for('account.restore', number=account.account) }}" data-loading="正在保存">
@@ -218,6 +222,7 @@
     });
   })();
   </script>
+  {% endif %}
 {% endblock %}
 
 {% block content %}{% block tab_content %}{% endblock %}{% endblock %}

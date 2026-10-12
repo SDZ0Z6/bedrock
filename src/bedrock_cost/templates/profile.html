@@ -1,0 +1,267 @@
+{# 一个人的资料页：自己的（/me，profile_pages.me），或者管理员在用户管理里点开的别人（/users/<用户名>）。
+   自己的：改显示名和头像（一个字或表情 + 八组底色，和账号头像一样，预览跟着输入变）；只读用户还能改密码。
+   别人的：名字、头像只有本人能改；管理员在页头重置密码、停用 / 恢复、删除（_people_macros.html、people.js）。
+   都有：今天和最近 7 天在线多久（presence.py：页面开着就算），这个人的登录记录 #}
+{% extends "shell.html" %}
+{% from "_macros.html" import avatar %}
+{% from "_customer_macros.html" import cicon %}
+{% from "_people_macros.html" import user_actions, user_dialogs %}
+{% block title %}{{ '我的资料' if own else person.label ~ ' · 用户管理' }} · Bedrock 成本监控{% endblock %}
+{% block loading_label %}正在读资料{% endblock %}
+
+{% block page_header %}
+  {% if not own %}
+    <nav class="crumbs" aria-label="位置">
+      <a href="{{ url_for('people.index') }}" data-loading="正在读用户">用户管理</a><span aria-hidden="true">›</span><span>{{ person.label }}</span>
+    </nav>
+  {% endif %}
+  <header class="page-head">
+    <div>
+      <h1>{{ '我的资料' if own else person.label }}</h1>
+      <p class="page-sub">{% if own %}名字和头像显示在侧边栏和概览的欢迎语上{% else %}在线时间和登录记录；名字、头像只有本人能改{% endif %}</p>
+    </div>
+    {% if not own and user %}<div class="page-actions">{{ user_actions(user, request.path) }}</div>{% endif %}
+  </header>
+{% endblock %}
+
+{% block content %}
+<section class="profile-hero" aria-label="{{ person.label }}">
+  <span class="avatar avatar-xl {{ person.avatar.css }}" aria-hidden="true"><span>{{ person.avatar.text }}</span></span>
+  <div class="profile-hero-main">
+    <h2 class="profile-name">{{ person.label }}</h2>
+    <p class="profile-meta">
+      <span class="tab-num">@{{ person.name }}</span>
+      <span class="role-tag{% if person.admin %} is-admin{% endif %}">{{ person.role_label }}</span>
+      {%- if user and user.disabled %}<span class="role-tag is-off">已停用</span>{% endif %}
+      {%- if user and user.created %}<span class="dot-sep" aria-hidden="true">·</span><span class="tab-num">{{ user.created.astimezone().strftime('%Y-%m-%d') }} 建</span>{% endif %}
+      {%- if person.admin %}<span class="dot-sep" aria-hidden="true">·</span>.env 里的账号{% endif %}
+      {%- if user and user.note %}<span class="dot-sep" aria-hidden="true">·</span>{{ user.note }}{% endif %}
+    </p>
+  </div>
+  <div class="profile-today">
+    <span>今天在线</span>
+    {# 看的是自己：页面每 30 秒报到一次，回来的数跟着换（app.js 认 data-online-today） #}
+    <strong {% if own %}data-online-today{% endif %}>{{ today_seconds | online }}</strong>
+  </div>
+</section>
+
+<div class="profile-grid">
+  {% if own %}
+  <section class="card" aria-labelledby="look-title">
+    <div class="card-head">
+      <div class="card-title">
+        <h2 id="look-title">名字和头像</h2>
+        <span class="card-note">改了以后侧边栏、概览的欢迎语跟着变。登录还是用用户名 {{ person.name }}</span>
+      </div>
+    </div>
+    <form class="card-pad" method="post" action="{{ url_for('profile.save') }}" data-loading="正在保存"
+          data-look-form data-name="{{ person.name }}" data-auto-tone="{{ auto_tone }}">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <div class="form-grid">
+        <div class="field field-full"><label for="me-display">名字</label>
+          <input id="me-display" name="display" maxlength="{{ max_display }}" value="{{ person.look.display }}"
+                 placeholder="{{ person.name }}" autocomplete="off">
+          <span class="form-hint">不填就显示用户名；最多 {{ max_display }} 个字</span></div>
+        <div class="field field-full">
+          <span class="field-label" id="me-avatar-label">头像</span>
+          <div class="avatar-pick" data-avatar-pick>
+            <span class="avatar avatar-lg {{ person.avatar.css }}" data-avatar-preview aria-hidden="true"><span>{{ person.avatar.text }}</span></span>
+            <div class="avatar-pick-body">
+              <div class="avatar-pick-row">
+                <input class="avatar-emoji-input" name="avatar_text" maxlength="16" value="{{ person.look.avatar_text }}"
+                       autocomplete="off" spellcheck="false" placeholder="一个字或表情" title="只用第一个字：填一串也只取第一个"
+                       aria-labelledby="me-avatar-label" data-avatar-emoji>
+                <div class="emoji-quick" role="group" aria-label="常用表情">
+                  {% for emoji in emojis %}
+                    <button class="emoji-btn" type="button" data-emoji="{{ emoji }}" title="用 {{ emoji }}">{{ emoji }}</button>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="swatch-row" role="radiogroup" aria-label="头像底色">
+                <label class="swatch-opt swatch-auto" title="按用户名自动配色">
+                  <input type="radio" name="avatar_color" value="" {% if look_color == '' %}checked{% endif %}><span>自动</span>
+                </label>
+                {% for tone in tones %}
+                  <label class="swatch-opt" title="底色 {{ tone + 1 }}">
+                    <input type="radio" name="avatar_color" value="{{ tone }}" {% if look_color == tone | string %}checked{% endif %}>
+                    <span class="av-{{ tone }}" aria-hidden="true"></span><span class="sr-only">底色 {{ tone + 1 }}</span>
+                  </label>
+                {% endfor %}
+              </div>
+              <span class="form-hint">头像里只放一个字：没填就用名字的第一个字</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card-actions"><button class="btn btn-primary" type="submit">保存</button></div>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="pw-title">
+    <div class="card-head">
+      <div class="card-title">
+        <h2 id="pw-title">密码</h2>
+        <span class="card-note">{% if person.admin %}管理员只有一个，密码在服务器上改{% else %}改成你自己的：至少 {{ min_password }} 位，不能和用户名一样{% endif %}</span>
+      </div>
+    </div>
+    {% if person.admin %}
+      <p class="card-pad profile-note">管理员的密码在服务器的 <code>.env</code> 里（<code>AUTH_PASSWORD</code>，或者 <code>AUTH_PASSWORD_HASH</code>），
+        改完重启服务。只读用户的密码在用户管理里重置。</p>
+    {% else %}
+      <form class="card-pad" method="post" action="{{ url_for('auth.password') }}" data-password-form>
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="next" value="{{ url_for('profile.me') }}">
+        <div class="form-grid">
+          <div class="field field-full"><label for="pw-current">现在的密码</label>
+            <input id="pw-current" name="current" type="password" required autocomplete="current-password"></div>
+          <div class="field"><label for="pw-new">新密码</label>
+            <input id="pw-new" name="new_password" type="password" required minlength="{{ min_password }}" maxlength="128"
+                   autocomplete="new-password"></div>
+          <div class="field"><label for="pw-again">再输一遍</label>
+            <input id="pw-again" name="again" type="password" required maxlength="128" autocomplete="new-password"></div>
+        </div>
+        <p class="form-error" data-password-error role="alert" hidden></p>
+        <div class="card-actions">
+          <span class="card-note">改好以后，别处登录着的会退出</span>
+          <button class="btn btn-primary" type="submit">改密码</button>
+        </div>
+      </form>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <section class="card{% if not own %} span-all{% endif %}" aria-labelledby="online-title">
+    <div class="card-head">
+      <div class="card-title">
+        <h2 id="online-title">在线时间</h2>
+        <span class="card-note">页面开着就算（放在后台也算），几个标签同时开着不重复算；合上电脑、关了页面就停</span>
+      </div>
+    </div>
+    <div class="card-pad">
+      <div class="online-sum">
+        <div><span>今天</span><strong>{{ today_seconds | online }}</strong></div>
+        <div><span>最近 7 天</span><strong>{{ week_seconds | online }}</strong></div>
+      </div>
+      <div class="online-bars" role="list" aria-label="最近 7 天每天在线多久">
+        {% for day, seconds in days %}
+          <div class="online-bar{% if loop.last %} is-today{% endif %}" role="listitem"
+               title="{{ day.isoformat() }} · {{ seconds | online }}">
+            <span class="online-bar-track"><i style="height: {{ '%.1f' % (seconds / most * 100) if most else 0 }}%"></i></span>
+            <span class="online-bar-day">{{ '今天' if loop.last else day.strftime('%m-%d') }}</span>
+            <span class="sr-only">{{ seconds | online }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+</div>
+
+<section class="card" aria-labelledby="logins-title">
+  <div class="card-head">
+    <div class="card-title">
+      <h2 id="logins-title">登录记录</h2>
+      <span class="card-note">近 30 天登录成功 {{ login_summary.ok }} 次{% if login_summary.failed %}、失败 {{ login_summary.failed }} 次（拿这个用户名试过、没登进来的）{% endif %}。不记密码</span>
+    </div>
+  </div>
+  {% if entries %}
+    <div class="table-scroll">
+      <table class="log-table">
+        <thead><tr><th>时间</th><th>结果</th><th>IP</th><th>浏览器</th></tr></thead>
+        <tbody>
+          {% for entry in entries %}
+            <tr>
+              <td class="tab-num log-when">{{ entry.when.astimezone().strftime('%Y-%m-%d %H:%M:%S') }}</td>
+              <td><span class="login-kind k-{{ entry.tone }}"><i class="state-dot" aria-hidden="true"></i>{{ entry.label }}</span></td>
+              <td class="tab-num">{{ entry.ip or '—' }}{% if own and entry.ip and entry.ip == my_ip %}<span class="me-tag">你现在的 IP</span>{% endif %}</td>
+              <td class="log-agent" title="{{ entry.agent }}">{{ entry.browser }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if login_total > entries | length %}
+      <p class="log-foot">共 {{ login_total }} 条，列了最近的 {{ entries | length }} 条{% if is_admin() %}；全部人的在「设置 → 登录记录」{% endif %}</p>
+    {% endif %}
+  {% else %}
+    <p class="empty">还没有登录记录。</p>
+  {% endif %}
+</section>
+
+{% if not own and user %}{{ user_dialogs(min_password=min_password) }}{% endif %}
+
+{% if own %}
+<script>
+(function () {
+  'use strict';
+  // ---- 头像：预览跟着名字、选的字、底色变（规则和 avatars.person_avatar 一样）；点一个现成的表情填进框里，再点一下清掉
+  const form = document.querySelector('[data-look-form]');
+  if (form) {
+    const preview = form.querySelector('[data-avatar-preview]');
+    const input = form.querySelector('[data-avatar-emoji]');
+    const first = function (text) {
+      text = (text || '').trim();
+      if (!text) return '';
+      if (window.Intl && Intl.Segmenter) {
+        const one = new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)[Symbol.iterator]().next();
+        return one.done ? '' : one.value.segment;
+      }
+      return Array.from(text)[0];
+    };
+    const upper = function (ch) { const up = ch.toUpperCase(); return up.length === 1 ? up : ch; };
+    const paint = function () {
+      const chosen = form.querySelector('input[name="avatar_color"]:checked');
+      const tone = chosen && chosen.value !== '' ? Number(chosen.value) : Number(form.dataset.autoTone);
+      const picked = first(input.value);
+      let text = '?', emoji = false;
+      if (picked) {
+        emoji = !/^[\p{L}\p{N}]$/u.test(picked);
+        text = emoji ? picked : upper(picked);
+      } else {
+        const label = form.elements.display.value.trim() || form.dataset.name;
+        const letter = label.match(/[\p{L}\p{N}]/u);
+        text = letter ? upper(letter[0]) : '?';
+      }
+      preview.className = 'avatar avatar-lg av-' + tone + (emoji ? ' avatar-emoji' : '');
+      preview.firstElementChild.textContent = text;
+    };
+    form.addEventListener('input', paint);
+    form.addEventListener('change', paint);
+    form.addEventListener('click', function (event) {
+      const button = event.target.closest('[data-emoji]');
+      if (!button) return;
+      input.value = input.value === button.dataset.emoji ? '' : button.dataset.emoji;
+      paint();
+    });
+  }
+
+  // ---- 改密码：fetch 存，错了写在框下面（不整页刷新：密码不回填，刷新了就得重打一遍）
+  const pwForm = document.querySelector('[data-password-form]');
+  if (pwForm) {
+    const error = pwForm.querySelector('[data-password-error]');
+    const say = function (text) { error.textContent = text; error.hidden = !text; };
+    pwForm.addEventListener('submit', function (event) {
+      event.preventDefault();
+      if (pwForm.elements.new_password.value !== pwForm.elements.again.value) { say('两次输的新密码不一样。'); return; }
+      const button = pwForm.querySelector('[type="submit"]');
+      button.disabled = true;
+      fetch(pwForm.action, {
+        method: 'POST',
+        body: new FormData(pwForm),
+        headers: { 'X-Requested-With': 'fetch' },
+        credentials: 'same-origin'
+      })
+        .then(function (response) { return response.json(); })
+        .then(function (result) {
+          if (!result.ok) { say(result.message || '没改成，再试一次。'); return; }
+          pwForm.reset();
+          say('');
+          window.appToast('ok', result.message, result.text);
+        })
+        .catch(function () { say('没改成：页面可能已经过期，刷新后再试。'); })
+        .finally(function () { button.disabled = false; });
+    });
+  }
+})();
+</script>
+{% endif %}
+{% endblock %}
