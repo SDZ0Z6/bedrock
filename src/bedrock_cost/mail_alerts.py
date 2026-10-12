@@ -45,7 +45,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import alerts, config, mail_inbox, mail_rules, telegram
+from . import alerts, cards, config, mail_inbox, mail_rules, telegram
 from .alerts import RunSummary, Sender
 from .cards import Card, Details, Notes, Quote, Row
 from .excel_source import Account, load_accounts
@@ -130,18 +130,20 @@ def _forget(state: MailState, now: datetime) -> None:
 
 
 # --------------------------------------------------------------- 卡片
-def mail_card(finding: Finding, account_id: str, mail: Mail, email: str = "") -> Card:
+def mail_card(finding: Finding, account_id: str, mail: Mail, email: str = "", avatar=None) -> Card:
     """一封认出来的邮件 -> 一张卡片。和其他告警卡片同一套样式：
 
-        标题行（图标 + 标题 + 徽章）/ 详情面板（账号 UID + 账号邮箱 + 关键字段 + 收到时间）/
+        标题行（图标 + 标题 + 徽章）/ 详情面板（账号头像 + 账号邮箱 + 账号 ID + 关键字段 + 收到时间）/
         邮件原文（原主题 + 节选）/ 怎么处理 / 底部发件人 + 署名
 
-    email 是台账里这个账号的邮箱；账号不在台账里、认不出是哪个账号时是空的。
+    email、avatar 是台账里这个账号的邮箱和头像（Account.avatar）；账号不在台账里、认不出是哪个账号时是空的，
+    头像就按号码算。
     """
     rows = [Row(fact.label, fact.value, tone=fact.tone, pill=fact.pill) for fact in finding.facts]
     rows.append(Row("收到时间", alerts._moment(mail.received) if mail.received else "—", bold=False))
+    face = cards.account_face(avatar, email, account_id) if account_id else None
     blocks: list = [
-        Details(rows, uid=account_id, email=email),
+        Details(rows, uid=account_id, email=email, face=face),
         Quote("邮件原文（节选）" if finding.excerpt else "邮件主题", finding.excerpt, heading=mail.subject),
     ]
     if finding.notes:
@@ -321,7 +323,7 @@ def _alert(
             return done()
 
     email = account.email if account is not None else ""
-    card = mail_card(finding, account_id, mail, email)
+    card = mail_card(finding, account_id, mail, email, account.avatar if account is not None else None)
     groups = alerts._deliver_all(chats, card, run.summary, run.send, run.log)
     if groups:
         run.state.recent[fingerprint] = run.now.isoformat()
