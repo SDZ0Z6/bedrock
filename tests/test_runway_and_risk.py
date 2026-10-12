@@ -2,7 +2,7 @@
 
 1. 「还能用几天」：账号刚风控、近 7 天只剩零星几分钱的消费时，余额 ÷ 日均是天文数字，加到今天上超出了
    日期的范围（OverflowError），客户详情页 500。现在：日均不到半分钱当没有消费；一年以上写「一年以上」，
-   不算日期；走势图的预测最多画历史的两倍长。
+   不算日期。（客户详情页上那张后来换成了「预估」，客户列表的「快用完的客户」还按它排。）
 2. 把打着「风控」的库存账号分给客户（或者替换上来），生命周期被改成了「正常」——风控是 AWS 那边的事，
    分给谁都还在。现在：「风控」留着，只去掉上一段合作的「结算」，没有风控的才标「正常」。
 """
@@ -12,9 +12,7 @@ from __future__ import annotations
 import re
 from datetime import date, timedelta
 
-import pytest
-
-from bedrock_cost import chart, customers, excel_source, usage_explorer
+from bedrock_cost import customers, excel_source, usage_explorer
 from bedrock_cost.excel_source import Customer
 
 from .conftest import LEDGER_ROWS
@@ -24,31 +22,6 @@ from .test_web import page_env, usage_states  # noqa: F401  (autouse)
 
 TODAY = date(2026, 10, 9)
 
-
-def history(days: int = 21, balance: float = 1_000_000.0) -> list[tuple]:
-    start = TODAY - timedelta(days=days - 1)
-    return [(start + timedelta(days=i), balance) for i in range(days)]
-
-
-# ====================================================================== 走势图
-@pytest.mark.parametrize("per_day", [1e-7, 1e-300, 0.001])
-def test_日均很低_走势图不崩_写一年以上(per_day):
-    svg = chart.render_runway(history(), per_day)
-    assert "一年以上" in svg and "按日均一年以上才用完" in svg
-    # 画不到 0：末端没有空心点（只有今天那个实心点）
-    assert svg.count('<circle class="chart-marker"') == 1
-
-
-def test_几十天内用完_照常画到0_写日期():
-    svg = chart.render_runway(history(balance=300_000.0), 30_000.0)      # 10 天
-    assert (TODAY + timedelta(days=10)).strftime("%m-%d") in svg
-    assert svg.count('<circle class="chart-marker"') == 2
-
-
-def test_一年内但画不下_虚线停在右边_写用完的日期():
-    svg = chart.render_runway(history(balance=1_000_000.0), 10_000.0)    # 100 天
-    assert (TODAY + timedelta(days=100)).strftime("%m-%d") in svg
-    assert svg.count('<circle class="chart-marker"') == 1                 # 没画到 0
 
 
 # ====================================================================== 还能用几天
@@ -84,21 +57,17 @@ def test_一年以内_照常算日期():
     assert view.runs_out_on == TODAY + timedelta(days=int(view.days_left))
 
 
-def test_客户详情页_日均很低也打得开(admin, fake_costs, monkeypatch):
+def test_日均很低_客户页和客户列表都打得开(admin, fake_costs, monkeypatch):
     make_customer()
     post(admin, "/customers/C001/assign", account=[ALPHA])
     number = by_account(str(LEDGER_ROWS[0][1])).account
     spend = {number: {(date.today() - timedelta(days=i)).isoformat(): 1e-6 for i in range(1, 60)}}
     monkeypatch.setattr(usage_explorer, "account_series", series_for(spend))
-    response = admin.get("/customers/C001")
-    assert response.status_code == 200
-    html = response.get_data(as_text=True)
-    # 文字和走势图说的是一回事：都当最近没有消费，图上不画预测
-    assert "最近 7 天没有消费" in html
-    runway = re.search(r'<svg class="chart-svg line-chart runway-chart".*?</svg>', html, re.S).group(0)
-    assert "最近没有消费" in runway and "stroke-dasharray=\"5 4\"" not in runway
-    spend[number] ={(date.today() - timedelta(days=i)).isoformat(): 0.5 for i in range(1, 60)}
-    html = admin.get("/customers/C001?refresh=1").get_data(as_text=True)
+    assert admin.get("/customers/C001").status_code == 200
+    assert admin.get("/customers/").status_code == 200
+    # 每天 5 毛：一年以上才用完，列表的「快用完的客户」写「一年以上」，不算日期
+    spend[number] = {(date.today() - timedelta(days=i)).isoformat(): 0.5 for i in range(1, 60)}
+    html = admin.get("/customers/?refresh=1").get_data(as_text=True)
     assert "一年以上" in html
 
 

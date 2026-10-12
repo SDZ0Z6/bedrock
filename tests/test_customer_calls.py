@@ -4,6 +4,9 @@
 近 30 天、全部每天一个点（UTC 日期），查这段时间在这个客户名下用过的账号，每个账号只算它在用的那几天。客户页的「账号」卡片是按阶段的横条（长短按占全部账号的比例，后面是这一档的账号头像）。
 
 账号页摘要页签的「近 24 小时调用」（按模型的折线图，没改）下面补一行「今天预估花费」（用量 × 牌价，和「预估」页签一个算法）。
+
+客户页的「预估」（原来是「还能用几天」）：近 7 天每天的预估花费（CloudWatch 的 token × 牌价，UTC 日期，今天算到现在），
+按账号叠起来，颜色和「每日消费」一样，每个账号只算它在用的那几天；和「调用次数」上的今日预估一起查一次。
 """
 
 from __future__ import annotations
@@ -91,12 +94,13 @@ def test_默认近24小时_一个账号一条线_线尾是头像_下面的签能
     assert "acct-one@example.com · 近 24 小时 1,824 次 · 今日 $0.00" in tips
 
 
-def test_和每日消费换了位置_在还能用几天左边(admin, fake_costs):
-    """调用次数和「还能用几天」一排（占三分之二宽）；每日消费挪到图的最后，整行宽。"""
+def test_和每日消费换了位置_在预估左边(admin, fake_costs):
+    """调用次数和「预估」（原来是「还能用几天」）一排（占三分之二宽）；每日消费挪到图的最后，整行宽。"""
     make(admin)
     html = detail(admin)
-    assert (html.index(">调用次数<") < html.index(">还能用几天<") < html.index(">每日消费<")
+    assert (html.index(">调用次数<") < html.index('<h2 class="viz-title">预估</h2>') < html.index(">每日消费<")
             < html.index('id="tl-title"'))
+    assert ">还能用几天<" not in html
     calls = html.rindex("<article", 0, html.index(">调用次数<"))
     spend = html.rindex("<article", 0, html.index(">每日消费<"))
     assert html.startswith('<article class="viz-card col-4" id="calls"', calls)
@@ -254,14 +258,22 @@ def test_账号卡片是按阶段的横条(admin, fake_costs):
 
 
 # ====================================================================== 今日预估
-def test_标题下面只写时间_旁边是今日预估(admin, fake_costs, real_calls, monkeypatch):
+def estimates(monkeypatch, daily: dict[str, list[float]], partial: bool = False) -> list:
+    """「预估」那一次查询换成假的：按号码给近 7 天每天的钱（最后一个是今天），没写的账号每天 0。返回问过的
+    [(号码们, 起, 止)]。"""
     asked = []
 
-    def estimate(accounts, today, refresh=False):
-        asked.append(sorted(a.account for a in accounts))
-        return {a.key: 12.5 if a.account == ALPHA_NO else 7.5 for a in accounts}, False
+    def fake(accounts, start, end, refresh=False):
+        asked.append((sorted(a.account for a in accounts), start, end))
+        width = (end - start).days + 1
+        return {a.key: list(daily.get(a.account, [0.0] * width)) for a in accounts}, partial
 
-    monkeypatch.setattr(customer_pages, "_estimate_today", estimate)
+    monkeypatch.setattr(customer_pages, "_estimate_days", fake)
+    return asked
+
+
+def test_标题下面只写时间_旁边是今日预估(admin, fake_costs, real_calls, monkeypatch):
+    asked = estimates(monkeypatch, {ALPHA_NO: [0.0] * 6 + [12.5], BETA_NO: [0.0] * 6 + [7.5]})
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
     box = card(detail(admin))
@@ -270,20 +282,20 @@ def test_标题下面只写时间_旁边是今日预估(admin, fake_costs, real_
     assert "$20.00 今日预估" in scrape(box) and "有的没算上" not in box
     tips = re.findall(r'<button class="legend-toggle"[^>]*title="([^"]+)"', box)
     assert "acct-one@example.com · 近 24 小时 1,824 次 · 今日 $12.50" in tips
-    assert asked == [sorted([ALPHA_NO, BETA_NO])]
+    # 和「预估」那张一起查一次：近 7 天，按 UTC 日期
+    utc_today = datetime.now(timezone.utc).date()
+    assert asked == [(sorted([ALPHA_NO, BETA_NO]), utc_today - timedelta(days=6), utc_today)]
 
 
-def test_今日预估只估有调用的账号(admin, fake_costs, monkeypatch):
+def test_今日预估就是预估那张的今天(admin, fake_costs, monkeypatch):
+    """同一份数：BETA 近 24 小时没画线（这一小时才开始用的也是这样），今天的预估照样算进去，两张对得上。"""
     quiet_except(monkeypatch, {ALPHA_NO: 30.0})
-    asked = []
-    monkeypatch.setattr(customer_pages, "_estimate_today",
-                        lambda accounts, today, refresh=False: (asked.append([a.account for a in accounts])
-                                                                or {a.key: 1.0 for a in accounts}, True))
+    estimates(monkeypatch, {ALPHA_NO: [1.0] * 7, BETA_NO: [1.0] * 7}, partial=True)
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
-    box = card(detail(admin))
-    assert asked == [[ALPHA_NO]]
-    assert "$1.00 今日预估（有的没算上）" in scrape(box)
+    html = detail(admin)
+    assert "$2.00 今日预估（有的没算上）" in scrape(card(html))
+    assert "今天到现在 $2.00" in scrape(estimate_card(html))
 
 
 def test_每个账号各估各的_刷新只清一次缓存(ledger, fake_estimate, monkeypatch):
@@ -296,6 +308,93 @@ def test_每个账号各估各的_刷新只清一次缓存(ledger, fake_estimate
     cleared = []
     real_clear = cost_estimate.clear_cache
     monkeypatch.setattr(cost_estimate, "clear_cache", lambda: (cleared.append(1), real_clear()))
-    costs, partial = customer_pages.today_estimates(accounts, date.today(), refresh=True)
-    assert costs == {a.key: pytest.approx(20.0) for a in accounts} and partial is False
+    end = date.today()
+    costs, partial = customer_pages.daily_estimates(accounts, end - timedelta(days=6), end, refresh=True)
+    assert costs == {a.key: [pytest.approx(20.0)] * 7 for a in accounts} and partial is False
     assert len(cleared) == 1
+
+
+# ====================================================================== 预估（原来是「还能用几天」）
+def estimate_card(html: str) -> str:
+    start = html.index('<h2 class="viz-title">预估</h2>')
+    return html[html.rindex("<article", 0, start):html.index("</article>", start)]
+
+
+def bars(html: str) -> list[dict]:
+    """「预估」柱状图交给悬浮脚本的数据：一天一项 {label, total, rows: [{name, color, v}]}。"""
+    return json.loads(re.search(r'<script id="cust-estimate-data" type="application/json">(.*?)</script>',
+                                html, re.S).group(1))
+
+
+def test_预估_近7天每天一根_按账号叠_今天算到现在(admin, fake_costs, monkeypatch):
+    from bedrock_cost import usage_explorer
+
+    from .test_customers import series_for
+
+    today = datetime.now().date()
+    spend = {number: {(today - timedelta(days=i)).isoformat(): 100.0 for i in range(1, 10)} for number in (ALPHA_NO, BETA_NO)}
+    monkeypatch.setattr(usage_explorer, "account_series", series_for(spend))     # 两个都在「每日消费」的图例里
+    estimates(monkeypatch, {ALPHA_NO: [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0], BETA_NO: [1.0] * 7})
+    make(admin)
+    post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
+    html = detail(admin)
+    box = estimate_card(html)
+    assert box.startswith('<article class="viz-card col-2" id="estimate"')
+    text = scrape(box)
+    assert "$287 近 7 天预估" in text and "有的没算上" not in text
+    assert "今天到现在 $71.00 · 昨天 $61.00" in text
+    utc_today = datetime.now(timezone.utc).date()
+    first = (utc_today - timedelta(days=6)).strftime("%m-%d")
+    assert f"{first} ~ {utc_today.strftime('%m-%d')} · CloudWatch 用量 × 牌价，按 UTC 日期" in text
+    days = bars(html)
+    assert len(days) == 7 and days[0]["label"] == first and days[-1]["label"] == "今天"
+    assert [row["v"] for row in days[-1]["rows"]] == [70.0, 1.0]
+    # 颜色和「每日消费」一样：同一个账号同一个颜色
+    spend = legend(html, "cust-spend")
+    assert all(spend[row["name"]] == row["color"] for day in days for row in day["rows"])
+    # 底下一个账号一个签（花得多的在前），点了挑几个只看它们——和每日消费、调用次数一样（app.js）
+    picks = legend(box, "cust-estimate")
+    assert list(picks) == ["acct-one", "acct-two"] and all(spend[name] == color for name, color in picks.items())
+    tips = re.findall(r'<button class="legend-toggle"[^>]*title="([^"]+)"', box)
+    assert tips == ["acct-one 近 7 天预估 $280.00", "acct-two 近 7 天预估 $7.00"]
+
+
+def test_预估_只算在这个客户名下的那几天(admin, fake_costs, monkeypatch):
+    """前天把 ALPHA 换成 BETA：ALPHA 从前天起不算（和每日消费一个规矩）；BETA 的启用日期更早，按启用日期算。"""
+    estimates(monkeypatch, {ALPHA_NO: [100.0] * 7, BETA_NO: [1.0] * 7})
+    make(admin)
+    post(admin, "/customers/C001/assign", account=[ALPHA])
+    swapped = datetime.now(timezone.utc).date() - timedelta(days=2)
+    post(admin, "/customers/C001/replace", old=ALPHA, new=BETA, reason="风控", date=swapped.isoformat())
+    html = detail(admin)
+    assert "$407 近 7 天预估" in scrape(estimate_card(html))           # ALPHA 4 天 × $100 + BETA 7 天 × $1
+    days = bars(html)
+    assert [row["v"] for row in days[3]["rows"]] == [100.0, 1.0] and [row["v"] for row in days[4]["rows"]] == [1.0]
+
+
+def test_预估_停用的账号不查(admin, fake_costs, monkeypatch):
+    from bedrock_cost import excel_source
+
+    asked = estimates(monkeypatch, {})
+    make(admin)
+    post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
+    excel_source.set_enabled(BETA, False, actor="tester")
+    detail(admin)
+    assert asked[-1][0] == [ALPHA_NO]
+
+
+def test_预估_有的没算上_两张都说一声(admin, fake_costs, real_calls, monkeypatch):
+    estimates(monkeypatch, {ALPHA_NO: [2.0] * 7}, partial=True)
+    make(admin)
+    post(admin, "/customers/C001/assign", account=[ALPHA])
+    html = detail(admin)
+    assert "$14 近 7 天预估（有的没算上）" in scrape(estimate_card(html))
+    assert "$2.00 今日预估（有的没算上）" in scrape(card(html))
+
+
+def test_预估_没有账号的客户(admin, fake_costs):
+    make(admin)
+    html = detail(admin)
+    text = scrape(estimate_card(html))
+    assert "$0 近 7 天预估" in text and "今天到现在 $0.00 · 昨天 $0.00" in text and "这段时间没有数据" in text
+    assert 'data-legend-for="cust-estimate"' not in html                 # 没有账号就没有签

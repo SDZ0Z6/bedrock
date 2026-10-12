@@ -5,7 +5,8 @@
  *   [data-tl-scroll] > [data-tl-track]   时间线画在这里（没开 JS 时是 hidden）
  *   [data-tl-fallback]     没开 JS 时的一列清单，脚本接手以后藏起来
  *   [data-tl-tools]        筛选（可选）：[data-tl-filter="cat"] 里的 .fchip，值在 data-value；
- *                          [data-tl-acct] 是按账号筛的下拉（app.js 的账号选择器），选了触发里面 select 的 change
+ *                          [data-tl-acct] 是按账号筛的下拉（app.js 的账号选择器，能多选），勾了触发里面 select 的 change，
+ *                          勾了几个就看涉及其中任何一个的事
  *   [data-tl-latest]       「回到最近」按钮（可选）
  *   template[data-icon]    卡片上的图标（服务端画好），按名字克隆
  * 点卡片：在区块上发一个 timeline:pick 事件（detail 是那一条），弹什么窗由页面自己定。
@@ -52,7 +53,7 @@
     const items = payload.items || [];
     const icons = {};
     for (const template of root.querySelectorAll('template[data-icon]')) icons[template.dataset.icon] = template;
-    const picked = { cat: '', acct: '' };
+    const picked = { cat: '', accts: [] };
 
     function card(item, x, side, order) {
       const box = el('div', 'tl-ev ' + side + ' k-' + item.color + (item.auto ? '' : ' is-hand'));
@@ -92,12 +93,15 @@
 
     function render() {
       const shown = items.filter(function (item) {
-        return (!picked.cat || item.cat === picked.cat) && (!picked.acct || (item.keys || []).indexOf(picked.acct) >= 0);
+        return (!picked.cat || item.cat === picked.cat) &&
+          (!picked.accts.length || (item.keys || []).some(function (key) { return picked.accts.indexOf(key) >= 0; }));
       });
       track.replaceChildren();
       if (!shown.length) {
         track.style.width = '100%';
-        track.append(el('div', 'tl-axis is-before'), el('p', 'tl-empty', picked.acct ? '这个账号没有这一类的事。' : '没有这一类的事。'));
+        const scope = picked.accts.length > 1 ? '这几个账号' : picked.accts.length ? '这个账号' : '';
+        track.append(el('div', 'tl-axis is-before'),
+                     el('p', 'tl-empty', scope + (picked.cat || !scope ? '没有这一类的事。' : '在时间线上还没有事。')));
         return;
       }
       const firstX = PAD, todayX = PAD + (shown.length - 1) * SLOT + 90;
@@ -160,26 +164,28 @@
       });
     }
 
-    // 按账号筛：下拉的开合、搜索、键盘归 app.js；这里接 change，把按钮换成选中的那个（头像、邮箱、号码）
+    // 按账号筛（能多选）：下拉的开合、搜索、键盘、打勾归 app.js；这里接 change，按钮上换成勾了的那几个：
+    // 一个都没勾是「全部账号」；勾了一个写它的头像、邮箱、号码；好几个叠三个头像，写「第一个 等 N 个」
     const acct = root.querySelector('[data-tl-acct]');
     const acctSelect = acct && acct.querySelector('select');
     if (acctSelect) {
+      const acctOptions = [].slice.call(acct.querySelectorAll('.acct-opt'));
       acctSelect.addEventListener('change', function () {
-        picked.acct = acctSelect.value;
-        let chosen = null;
-        for (const option of acct.querySelectorAll('.acct-opt')) {
-          const on = option.dataset.value === acctSelect.value;
-          option.setAttribute('aria-selected', String(on));
-          if (on) chosen = option;
+        picked.accts = [].map.call(acctSelect.selectedOptions, function (option) { return option.value; });
+        const chosen = acctOptions.filter(function (option) {
+          return option.dataset.value && picked.accts.indexOf(option.dataset.value) >= 0;
+        });
+        const faces = acct.querySelector('[data-tl-acct-avs]');
+        faces.replaceChildren();
+        for (const option of chosen.slice(0, 3)) {
+          const face = option.querySelector('.mini-av');
+          if (face) faces.append(face.cloneNode(true));
         }
-        const face = chosen && picked.acct ? chosen.querySelector('.mini-av') : null;
-        const av = acct.querySelector('[data-tl-acct-av]');
-        av.className = face ? face.className : 'mini-av';
-        av.textContent = face ? face.textContent : '';
-        av.hidden = !face;
-        const name = chosen && chosen.querySelector('.acct-opt-name');
-        const sub = picked.acct && chosen ? chosen.querySelector('.acct-opt-sub') : null;
-        acct.querySelector('[data-tl-acct-name]').textContent = name ? name.textContent : '全部账号';
+        faces.hidden = !faces.childElementCount;
+        const first = chosen[0] && chosen[0].querySelector('.acct-opt-name');
+        const sub = chosen.length === 1 ? chosen[0].querySelector('.acct-opt-sub') : null;
+        acct.querySelector('[data-tl-acct-name]').textContent = !first ? '全部账号'
+          : chosen.length > 1 ? first.textContent + ' 等 ' + chosen.length + ' 个' : first.textContent;
         acct.querySelector('[data-tl-acct-sub]').textContent = sub ? sub.textContent : '';
         render();
         latest(false);

@@ -8,7 +8,8 @@
 6. 月度对账单「按月」：一个月一行只写数和几个账号，点月份展开每个账号；前面没有动静的月份不列；
 7. 记一笔能选「标记风控」，和名下账号里的「标记风控」一样；
 8. 账号页的时间线也能记一笔（记在账号现在归的客户名下），「记一笔」那几类在账号页就能改日期、删掉；
-9. 换账号的下拉右边是生命周期（在 test_account_pages 里）。
+9. 换账号的下拉右边是生命周期（在 test_account_pages 里）；
+10. 时间线按账号筛：名下的账号都列上（替换上来的、台账里直接填了客户的，一件事都没有也在），解绑了的单独一组；能多选。
 """
 
 from __future__ import annotations
@@ -91,6 +92,72 @@ def test_时间线按账号筛_能搜邮箱或ID_右边是生命周期(admin, fa
     pills = {number: re.findall(r'<i class="tag-dot" style="--tag: ([^"]+)"></i>([^<]+)</span>', side) for number, side in sides}
     assert pills[BETA_NO] == [(colors.get(name, "#87867f"), name) for name in lifecycle[BETA_NO]]
     assert 'data-tl-filter="acct"' not in html           # 不再是一排签
+
+
+# ====================================================================== 10. 下拉里名下的账号都在、能多选
+def acct_filter(html: str) -> tuple[str, list[tuple[str, str]]]:
+    """「按账号筛选」下拉：(整块 HTML, [(号码, 分组)])，不含最上面的「全部账号」，按页面上的顺序。"""
+    box = re.search(r'<div class="tl-acct-filter" data-tl-acct>(.*?)</ul>', html, re.S).group(1)
+    found = re.findall(r'<li class="acct-opt"[^>]*data-group="(\w+)" data-value="(\d+)"', box)
+    return box, [(number, group) for group, number in found]
+
+
+def test_时间线按账号筛_替换上来的账号也在(admin, fake_costs):
+    """替换上来的账号只在「替换账号」那件事里当「换成谁」，以前下拉只收每件事的主角，它就没有了。"""
+    make(admin)
+    post(admin, "/customers/C001/assign", account=[ALPHA])
+    post(admin, "/customers/C001/replace", old=ALPHA, new=BETA, reason="风控")
+    html = detail(admin)
+    assert not [item for item in timeline(html) if (item["who"] or {}).get("number") == BETA_NO]
+    box, people = acct_filter(html)
+    assert people == [(BETA_NO, "on"), (ALPHA_NO, "on")]           # 和名下账号表格一个顺序：使用中的在前
+    assert "已不在名下" not in box
+
+
+def test_时间线按账号筛_台账里直接填了客户的也在(monkeypatch):
+    """在 Excel 里直接填了客户：一件事都没有（连「分配账号」都没有），下拉里照样有它。"""
+    from bedrock_cost import customer_pages
+
+    monkeypatch.setattr(usage_explorer, "account_series", series_for({}))
+    accounts = [account("100000000001", row=2), account("100000000002", start=date(2026, 7, 1), row=3)]
+    history = [event(1, date(2026, 9, 1), "assign", "100000000001", amount=1_000_000.0)]
+    customer = Customer(id="C001", name="星河智能", since=date(2026, 6, 3))
+    view = customers.build_views([customer], accounts, history, TODAY, with_alerts=False)["C001"]
+    payload = customer_pages._timeline_payload(view, {a.account: a for a in accounts})
+    assert not [item for item in payload["items"] if "100000000002" in item["keys"]]
+    assert [(face["number"], face["group"]) for face in payload["accounts"]] == [
+        ("100000000001", "on"), ("100000000002", "on"),
+    ]
+
+
+def test_时间线按账号筛_解绑了的单独一组(admin, fake_costs):
+    make(admin)
+    post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
+    post(admin, "/customers/C001/unassign", key=ALPHA, note="分错了")
+    box, people = acct_filter(detail(admin))
+    assert people == [(BETA_NO, "on"), (ALPHA_NO, "gone")]
+    header = '<li class="acct-picker-group" role="presentation" data-group="gone">已不在名下</li>'
+    assert box.count(header) == 1 and box.index(header) < box.index(f'data-value="{ALPHA_NO}"')
+
+
+def test_时间线按账号筛_能多选(admin, fake_costs):
+    make(admin)
+    post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
+    html = detail(admin)
+    box, _ = acct_filter(html)
+    select = re.search(r'<select name="tl-acct" multiple aria-labelledby="tl-acct-label">(.*?)</select>', box, re.S)
+    assert select and '<option value="">' not in select.group(1)          # 「全部账号」只在弹层里：点它清空
+    assert 'role="listbox" aria-label="账号" aria-multiselectable="true"' in box
+    assert "点下面的账号可以多选" in box and "data-tl-acct-avs" in box
+    static = Path(config.__file__).parent / "static"
+    app_js = (static / "app.js").read_text(encoding="utf-8")
+    assert "const multi = select.multiple;" in app_js
+    assert "if (multi) { toggle(option); return; }" in app_js               # 多选：点了不收弹层
+    timeline_js = (static / "timeline.js").read_text(encoding="utf-8")
+    assert "const picked = { cat: '', accts: [] };" in timeline_js
+    assert "(item.keys || []).some(function (key) { return picked.accts.indexOf(key) >= 0; })" in timeline_js
+    assert ".tl-acct-avs .mini-av + .mini-av { margin-left: -5px; }" in CSS
+    assert ".tl-acct-filter .acct-picker-pop { width: 100%; }" in CSS      # 手机上弹层不伸出屏幕
 
 
 # ====================================================================== 5. 名下账号

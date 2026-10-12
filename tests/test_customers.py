@@ -488,15 +488,3 @@ def test_国旗():
     assert 'class="flag"' in customers.flag_svg("CN")
     assert customers.flag_svg("XX") != customers.flag_svg("CN")   # 认不出的画地球
     assert all(code in customers.FLAGS or code == "OTHER" for code, _ in customers.REGIONS)
-
-
-# ==================================================================== 图
-def test_还能用几天的图():
-    from bedrock_cost import chart
-    history = [(TODAY - timedelta(days=20 - i), 1_000_000 - i * 30_000) for i in range(21)]
-    svg = chart.render_runway(history, 30_000)
-    assert 'class="chart-line"' in svg and "今天" in svg
-    assert "stroke-dasharray=\"5 4\"" in svg                # 往后推的那段是虚线
-    flat = chart.render_runway(history, 0)                  # 最近没量：不画预测
-    assert "stroke-dasharray=\"5 4\"" not in flat
-    assert "没有数据" in chart.render_runway([], 10)
