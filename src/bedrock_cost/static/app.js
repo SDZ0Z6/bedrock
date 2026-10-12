@@ -91,6 +91,29 @@
     more.textContent = showing ? more.dataset.moreLabel : '收起';
   });
 
+  // ------------------------------------------------------------ 在线时间：页面开着就报到
+  // 登录着的每个页面（shell.html 里有 #presence）一打开报一次、之后每 30 秒报一次，放在后台也报（浏览器会放慢到
+  // 一分钟一次，服务端按「离上次多久」算，见 presence.py）。回来的是今天累计多久，概览顶上的「今天在线」跟着变。
+  // 报不上（登录过期了、令牌不对）就不再报
+  const presenceBox = document.getElementById('presence');
+  if (presenceBox) {
+    const presence = JSON.parse(presenceBox.textContent);
+    let presenceTimer = null;
+    const ping = function () {
+      const body = new FormData();
+      body.append('csrf', presence.csrf);
+      fetch(presence.url, { method: 'POST', body: body, headers: { 'X-Requested-With': 'fetch' }, credentials: 'same-origin' })
+        .then(function (response) { return response.ok ? response.json() : Promise.reject(response.status); })
+        .then(function (result) {
+          if (!result.ok) throw new Error('presence');
+          for (const box of document.querySelectorAll('[data-online-today]')) box.textContent = result.label;
+        })
+        .catch(function () { clearInterval(presenceTimer); });
+    };
+    ping();
+    presenceTimer = setInterval(ping, presence.every * 1000);
+  }
+
   // ------------------------------------------------------------ 导出 CSV
   // 带 data-export 的下载链接用 fetch 取：要查几秒钟，等的时候按钮写「正在导出…」；拿到 CSV 就存下来，
   // 拿到的是报错（服务端回一句纯文本）就在右上角说——不让浏览器把报错存成一个文件。没开 JS 就是普通下载

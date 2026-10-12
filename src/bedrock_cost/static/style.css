@@ -225,6 +225,14 @@ td.num, th.num, .tab-num { font-variant-numeric: tabular-nums; }
 }
 .side-exit { color: var(--text-mute); }
 .side-exit:hover { color: var(--danger); }
+/* 现在是谁：头像 + 名字 + 角色，点了去自己的资料页。头像占图标那一格（收起时只剩它） */
+.side-user .avatar-xs { margin: 0 -2px; }
+.side-user-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.role-tag { display: inline-flex; align-items: center; height: 19px; padding: 0 7px; border-radius: 999px; background: var(--panel-3);
+            color: var(--text-mute); font-size: 11px; font-weight: 400; white-space: nowrap; }
+.role-tag.is-admin { background: var(--accent-tint); color: var(--accent-dim); }
+.role-tag.is-off { background: var(--danger-tint); color: var(--danger); }
+.role-tag + .role-tag { margin-left: 6px; }
 
 .content { flex: 1 1 auto; min-width: 0; padding: 30px 40px 56px; }
 
@@ -905,6 +913,10 @@ a.fchip:hover { text-decoration: none; }
 /* 下拉框、表格里的小号：去掉外圈 */
 .avatar-sm { width: 26px; height: 26px; border: 0; background: none; }
 .avatar-sm > span { width: 26px; height: 26px; font-size: 12px; }
+/* 侧边栏底下自己的头像：和导航图标差不多大 */
+.avatar-xs { width: 20px; height: 20px; border: 0; background: none; }
+.avatar-xs > span { width: 20px; height: 20px; font-size: 10px; }
+.avatar-xs.avatar-emoji > span { font-size: 12px; }
 .avatar-sm.avatar-emoji > span { font-size: 14px; }
 .av-0 { --av-bg: #f3d9cb; --av-fg: #8a3f22; }
 .av-1 { --av-bg: #d6e4f2; --av-fg: #2b5a8a; }
@@ -1393,6 +1405,120 @@ a.fchip:hover { text-decoration: none; }
   .login-shell { grid-template-columns: minmax(0, 1fr); justify-items: center; }
   .login-panel { justify-self: center; }
   .login-art { display: none; }
+}
+
+/* ======================================================= 概览顶上的欢迎条、像素小家伙
+ * 左边：头像、「欢迎回来，名字」、今天在线多久；右边一条台子，几只小家伙在上面走来走去、跳舞（static/mascots.js），
+ * 鼠标移上去头上冒对话框。小家伙的帧在 templates/_mascot.html：哪一帧露出来由下面这几条管 */
+.welcome { position: relative; display: flex; align-items: center; gap: 28px; margin: 0 0 22px; padding: 16px 22px 12px;
+           background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.welcome-who { display: flex; align-items: center; gap: 14px; flex: 0 1 auto; min-width: 0; }
+.welcome-hi { margin: 0; font-family: var(--font-display); font-size: 24px; line-height: 1.3; color: var(--text-dim); overflow-wrap: anywhere; }
+.welcome-hi b { color: var(--text); font-weight: 500; }
+.welcome-sub { margin: 4px 0 0; font-size: 13px; color: var(--text-mute); }
+.welcome-sub b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.welcome-sub .dot-sep { margin: 0 6px; color: var(--line-strong); }
+/* --pan：镜头走到头时（--cam = ±0.5）最远那层挪多少像素的两倍；mascots.js 里也有这个数 */
+.mascot-stage { --pan: 56; position: relative; flex: 1 1 auto; align-self: stretch; min-width: 240px; min-height: 118px; }
+.mascot { position: absolute; left: 0; bottom: 6px; z-index: 1; display: block; padding: 0; border: 0; background: none; cursor: pointer;
+          will-change: transform; -webkit-tap-highlight-color: transparent; }
+.mascot:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 4px; border-radius: 6px; }
+.mascot.is-talking { z-index: 2; }
+.mascot-flip { display: block; transform: scaleX(var(--dir, 1)); }
+.mascot-sprite { display: block; fill: #d97757; transform-origin: 50% 100%; }
+.mascot-sprite .m-eyes { fill: #141413; transform-box: fill-box; transform-origin: 50% 50%;
+                         animation: mascot-blink 4.6s infinite; animation-delay: var(--blink, 0s); }
+.mascot-shadow { position: absolute; left: 14%; right: 14%; bottom: -3px; height: 3px; border-radius: 50%; background: rgba(20, 20, 19, .12); }
+/* 平时：站着、正脸、手放下 */
+.mascot .m-arms-up, .mascot .m-legs-a, .mascot .m-legs-b, .mascot .m-eyes-side { opacity: 0; }
+/* 走路：两对腿轮流抬，身子一高一低；眼睛看着前面（往左走整个翻过来） */
+.mascot.is-walking .m-legs-stand, .mascot.is-walking .m-eyes-front { opacity: 0; }
+.mascot.is-walking .m-eyes-side { opacity: 1; }
+.mascot.is-walking .m-legs-a { animation: mascot-frame .36s steps(1, end) infinite; }
+.mascot.is-walking .m-legs-b { animation: mascot-frame .36s steps(1, end) infinite; animation-delay: -.18s; }
+.mascot.is-walking .mascot-sprite { animation: mascot-bob .36s steps(1, end) infinite; }
+/* 跳舞：手一上一下，身子左右歪着一蹦一蹦 */
+.mascot.is-dancing .m-arms-down { animation: mascot-frame .5s steps(1, end) infinite; }
+.mascot.is-dancing .m-arms-up { animation: mascot-frame .5s steps(1, end) infinite; animation-delay: -.25s; }
+.mascot.is-dancing .mascot-sprite { animation: mascot-dance 1s steps(1, end) infinite; }
+/* 说话：举手打个招呼；被点了：蹦一下 */
+.mascot.is-talking .m-arms-up { opacity: 1; }
+.mascot.is-talking .m-arms-down { opacity: 0; }
+.mascot.is-hop .mascot-sprite { animation: mascot-hop .45s cubic-bezier(.3, .7, .4, 1); }
+/* 对话框：在头顶上，靠台子边上时脚本往里挪（--shift），小尾巴照样指着它 */
+.mascot-bubble { position: absolute; left: 50%; bottom: calc(100% + 10px); z-index: 3; padding: 7px 11px; border-radius: 10px;
+                 background: var(--text); color: var(--bg); font-size: 12.5px; line-height: 1.4; text-align: left;
+                 width: max-content; max-width: min(240px, 70vw);
+                 box-shadow: 0 6px 16px rgba(20, 20, 19, .18); pointer-events: none;
+                 transform: translateX(calc(-50% + var(--shift, 0px))); animation: mascot-pop .16s ease-out; }
+.mascot-bubble::after { content: ""; position: absolute; top: 100%; left: calc(50% - var(--shift, 0px)); margin-left: -5px;
+                        border: 5px solid transparent; border-top-color: var(--text); }
+.mascot-bubble[hidden] { display: none; }
+@keyframes mascot-frame { 0% { opacity: 1; } 50% { opacity: 0; } }
+@keyframes mascot-bob { 0% { transform: translateY(0); } 50% { transform: translateY(calc(var(--s) * -1px)); } }
+@keyframes mascot-dance {
+  0% { transform: translateY(0) rotate(-7deg); }
+  25% { transform: translateY(calc(var(--s) * -1.5px)) rotate(0deg); }
+  50% { transform: translateY(0) rotate(7deg); }
+  75% { transform: translateY(calc(var(--s) * -1.5px)) rotate(0deg); }
+}
+@keyframes mascot-hop { 0%, 100% { transform: translateY(0); } 40% { transform: translateY(calc(var(--s) * -4px)); } }
+@keyframes mascot-blink { 0%, 93%, 100% { transform: scaleY(1); } 95% { transform: scaleY(.15); } }
+@keyframes mascot-pop { from { opacity: 0; transform: translateX(calc(-50% + var(--shift, 0px))) translateY(4px) scale(.96); } }
+/* ---- 小家伙脚下的风景（templates/_mascot.html）。左边淡出去，接着欢迎语不显得突兀。
+ * 天、远山、树三层按镜头（--cam，mascots.js 按小家伙们站的地方算）各挪一点：越远挪得越多，地面不动 */
+.scene { position: absolute; inset: 0; overflow: hidden; border-radius: 10px;
+         background: linear-gradient(180deg, #e8f0f3 0%, #f2f6f2 62%, rgba(255, 255, 255, 0) 100%);
+         -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 56px); mask-image: linear-gradient(90deg, transparent 0, #000 56px); }
+.scene.is-night { background: linear-gradient(180deg, #e3e4f0 0%, #efeef4 62%, rgba(255, 255, 255, 0) 100%); }
+.scene svg { display: block; }
+.scene-layer { position: absolute; top: 0; bottom: 0; will-change: transform; }
+.scene-sky { left: -32px; right: -32px; transform: translateX(calc(var(--cam, 0) * var(--pan) * 1px)); }
+.scene-far { left: -24px; right: -24px; transform: translateX(calc(var(--cam, 0) * var(--pan) * .7px)); }
+.scene-mid { left: -14px; right: -14px; transform: translateX(calc(var(--cam, 0) * var(--pan) * .4px)); }
+.scene-sun { position: absolute; top: 9px; right: 12%; z-index: 1; fill: #f2cc78; }   /* 云从它后面过：挡住半边像月亮 */
+.scene-moon { position: absolute; top: 9px; right: 12%; fill: #e4dbb8; }
+.scene-star { position: absolute; width: 3px; height: 3px; background: #cfc7a6; animation: star-twinkle 2.6s ease-in-out infinite; }
+.scene-cloud { position: absolute; fill: #ffffff; animation: cloud-float linear infinite; }
+.scene-cloud .cloud-shade { fill: #dde6eb; }
+.is-night .scene-cloud { fill: #f5f5f9; }
+.is-night .scene-cloud .cloud-shade { fill: #dfe0ea; }
+.scene-hill { position: absolute; bottom: 6px; fill: #d9e0c9; }
+.scene-hill.is-back { fill: #e4e8d8; }
+.scene-tree { position: absolute; bottom: 6px; transform: translateX(-50%); }
+.scene-tree .tree-top { fill: #a7bb8e; transform-box: fill-box; transform-origin: 50% 100%; }
+.scene-tree.is-pine .tree-top { fill: #97ae89; }
+.scene-tree .tree-light { fill: #bccca6; }
+.scene-tree .tree-shade { fill: #8ea476; }
+.scene-tree.is-pine .tree-shade { fill: #82997a; }
+.scene-tree .tree-trunk { fill: #a2866a; }
+.scene-tree.is-rustle .tree-top { animation: tree-rustle .7s ease-in-out; }
+.scene-leaf { position: absolute; top: 34%; width: 3px; height: 3px; background: #9fb487; animation: leaf-fall 1.4s ease-in forwards; }
+/* 地面：一条土色，草和花长在上面；被踩到就往小家伙走的方向倒（--lean），走开弹回来 */
+.scene-ground { position: absolute; inset: 0; }
+.scene-ground::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 6px; background: #ece7d8; border-top: 1px solid #ddd5c1; }
+.scene-tuft { position: absolute; bottom: 6px; transform-origin: 50% 100%; transform: translateX(-50%);
+              transition: transform .38s cubic-bezier(.3, 1.8, .5, 1); fill: #9fb487; }
+.scene-tuft.is-pressed { transform: translateX(-50%) skewX(calc(var(--lean, 1) * -26deg)) scaleY(.5); transition-duration: .08s; }
+.scene-tuft .petal { fill: #e7a396; }
+.scene-tuft.is-flower2 .petal { fill: #bfb0e0; }
+.scene-tuft .bud { fill: #f0c869; }
+.scene-tuft .stem { fill: #93a97d; }
+.scene-puffs { position: absolute; inset: 0; pointer-events: none; }
+.scene-puff { position: absolute; bottom: 6px; width: 3px; height: 3px; background: #d6cfbc; animation: dust-puff .6s ease-out forwards; }
+@keyframes cloud-float { from { left: 102%; } to { left: -14%; } }
+@keyframes star-twinkle { 0%, 100% { opacity: .9; } 50% { opacity: .25; } }
+@keyframes tree-rustle { 0%, 100% { transform: rotate(0); } 20% { transform: rotate(-4deg); } 45% { transform: rotate(3deg); } 70% { transform: rotate(-1.5deg); } }
+@keyframes leaf-fall { from { transform: translate(0, 0) rotate(0); opacity: 1; } to { transform: translate(var(--sway, 8px), 34px) rotate(160deg); opacity: 0; } }
+@keyframes dust-puff { from { transform: translate(0, 0) scale(1); opacity: .9; } to { transform: translate(var(--sway, -6px), -7px) scale(1.7); opacity: 0; } }
+/* 系统设了「减少动态效果」：小家伙站着不动（脚本也不让它们走），风景也不动（云停在原地），对话框照样有 */
+@media (prefers-reduced-motion: reduce) {
+  .mascot-sprite, .mascot-sprite *, .mascot-bubble, .scene * { animation: none !important; }
+  .scene-tuft { transition: none; }
+}
+@media (max-width: 900px) {
+  .welcome { flex-direction: column; align-items: stretch; gap: 10px; }
+  .mascot-stage { min-width: 0; min-height: 110px; }
 }
 
 /* ------------------------------------------------------- 窄屏：侧边栏变横条 */
@@ -2150,6 +2276,10 @@ svg.is-zoomed.is-panning { cursor: grabbing; }
 .avatar-lg { width: 60px; height: 60px; }
 .avatar-lg > span { width: 46px; height: 46px; font-size: 20px; }
 .avatar-lg.avatar-emoji > span { font-size: 24px; }
+/* 资料页上的大头像 */
+.avatar-xl { width: 84px; height: 84px; }
+.avatar-xl > span { width: 68px; height: 68px; font-size: 30px; }
+.avatar-xl.avatar-emoji > span { font-size: 36px; }
 .acct-hero-main { flex: 1 1 360px; min-width: 0; }
 .acct-hero-title { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 /* 主行是邮箱：太长时折行，不把右边的切换账号挤出去 */
@@ -2953,6 +3083,64 @@ a.event-who:hover { color: var(--accent-dim); }
 .login-kind.k-none .state-dot { background: #c2c0b6; }
 .me-tag { margin-left: 8px; padding: 1px 7px; border-radius: 999px; background: var(--accent-tint); color: var(--accent-dim);
           font-size: 11.5px; white-space: nowrap; }
+/* ======================================================= 用户管理、资料页 */
+/* 列表：头像 + 显示名，下面一行小字是用户名；最后一列是重置密码、停用 / 恢复、删除（停用是个表单，和两边排成一行） */
+.person-cell { display: inline-flex; align-items: center; gap: 10px; color: inherit; }
+.person-cell:hover { text-decoration: none; }
+.person-cell:hover b { text-decoration: underline; text-underline-offset: 2px; }
+.person-text { display: flex; flex-direction: column; line-height: 1.3; }
+.person-text b { font-weight: 500; color: var(--text); }
+.person-text small { font-size: 12px; color: var(--text-mute); }
+.people-table .user-note { color: var(--text-dim); overflow-wrap: anywhere; }
+.row-acts form { display: contents; }
+.page-actions .row-acts { justify-content: flex-start; }
+/* 密码：系统生成 / 自己填；选了自己填才出来那个框 */
+.pw-mode { align-self: flex-start; }
+.pw-custom input { width: 100%; }
+.pw-custom[hidden] { display: none; }
+/* 资料页 */
+.profile-hero { display: flex; align-items: center; gap: 20px; margin-bottom: 24px; padding: 22px 24px; background: var(--panel);
+                border: 1px solid var(--line); border-radius: var(--radius); }
+.profile-hero-main { flex: 1 1 auto; min-width: 0; }
+.profile-name { margin: 0; font-family: var(--font-display); font-size: 26px; font-weight: 500; line-height: 1.25; overflow-wrap: anywhere; }
+.profile-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 6px 0 0; font-size: 13px; color: var(--text-mute); }
+.profile-meta .dot-sep { color: var(--line-strong); }
+.profile-today { flex: 0 0 auto; text-align: right; }
+.profile-today span { display: block; font-size: 12.5px; color: var(--text-mute); }
+.profile-today strong { display: block; margin-top: 2px; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.profile-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; align-items: start; }
+.profile-grid > .card { min-width: 0; }
+.profile-grid > .card.span-all { grid-column: 1 / -1; }
+.profile-grid > .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.card-pad { margin: 0; padding: 4px 22px 20px; }
+.card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 16px; }
+.card-actions .card-note { margin-right: auto; }
+.profile-note { font-size: 13.5px; line-height: 1.8; color: var(--text-dim); }
+.online-sum { display: flex; gap: 36px; }
+.online-sum span { display: block; font-size: 12.5px; color: var(--text-mute); }
+.online-sum strong { display: block; margin-top: 2px; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.online-bars { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; margin-top: 18px; }
+.online-bar { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.online-bar-track { display: flex; align-items: flex-end; width: 100%; max-width: 34px; height: 84px; border-radius: 8px; background: var(--panel-3); overflow: hidden; }
+.online-bar-track i { display: block; width: 100%; min-height: 0; border-radius: 8px; background: color-mix(in srgb, var(--accent) 45%, var(--panel-3)); }
+.online-bar.is-today .online-bar-track i { background: var(--accent); }
+.online-bar-day { font-size: 11.5px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
+.online-bar.is-today .online-bar-day { color: var(--text); font-weight: 500; }
+@media (max-width: 900px) {
+  .profile-grid { grid-template-columns: minmax(0, 1fr); }
+  .profile-hero { flex-wrap: wrap; }
+  .profile-today { text-align: left; }
+}
+.btn.is-danger { color: var(--danger); }
+/* 弹窗里的报错（新建用户、改密码）：写在框下面，不整页刷新 */
+.form-error { margin: 12px 0 0; font-size: 13px; line-height: 1.6; color: var(--danger); }
+/* 系统生成的密码：只显示一次，大一点、点一下就能全选 */
+.secret-lead { margin: 0; font-size: 13.5px; line-height: 1.7; color: var(--text-dim); }
+.secret-lead b { color: var(--text); }
+.secret-box { display: flex; align-items: center; gap: 12px; margin: 14px 0 12px; padding: 12px 14px; border: 1px dashed var(--line-strong);
+              border-radius: 10px; background: var(--panel-2); }
+.secret-code { flex: 1 1 auto; min-width: 0; padding: 0; background: none; font-size: 18px; letter-spacing: .04em; color: var(--text);
+               user-select: all; overflow-wrap: anywhere; }
 @media (max-width: 760px) {
   .login-stats { grid-template-columns: minmax(0, 1fr); }
 }

@@ -1,0 +1,133 @@
+{# Claude 的像素小家伙（和侧边栏、登录页那只一样：10 × 8 的格子，tools/make_mascot_assets.py），多画了几帧：
+     · 身子是一整块（第 0~5 行，第 1~8 列），两边的「手」单独画：平时在第 2~3 行，跳舞时往上挪一格（举手）
+     · 腿四条（第 6~7 行）：站着四条都着地；走路两帧轮流抬起一对
+     · 眼睛两套：正脸（第 2、7 列）；走路时看着前面（第 3、8 列，往左走整个翻过来）
+   哪一帧露出来由 CSS 管（.is-walking / .is-dancing，style.css 的「小家伙」那一节），走到哪、什么时候跳舞、说什么由
+   static/mascots.js 安排。spec 是 welcome.Mascot：一格画几个像素（整数倍才不糊）、眨眼错开多久、一开始站哪、什么脾气 #}
+{% macro mascot(spec) -%}
+  <button class="mascot" type="button" data-mascot data-start="{{ spec.start }}" data-mood="{{ spec.mood }}"
+          style="--s: {{ spec.scale }}; --blink: {{ spec.blink }}s" aria-label="像素小家伙：点一下听它说一句">
+    <span class="mascot-bubble" data-bubble hidden></span>
+    <span class="mascot-flip">
+      <svg class="mascot-sprite" viewBox="0 0 10 8" width="{{ 10 * spec.scale }}" height="{{ 8 * spec.scale }}"
+           shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+        <rect x="1" y="0" width="8" height="6"/>
+        <g class="m-arms-down"><rect x="0" y="2" width="1" height="2"/><rect x="9" y="2" width="1" height="2"/></g>
+        <g class="m-arms-up"><rect x="0" y="1" width="1" height="2"/><rect x="9" y="1" width="1" height="2"/></g>
+        <g class="m-eyes m-eyes-front"><rect x="2" y="1" width="1" height="1"/><rect x="7" y="1" width="1" height="1"/></g>
+        <g class="m-eyes m-eyes-side"><rect x="3" y="1" width="1" height="1"/><rect x="8" y="1" width="1" height="1"/></g>
+        <g class="m-legs-stand"><rect x="1" y="6" width="1" height="2"/><rect x="3" y="6" width="1" height="2"/>
+          <rect x="6" y="6" width="1" height="2"/><rect x="8" y="6" width="1" height="2"/></g>
+        <g class="m-legs-a"><rect x="1" y="6" width="1" height="2"/><rect x="3" y="6" width="1" height="1"/>
+          <rect x="6" y="6" width="1" height="2"/><rect x="8" y="6" width="1" height="1"/></g>
+        <g class="m-legs-b"><rect x="1" y="6" width="1" height="1"/><rect x="3" y="6" width="1" height="2"/>
+          <rect x="6" y="6" width="1" height="1"/><rect x="8" y="6" width="1" height="2"/></g>
+      </svg>
+    </span>
+    <span class="mascot-shadow" aria-hidden="true"></span>
+  </button>
+{%- endmacro %}
+
+{# ---------------------------------------------------------------- 风景：同一套像素画法
+   几层叠着，越远的越跟着小家伙们挪（static/mascots.js 按它们站的地方算 --cam，style.css 里各层乘自己的深度）：
+     sky   天：太阳（夜里是月亮和几颗星），几朵云自己慢慢飘
+     far   远山
+     mid   树：有小家伙从底下走过就晃一晃、掉一片叶子
+     ground 地面和草、花：不跟着挪（小家伙站在上面），被踩到就弯一下
+   都是装饰，读屏软件不念（aria-hidden） #}
+{# 一朵云：从右往左飘，飘一趟 speed 秒；delay 是负的，一开始就散在半路上。x 是不飘的时候（减少动态效果）停在哪 #}
+{% macro _cloud(x, y, cell, speed, delay) -%}
+  <svg class="scene-cloud" viewBox="0 0 12 5" width="{{ 12 * cell }}" height="{{ 5 * cell }}" shape-rendering="crispEdges"
+       style="left: {{ x }}%; top: {{ y }}px; animation-duration: {{ speed }}s; animation-delay: {{ delay }}s">
+    <rect x="4" y="0" width="4" height="1"/><rect x="2" y="1" width="8" height="1"/><rect x="1" y="2" width="10" height="1"/>
+    <rect x="0" y="3" width="12" height="1"/><rect class="cloud-shade" x="1" y="4" width="10" height="1"/>
+  </svg>
+{%- endmacro %}
+
+{% macro _hill(x, cell, back) -%}
+  {# 一座小山，一行一个矩形：越往下越宽 #}
+  {% set rows = [(13, 8), (10, 14), (8, 18), (6, 22), (4, 26), (2, 30), (0, 34)] if back
+                else [(9, 8), (6, 14), (4, 18), (2, 22), (0, 26)] %}
+  {% set width = 34 if back else 26 %}
+  <svg class="scene-hill{% if back %} is-back{% endif %}" viewBox="0 0 {{ width }} {{ rows | length }}"
+       width="{{ width * cell }}" height="{{ (rows | length) * cell }}" shape-rendering="crispEdges" style="left: {{ x }}%">
+    {% for left, span in rows %}<rect x="{{ left }}" y="{{ loop.index0 }}" width="{{ span }}" height="1"/>{% endfor %}
+  </svg>
+{%- endmacro %}
+
+{% macro _tree(x, kind, cell) -%}
+  <span class="scene-tree is-{{ kind }}" data-tree style="left: {{ x }}%">
+    {% if kind == 'pine' %}
+      <svg viewBox="0 0 5 8" width="{{ 5 * cell }}" height="{{ 8 * cell }}" shape-rendering="crispEdges">
+        <g class="tree-top"><rect x="2" y="0" width="1" height="1"/><rect x="1" y="1" width="3" height="1"/>
+          <rect x="0" y="2" width="5" height="1"/><rect x="1" y="3" width="3" height="1"/>
+          <rect x="0" y="4" width="5" height="1"/><rect class="tree-shade" x="0" y="5" width="5" height="1"/></g>
+        <rect class="tree-trunk" x="2" y="6" width="1" height="2"/>
+      </svg>
+    {% else %}
+      <svg viewBox="0 0 7 8" width="{{ 7 * cell }}" height="{{ 8 * cell }}" shape-rendering="crispEdges">
+        <g class="tree-top"><rect x="1" y="0" width="5" height="1"/><rect x="0" y="1" width="7" height="3"/>
+          <rect class="tree-light" x="1" y="1" width="2" height="1"/><rect class="tree-shade" x="1" y="4" width="5" height="1"/></g>
+        <rect class="tree-trunk" x="3" y="5" width="1" height="3"/>
+      </svg>
+    {% endif %}
+  </span>
+{%- endmacro %}
+
+{% macro _tuft(x, kind) -%}
+  <span class="scene-tuft is-{{ kind }}" data-tuft style="left: {{ x }}%">
+    {% if kind == 'flower' %}
+      <svg viewBox="0 0 3 4" width="9" height="12" shape-rendering="crispEdges">
+        <rect class="petal" x="1" y="0" width="1" height="1"/><rect class="petal" x="0" y="1" width="1" height="1"/>
+        <rect class="petal" x="2" y="1" width="1" height="1"/><rect class="bud" x="1" y="1" width="1" height="1"/>
+        <rect class="stem" x="1" y="2" width="1" height="2"/>
+      </svg>
+    {% elif kind == 'flower2' %}
+      <svg viewBox="0 0 3 4" width="9" height="12" shape-rendering="crispEdges">
+        <rect class="petal" x="0" y="0" width="1" height="1"/><rect class="petal" x="2" y="0" width="1" height="1"/>
+        <rect class="bud" x="1" y="0" width="1" height="2"/><rect class="stem" x="1" y="2" width="1" height="2"/>
+      </svg>
+    {% else %}
+      <svg viewBox="0 0 3 2" width="9" height="6" shape-rendering="crispEdges">
+        <rect x="0" y="0" width="1" height="1"/><rect x="2" y="0" width="1" height="1"/><rect x="0" y="1" width="3" height="1"/>
+      </svg>
+    {% endif %}
+  </span>
+{%- endmacro %}
+
+{% macro scene(night=false) -%}
+  <div class="scene{% if night %} is-night{% endif %}" data-scene aria-hidden="true">
+    <div class="scene-layer scene-sky" data-layer="sky">
+      {% if night %}
+        <svg class="scene-moon" viewBox="0 0 6 6" width="18" height="18" shape-rendering="crispEdges">
+          <rect x="2" y="0" width="3" height="1"/><rect x="1" y="1" width="2" height="1"/><rect x="0" y="2" width="2" height="2"/>
+          <rect x="1" y="4" width="2" height="1"/><rect x="2" y="5" width="3" height="1"/>
+        </svg>
+        {% for x, y, d in [(14, 10, 0), (31, 26, 1.1), (47, 8, 2.3), (63, 20, 0.6), (88, 30, 1.7)] %}
+          <i class="scene-star" style="left: {{ x }}%; top: {{ y }}px; animation-delay: {{ d }}s"></i>
+        {% endfor %}
+      {% else %}
+        <svg class="scene-sun" viewBox="0 0 7 7" width="21" height="21" shape-rendering="crispEdges">
+          <rect x="2" y="0" width="3" height="1"/><rect x="1" y="1" width="5" height="1"/><rect x="0" y="2" width="7" height="3"/>
+          <rect x="1" y="5" width="5" height="1"/><rect x="2" y="6" width="3" height="1"/>
+        </svg>
+      {% endif %}
+      {{ _cloud(22, 8, 3, 110, -20) }}
+      {{ _cloud(48, 26, 2, 150, -95) }}
+      {{ _cloud(70, 14, 3, 130, -60) }}
+    </div>
+    <div class="scene-layer scene-far" data-layer="far">
+      {{ _hill(2, 4, true) }}{{ _hill(42, 4, true) }}{{ _hill(74, 4, true) }}
+      {{ _hill(22, 4, false) }}{{ _hill(58, 4, false) }}{{ _hill(90, 4, false) }}
+    </div>
+    <div class="scene-layer scene-mid" data-layer="mid">
+      {{ _tree(10, 'round', 6) }}{{ _tree(33, 'pine', 6) }}{{ _tree(61, 'round', 5) }}{{ _tree(86, 'pine', 7) }}
+    </div>
+    <div class="scene-ground">
+      {% for x, kind in [(3, 'grass'), (11, 'flower'), (18, 'grass'), (26, 'grass'), (37, 'flower2'), (44, 'grass'),
+                         (52, 'grass'), (59, 'flower'), (67, 'grass'), (75, 'grass'), (82, 'flower2'), (91, 'grass'),
+                         (97, 'grass')] %}{{ _tuft(x, kind) }}{% endfor %}
+    </div>
+    <div class="scene-puffs" data-puffs></div>
+  </div>
+{%- endmacro %}

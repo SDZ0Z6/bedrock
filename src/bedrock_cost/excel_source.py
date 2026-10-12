@@ -1157,6 +1157,11 @@ def _audit(note: str, actor: str) -> None:
         pass  # 日志写不进去不该让整个操作失败
 
 
+def audit_note(note: str, actor: str) -> None:
+    """台账之外的改动（设置页管用户、用户改自己的密码）也记进同一份操作日志。"""
+    _audit(note, actor)
+
+
 # ---------------------------------------------------------------- 定位与改写
 def _header_index(sheet) -> dict[str, int]:
     """表头列名 -> 列号。

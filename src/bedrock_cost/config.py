@@ -207,6 +207,18 @@ LOGIN_EVENTS_PATH = Path(_text("LOGIN_EVENTS_PATH", "login-events.jsonl"))
 if not LOGIN_EVENTS_PATH.is_absolute():
     LOGIN_EVENTS_PATH = BASE_DIR / LOGIN_EVENTS_PATH
 
+# 只读用户：admin（上面的 AUTH_USERNAME）在设置页「用户」页签建的账号，只存密码的哈希（见 users）。
+# 和告警状态放一起，systemd 的 ReadWritePaths 已经覆盖
+USERS_PATH = Path(_text("USERS_PATH", "users.json"))
+if not USERS_PATH.is_absolute():
+    USERS_PATH = BASE_DIR / USERS_PATH
+
+# 在线时间：每个人每天开着页面的秒数（见 presence），概览顶上的「今天在线」、资料页、用户管理读它。
+# 和告警状态放一起，systemd 的 ReadWritePaths 已经覆盖
+PRESENCE_PATH = Path(_text("PRESENCE_PATH", "presence.json"))
+if not PRESENCE_PATH.is_absolute():
+    PRESENCE_PATH = BASE_DIR / PRESENCE_PATH
+
 # ---------------------------------------------------------------- 客户
 # 客户页要的每个账号每天的消费，查成功一次就存一份（见 cost_history）：停用的账号不再查 CE，
 # 客户页拿存下来的历史；查询失败时也拿它顶着。和告警状态放一起，systemd 的 ReadWritePaths 已经覆盖

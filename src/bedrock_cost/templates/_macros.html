@@ -105,12 +105,15 @@
 
 {# 「刷新数据」：跳过缓存重查这一页。图标 + 字；pill 是圆角胶囊（概览上和筛选签站在一起），
    否则是普通按钮的方角（各页签的筛选条里，和下拉框站在一起）。点了之后图标一直转到新页面回来
-   （app.js 认 data-refresh）。都放在内容区，不放页头右边：那里是报错弹窗的位置 #}
+   （app.js 认 data-refresh）。都放在内容区，不放页头右边：那里是报错弹窗的位置。
+   只读用户没有这个按钮：重查要花钱，他们看缓存里的数（网址上带 refresh 也会被 auth._gate 拿掉） #}
 {% macro refresh_link(href, title, loading, note='跳过缓存', pill=false) -%}
+  {%- if is_admin() %}
   <a class="{{ 'refresh-btn' if pill else 'btn' }}" href="{{ href }}" title="{{ title }}"
      data-loading="{{ loading }}" data-loading-note="{{ note }}" data-refresh>
     <svg class="refresh-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.2 8a5.8 5.8 0 0 1 10-4l1.6 1.5"/>
       <path d="M13.8 2.2v3.3h-3.3"/><path d="M13.8 8a5.8 5.8 0 0 1-10 4l-1.6-1.5"/><path d="M2.2 13.8v-3.3h3.3"/></svg>刷新数据</a>
+  {%- endif %}
 {%- endmacro %}
 
 {# 表格、清单里的账号格：主行邮箱，副行号码；没填邮箱时号码当主行 #}

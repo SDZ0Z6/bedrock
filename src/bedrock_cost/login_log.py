@@ -37,6 +37,7 @@ KINDS = {
     "fail": ("密码不对", "error"),
     "user": ("用户名不对", "error"),
     "locked": ("失败太多，锁定中", "error"),
+    "disabled": ("用户已停用", "error"),    # 只读用户：密码对，但 admin 把这个用户停用了
     "logout": ("退出", "none"),
 }
 
@@ -63,7 +64,7 @@ class Entry:
 
     @property
     def failed(self) -> bool:
-        return self.kind in ("fail", "user", "locked")
+        return self.kind in ("fail", "user", "locked", "disabled")
 
     @property
     def browser(self) -> str:

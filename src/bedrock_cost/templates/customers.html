@@ -12,7 +12,7 @@
 {%- endblock %}
 
 {% block page_actions %}
-  <button class="btn btn-primary" type="button" data-open="dlg-create">{{ cicon('plus') }}新建客户</button>
+  {% if is_admin() %}<button class="btn btn-primary" type="button" data-open="dlg-create">{{ cicon('plus') }}新建客户</button>{% endif %}
 {% endblock %}
 
 {# 卡片上「最近一件事」的图标和颜色，和时间线一样 #}
@@ -143,7 +143,7 @@
     {{ refresh_link(url_for('customers.index', refresh=1), '跳过缓存，重新查每个账号每天的消费', '正在重新查 Cost Explorer', pill=true) }}
   </div>
   {% if stock_count %}
-    <p class="cust-stock">库存里还有 {{ stock_count }} 个账号没分给客户，在客户页的「分配账号」里挑。</p>
+    <p class="cust-stock">库存里还有 {{ stock_count }} 个账号没分给客户{% if is_admin() %}，在客户页的「分配账号」里挑{% endif %}。</p>
   {% endif %}
 
   <!-- ------------------------------------------------ 客户卡片 -->
@@ -210,6 +210,8 @@
   <span>生成于 {{ generated_at }}</span>
 </footer>
 
+{# 新建客户：只读用户没有 #}
+{% if is_admin() %}
 <!-- ------------------------------------------------ 新建客户 -->
 <dialog class="modal" id="dlg-create" {% if open_create %}data-reopen{% endif %}>
   <form method="post" action="{{ url_for('customers.create') }}" data-loading="正在保存">
@@ -234,6 +236,7 @@
     </footer>
   </form>
 </dialog>
+{% endif %}
 
 <script>
 (function () {

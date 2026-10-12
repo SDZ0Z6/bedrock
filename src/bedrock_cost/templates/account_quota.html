@@ -147,7 +147,7 @@
   <span>Service Quotas</span>
   <span>缓存 {{ quota_cache_hours }} 小时</span>
   <span>生成于 {{ generated_at }}</span>
-  <span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>
+  {% if is_admin() %}<span><a href="{{ url_for('main.clear_cache') }}">清空缓存</a></span>{% endif %}
 </footer>
 
 {% endblock %}

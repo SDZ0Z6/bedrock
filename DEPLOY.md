@@ -875,14 +875,16 @@ chown bedrock:bedrock /opt/bedrock/cred.xlsx && chmod 640 /opt/bedrock/cred.xlsx
 
 ### 备份
 
-要备的只有两个文件，都不在 git 里（`alert-state.json` 不用备：丢了最多重新建一次
+要备的就这几个文件，都不在 git 里（`alert-state.json` 不用备：丢了最多重新建一次
 用量基线、把已经到达的额度档位再报一遍；`last-known-costs.json` 也不用备：丢了最多是下次
 查询失败时没有上一次的数可顶；`mail-state.json` 也不用备：丢了最多是每个邮箱重新建一次
 基线；`alert-events.jsonl` 也不用备：丢了只是运营看板的「最近告警」从空开始记，客户时间线上
 旧的 AWS 邮件也没了；`customer-costs.json` 一般也不用备：丢了客户页会把停用账号的历史再从 Cost
 Explorer 查一次，只是超过 14 个月的那部分 CE 已经查不到了；`login-events.jsonl` 也不用备：丢了只是设置页的
 「登录记录」从空开始记）。告警邮箱的密码、客户和客户时间线都在
-`cred.xlsx` 里（CUSTOMERS、EVENTS 两张表），跟着它一起备：
+`cred.xlsx` 里（CUSTOMERS、EVENTS 两张表），跟着它一起备。`users.json`（只读用户，只有密码的哈希；还有每个人的
+名字、头像）丢了只是只读用户要重新建一遍、发新密码，管理员不受影响；用户多了也备上。`presence.json`（在线时间）
+不用备：丢了只是从零开始记：
 
 ```bash
 scp -i C:\path\to\your-key.pem root@<ECS_IP>:/opt/bedrock/.env ./backup-env-$(date +%F)
@@ -890,6 +892,10 @@ scp -i C:\path\to\your-key.pem root@<ECS_IP>:/opt/bedrock/.env ./backup-env-$(da
 
 ```bash
 scp -i C:\path\to\your-key.pem root@<ECS_IP>:/opt/bedrock/cred.xlsx ./backup-cred-$(date +%F).xlsx
+```
+
+```bash
+scp -i C:\path\to\your-key.pem root@<ECS_IP>:/opt/bedrock/users.json ./backup-users-$(date +%F).json
 ```
 
 ---

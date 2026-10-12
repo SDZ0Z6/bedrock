@@ -48,10 +48,12 @@
         <h1>{{ customer.name }}</h1>
         {{ status_pill(customer) }}
       </div>
+      {% if is_admin() %}
       <div class="hero-side">
         <button class="btn btn-primary" type="button" data-open="dlg-assign">{{ cicon('plus') }}分配账号</button>
         <button class="icon-btn" type="button" data-open="dlg-edit" title="编辑客户" aria-label="编辑客户">{{ cicon('pencil') }}</button>
       </div>
+      {% endif %}
     </div>
     <div class="hero-meta">
       <span>{% if customer.region %}{{ flag(customer.region) | safe }}{{ region_name(customer.region) }}{% else %}{{ cicon('globe', '') }}没填地区{% endif %}</span>
@@ -244,8 +246,9 @@
 <!-- ------------------------------------------------ 时间线 -->
 {% call timeline_box(timeline, categories,
                      (customer.since.isoformat() ~ ' 开始合作到今天 · ' if customer.since else '') ~ (view.timeline | length) ~ ' 件事',
-                     timeline_fallback, '点卡片可以改日期、删掉', people=timeline.accounts, colors=lifecycle_colors) %}
-  <button class="btn btn-sm btn-primary" type="button" data-open="dlg-note">记一笔</button>
+                     timeline_fallback, '点卡片可以改日期、删掉' if is_admin() else '点卡片看详情',
+                     people=timeline.accounts, colors=lifecycle_colors) %}
+  {% if is_admin() %}<button class="btn btn-sm btn-primary" type="button" data-open="dlg-note">记一笔</button>{% endif %}
 {% endcall %}
 
 <!-- ------------------------------------------------ 名下账号、告警流 -->
@@ -256,7 +259,7 @@
         <h2 class="viz-title" id="holdings-title">名下账号</h2>
         <p class="viz-sub">只有使用中的算进预算和余额 · 点表头排序</p>
       </div>
-      <button class="btn btn-sm" type="button" data-open="dlg-assign">分配账号</button>
+      {% if is_admin() %}<button class="btn btn-sm" type="button" data-open="dlg-assign">分配账号</button>{% endif %}
     </div>
     {% if view.holdings %}
     {# 筛选：按阶段（只列有账号的阶段）、搜邮箱或 ID，两个同时满足 #}
@@ -274,20 +277,22 @@
         <input id="holding-q" type="search" placeholder="搜邮箱或 ID" autocomplete="off">
       </label>
     </div>
+    {% set cols = 5 if is_admin() else 4 %}
     <div class="table-scroll">
-      {# 默认使用中的在上面，然后是风控、待结算、已结算（同一档里先分配的在前）。点表头排序：升、降、回到默认（app.js） #}
+      {# 默认使用中的在上面，然后是风控、待结算、已结算（同一档里先分配的在前）。点表头排序：升、降、回到默认（app.js）。
+         只读用户没有最后那一列「操作」 #}
       <table class="holding-table" id="holding-table" data-sortable>
         <thead><tr>
           <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="text">账号</th>
           <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="number">阶段</th>
           <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="number">额度使用</th>
           <th class="sortable" tabindex="0" aria-sort="none" data-sort-type="text">分配</th>
-          <th><span class="sr-only">操作</span></th></tr></thead>
+          {% if is_admin() %}<th><span class="sr-only">操作</span></th>{% endif %}</tr></thead>
         <tbody>
           {% set ns = namespace(grouped=false) %}
           {% for h in view.listed %}
             {% if h.stage == 'settled' and not ns.grouped %}
-              <tr class="group-row" data-group-row><td colspan="5">已结算 · 只留在历史里</td></tr>
+              <tr class="group-row" data-group-row><td colspan="{{ cols }}">已结算 · 只留在历史里</td></tr>
               {% set ns.grouped = true %}
             {% endif %}
             <tr data-stage="{{ h.stage }}" data-q="{{ (h.account.email or '') | lower }} {{ h.number }}"
@@ -305,6 +310,7 @@
               </td>
               <td class="joined-cell" data-sort="{{ h.joined.isoformat() if h.joined else '' }}">{{ h.joined.isoformat() if h.joined else '—' }}
                 {%- if h.via %}<small>替换 {{ (by_number[h.via].email if h.via in by_number else h.via).split('@')[0] }}</small>{% endif %}</td>
+              {% if is_admin() %}
               <td>
                 <div class="row-acts">
                   {% if h.stage == 'use' %}
@@ -343,14 +349,15 @@
                   </div>
                 </div>
               </td>
+              {% endif %}
             </tr>
           {% endfor %}
-          <tr class="holding-none" data-holding-none hidden><td colspan="5">没有符合条件的账号。</td></tr>
+          <tr class="holding-none" data-holding-none hidden><td colspan="{{ cols }}">没有符合条件的账号。</td></tr>
         </tbody>
       </table>
     </div>
     {% else %}
-      <p class="viz-empty">还没有账号。点「分配账号」从库存里挑。</p>
+      <p class="viz-empty">还没有账号。{% if is_admin() %}点「分配账号」从库存里挑。{% endif %}</p>
     {% endif %}
   </section>
 
@@ -502,13 +509,15 @@
   <span>Cost Explorer</span>
   <span>缓存 {{ cache_label }}</span>
   <span>生成于 {{ generated_at }}</span>
-  <span><a href="{{ url_for('customers.detail', cid=customer.id, refresh=1) }}" title="跳过缓存，重新查这个客户每个账号每天的消费"
-           data-loading="正在重新查 Cost Explorer" data-loading-note="跳过缓存">刷新数据</a></span>
+  {% if is_admin() %}<span><a href="{{ url_for('customers.detail', cid=customer.id, refresh=1) }}" title="跳过缓存，重新查这个客户每个账号每天的消费"
+           data-loading="正在重新查 Cost Explorer" data-loading-note="跳过缓存">刷新数据</a></span>{% endif %}
 </footer>
 
 {# ================================================ 弹窗 #}
 <script id="holdings-data" type="application/json">{{ holdings_data | tojson }}</script>
 
+{# 编辑、分配、替换、结算、调整额度、风控、恢复、解绑、记一笔：只读用户一个都不画 #}
+{% if is_admin() %}
 <dialog class="modal" id="dlg-edit" {% if open_edit %}data-reopen{% endif %}>
   <form method="post" action="{{ url_for('customers.update', cid=customer.id) }}" data-loading="正在保存">
     <input type="hidden" name="csrf" value="{{ csrf_token() }}">
@@ -837,6 +846,7 @@
     </footer>
   </form>
 </dialog>
+{% endif %}
 
 <dialog class="modal modal-sm" id="dlg-event">
   <div class="modal-head">
@@ -845,6 +855,7 @@
   </div>
   <div class="modal-body">
     <dl class="ev-facts" data-fill="facts"></dl>
+    {% if is_admin() %}
     <form method="post" action="{{ url_for('customers.change_event', cid=customer.id) }}" id="event-date-form" data-loading="正在保存" style="margin-top: 16px">
       <input type="hidden" name="csrf" value="{{ csrf_token() }}">
       <input type="hidden" name="id" value="">
@@ -855,17 +866,20 @@
       </div>
       <p class="form-hint" data-fill="hint"></p>
     </form>
+    {% endif %}
   </div>
   <div class="modal-foot">
+    {% if is_admin() %}
     <form method="post" action="{{ url_for('customers.change_event', cid=customer.id) }}" id="event-delete-form" data-loading="正在保存">
       <input type="hidden" name="csrf" value="{{ csrf_token() }}">
       <input type="hidden" name="id" value="">
       <input type="hidden" name="action" value="delete">
       <button class="btn btn-danger" type="submit">删掉这条</button>
     </form>
+    {% endif %}
     <div class="modal-btns">
-      <button class="btn" type="button" data-close>取消</button>
-      <button class="btn btn-primary" type="submit" form="event-date-form">保存日期</button>
+      <button class="btn" type="button" data-close>{{ '取消' if is_admin() else '关闭' }}</button>
+      {% if is_admin() %}<button class="btn btn-primary" type="submit" form="event-date-form">保存日期</button>{% endif %}
     </div>
   </div>
 </dialog>
@@ -880,6 +894,8 @@
   };
   const data = JSON.parse(document.getElementById('holdings-data').textContent);
   const holdings = data.holdings;
+  // 只读用户：改东西的弹窗都没画，时间线上的卡片点开只看详情
+  const canEdit = {{ is_admin() | tojson }};
 
   function fill(dialog, name, text) {
     const target = dialog.querySelector('[data-fill="' + name + '"]');
@@ -1049,6 +1065,7 @@
   function replaceOutcome() {
     const dialog = document.getElementById('dlg-replace');
     const box = document.getElementById('replace-outcome');
+    if (!dialog || !box) return;
     const old = dialog.querySelector('input[name="old"]:checked');
     const fresh = dialog.querySelector('input[name="new"]:checked');
     const reason = dialog.querySelector('input[name="reason"]:checked');
@@ -1140,15 +1157,17 @@
       value.textContent = pair[1];
       facts.append(term, value);
     }
-    const editable = item.id !== 'since';
+    const editable = canEdit && item.id !== 'since';
     for (const form of dialog.querySelectorAll('form')) {
       form.hidden = !editable;
       form.querySelector('[name="id"]').value = item.id;
     }
-    dialog.querySelector('[form="event-date-form"]').hidden = !editable;
-    dialog.querySelector('#event-date').value = item.date;
+    const save = dialog.querySelector('[form="event-date-form"]');
+    if (save) save.hidden = !editable;
+    const date = dialog.querySelector('#event-date');
+    if (date) date.value = item.date;
     fill(dialog, 'hint', item.auto ? '自动记的可以改日期；删掉以后不会再自动生成。' : '改日期、删掉都会写进审计日志。删掉只是不在时间线上显示，账号的阶段、额度不会跟着变。');
-    if (!editable) fill(dialog, 'hint', '开始合作的日期在「编辑客户」里改。');
+    if (canEdit && !editable) fill(dialog, 'hint', '开始合作的日期在「编辑客户」里改。');
     dialog.showModal();
   });
 })();

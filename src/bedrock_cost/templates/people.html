@@ -1,0 +1,65 @@
+{# 用户管理：只有管理员进得来。管理员只有 .env 里的那一个（列在第一行，没有操作）；下面都是只读用户。
+   点名字打开这个人的资料页（在线时间、登录记录）；新建、重置密码、停用 / 恢复、删除见 _people_macros.html #}
+{% extends "shell.html" %}
+{% from "_macros.html" import avatar %}
+{% from "_customer_macros.html" import cicon %}
+{% from "_people_macros.html" import user_actions, user_dialogs %}
+{% block title %}用户管理 · Bedrock 成本监控{% endblock %}
+{% block page_title %}用户管理{% endblock %}
+{% block page_sub %}管理员 1 个 · 只读用户 {{ people | length }} 个{% if disabled_count %}（停用 {{ disabled_count }} 个）{% endif %}{% endblock %}
+{% block loading_label %}正在读用户{% endblock %}
+{% block page_actions %}
+  <button class="btn btn-primary" type="button" data-open="dlg-user-create">{{ cicon('plus') }}新建用户</button>
+{% endblock %}
+
+{% macro who(person, href) -%}
+  <a class="person-cell" href="{{ href }}" data-loading="正在读资料">
+    {{ avatar(person.avatar, small=true) }}
+    <span class="person-text"><b>{{ person.label }}</b><small class="tab-num">@{{ person.name }}</small></span>
+  </a>
+{%- endmacro %}
+
+{% block content %}
+<section class="card" aria-labelledby="people-title">
+  <div class="card-head">
+    <div class="card-title">
+      <h2 id="people-title">所有人</h2>
+      <span class="card-note">管理员只有 {{ admin.name }} 一个（.env 里的账号，密码也在那里改）。这里建的都是只读用户：能看概览、客户、账号的六个页签，能导出 CSV；
+        {#- 中文中间换行会多出一个空格 -#}
+        改不了任何东西，看不到账号管理、用户管理和设置，也不能刷新数据。点名字看这个人的在线时间和登录记录</span>
+    </div>
+  </div>
+  <div class="table-scroll">
+    <table class="log-table people-table">
+      <thead><tr><th>用户</th><th>角色</th><th>备注</th><th>今天在线</th><th>最近登录</th><th><span class="sr-only">操作</span></th></tr></thead>
+      <tbody>
+        {% set admin_seen = last_logins.get(admin.name.casefold()) %}
+        <tr>
+          <td>{{ who(admin, url_for('profile.me')) }}</td>
+          <td><span class="role-tag is-admin">管理员</span>{% if current_user().name == admin.name %}<span class="me-tag">你</span>{% endif %}</td>
+          <td class="tone-muted">.env 里的账号</td>
+          <td class="tab-num">{{ presence_label(online.get(admin.name.casefold(), 0)) }}</td>
+          <td class="tab-num log-when">{{ admin_seen.astimezone().strftime('%Y-%m-%d %H:%M') if admin_seen else '—' }}</td>
+          <td></td>
+        </tr>
+        {% for user in people %}
+          {% set seen = last_logins.get(user.key) %}
+          <tr {% if user.disabled %}class="row-off"{% endif %}>
+            <td>{{ who(user.person, url_for('people.profile', name=user.name)) }}</td>
+            <td><span class="role-tag">只读</span>{% if user.disabled %}<span class="role-tag is-off">已停用</span>{% endif %}</td>
+            <td class="user-note">{{ user.note or '—' }}</td>
+            <td class="tab-num">{{ presence_label(online.get(user.key, 0)) }}</td>
+            <td class="tab-num log-when">{{ seen.astimezone().strftime('%Y-%m-%d %H:%M') if seen else '还没登录过' }}</td>
+            <td class="row-actions">{{ user_actions(user, url_for('people.index'), compact=true) }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if not people %}
+    <p class="log-foot">还没有只读用户。点右上角「新建用户」建一个：密码可以自己填，也可以让系统生成。</p>
+  {% endif %}
+</section>
+
+{{ user_dialogs(name_rule, note_limit, min_password, create=true) }}
+{% endblock %}

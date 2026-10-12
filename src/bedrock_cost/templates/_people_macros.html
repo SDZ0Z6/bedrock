@@ -1,0 +1,149 @@
+{# 用户管理的几样共用件：用户列表（people.html）和管理员点开的资料页（profile.html）都用。
+   新建、重置密码由 static/people.js 用 fetch 发，回来的密码在「密码」弹窗里显示这一次；停用 / 恢复、删除是普通表单 #}
+{% from "_customer_macros.html" import cicon %}
+
+{# 一个只读用户的几个动作：重置密码、停用 / 恢复、删除。back 是做完回哪一页。
+   列表里（compact）是一排图标，和账号管理那一列一个样子，悬停看是什么；资料页页头地方大，图标 + 字 #}
+{% macro user_actions(user, back, compact=false) -%}
+  {%- set who = user.person.label -%}
+  {%- set toggle_tip = ('恢复 ' ~ who ~ '：用原来的密码登录') if user.disabled else ('停用 ' ~ who ~ '：先不让登录，登录着的马上退出；随时能恢复') -%}
+  <div class="{{ 'row-btns' if compact else 'row-acts' }}">
+    <button class="{{ 'icon-btn' if compact else 'btn btn-xs' }}" type="button" data-user-reset="{{ url_for('people.reset', name=user.name) }}"
+            data-name="{{ user.name }}" title="重置 {{ who }} 的密码" aria-label="重置 {{ who }} 的密码">
+      {{- cicon('key') }}{% if not compact %}重置密码{% endif %}</button>
+    <form class="inline-form" method="post" action="{{ url_for('people.toggle', name=user.name) }}" data-loading="正在保存">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="next" value="{{ back }}">
+      <input type="hidden" name="action" value="{{ 'enable' if user.disabled else 'disable' }}">
+      <button class="{{ 'icon-btn' if compact else 'btn btn-xs' }}{% if compact and not user.disabled %} icon-danger{% endif %}" type="submit"
+              title="{{ toggle_tip }}" aria-label="{{ '恢复 ' if user.disabled else '停用 ' }}{{ who }}">
+        {{- cicon('restore' if user.disabled else 'power') }}{% if not compact %}{{ '恢复' if user.disabled else '停用' }}{% endif %}</button>
+    </form>
+    <button class="{{ 'icon-btn icon-danger' if compact else 'btn btn-xs btn-ghost is-danger' }}" type="button"
+            data-user-delete="{{ url_for('people.delete', name=user.name) }}" data-name="{{ user.name }}"
+            title="删除 {{ who }}：删了不能恢复" aria-label="删除 {{ who }}">
+      {{- cicon('bin') }}{% if not compact %}删除{% endif %}</button>
+  </div>
+{%- endmacro %}
+
+{# 密码怎么定：系统生成（默认）或者自己填。自己填的框只在选了「自己填」时出来 #}
+{% macro password_choice(prefix, min_password) -%}
+  <div class="field field-full">
+    <span class="field-label">密码</span>
+    <div class="seg pw-mode" role="radiogroup" aria-label="密码怎么定">
+      <label class="seg-item"><input type="radio" name="password_mode" value="auto" checked data-pw-mode>系统生成</label>
+      <label class="seg-item"><input type="radio" name="password_mode" value="custom" data-pw-mode>自己填</label>
+    </div>
+    <div class="pw-custom" data-pw-custom hidden>
+      <input id="{{ prefix }}-password" name="password" type="text" minlength="{{ min_password }}" maxlength="128"
+             autocomplete="new-password" spellcheck="false" aria-label="自己填的密码" placeholder="至少 {{ min_password }} 位，不能和用户名一样">
+    </div>
+  </div>
+{%- endmacro %}
+
+{# 弹窗：新建（只有列表页有）、重置密码、删除，和显示密码的那一个 #}
+{% macro user_dialogs(name_rule='', note_limit=60, min_password=8, create=false) -%}
+  {% if create %}
+  <dialog class="modal modal-sm" id="dlg-user-create">
+    <form method="post" action="{{ url_for('people.create') }}" data-user-form>
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <div class="modal-head">
+        <h2>新建用户</h2><span class="modal-sub">只读</span>
+        <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="field field-full"><label for="user-name">用户名</label>
+            <input id="user-name" name="name" required maxlength="32" autocomplete="off" spellcheck="false" data-autofocus
+                   placeholder="比如 lily">
+            <span class="form-hint">{{ name_rule }}登录时不分大小写；建好以后不能改，对方可以在自己的资料里改显示的名字</span></div>
+          <div class="field field-full"><label for="user-note">备注（可选）</label>
+            <input id="user-note" name="note" maxlength="{{ note_limit }}" autocomplete="off" placeholder="是谁，比如：销售 Lily"></div>
+          {{ password_choice('create', min_password) }}
+        </div>
+        <p class="form-error" data-user-error role="alert" hidden></p>
+      </div>
+      <div class="modal-foot">
+        <span class="card-note">建好以后密码显示一次</span>
+        <div class="modal-btns">
+          <button class="btn" type="button" data-close>取消</button>
+          <button class="btn btn-primary" type="submit">新建</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+  {% endif %}
+
+  <dialog class="modal modal-sm" id="dlg-user-reset">
+    <form method="post" action="" data-user-form>
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <div class="modal-head">
+        <h2>重置密码</h2><span class="modal-sub" data-fill="name"></span>
+        <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">{{ password_choice('reset', min_password) }}</div>
+        <div class="outcome" style="margin-top: 14px"><b>重置以后：</b>
+          <ol>
+            <li>新密码只显示这一次；旧密码马上不能用。</li>
+            <li>这个用户在别处登录着的会退出，要用新密码重新登录。</li>
+          </ol>
+        </div>
+        <p class="form-error" data-user-error role="alert" hidden></p>
+      </div>
+      <div class="modal-foot">
+        <div class="modal-btns">
+          <button class="btn" type="button" data-close>取消</button>
+          <button class="btn btn-primary" type="submit">重置密码</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="modal modal-sm" id="dlg-user-delete">
+    <form method="post" action="" data-loading="正在删除">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <div class="modal-head">
+        <h2>删除用户</h2><span class="modal-sub" data-fill="name"></span>
+        <button class="modal-x" type="button" data-close aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="outcome is-warn"><b>删除以后：</b>
+          <ol>
+            <li>这个用户马上登不进来，登录着的也会退出。</li>
+            <li>删了不能恢复，要用得重新建（新的密码）。只是先不让用，点「停用」就行。</li>
+            <li>登录记录、操作日志里以前的记录都还在；在线时间一起删掉。</li>
+          </ol>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <div class="modal-btns">
+          <button class="btn" type="button" data-close>取消</button>
+          <button class="btn btn-danger" type="submit">删除</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  {# 新建、重置的结果：密码只在这里出现一次。点外面不关；怎么关的都一样（「我记下了」、按 Esc）：
+     把密码从页面上抹掉，刷新这一页 #}
+  <dialog class="modal modal-sm" id="dlg-user-password">
+    <div class="modal-head">
+      <h2 data-fill="title">密码</h2><span class="modal-sub" data-fill="name"></span>
+    </div>
+    <div class="modal-body">
+      <p class="secret-lead">把用户名和这个密码发给对方。<b>只显示这一次</b>，关了就看不到了，忘了就再重置一个。</p>
+      <div class="secret-box">
+        <code class="secret-code" data-fill="password"></code>
+        <button class="btn btn-sm" type="button" data-copy>{{ cicon('copy') }}<span data-copy-label>复制</span></button>
+      </div>
+      <p class="form-hint">对方登录以后，点侧边栏底下自己的名字，就能在自己的资料里改成自己的密码。</p>
+    </div>
+    <div class="modal-foot">
+      <div class="modal-btns">
+        <button class="btn btn-primary" type="button" data-done>我记下了</button>
+      </div>
+    </div>
+  </dialog>
+  <script src="{{ url_for('static', filename='people.js') }}"></script>
+{%- endmacro %}
