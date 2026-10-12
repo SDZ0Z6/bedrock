@@ -264,6 +264,8 @@
   // 原生 <select> 一直在表单里，选中值也只认它；这里只是换一张脸：
   // 按钮显示头像 + ID + 邮箱，弹层里能搜。选了之后改 select 的值并触发 change，
   // 筛选表单「改动即提交」的那段脚本会接着提交。
+  // select 带 multiple 的是多选（客户页时间线按账号筛）：点一个勾一个、再点一下去掉，弹层不收；
+  // 值是空的那一项（「全部」）把勾都清掉。勾打在选项的 aria-selected 上，按钮上写什么归页面（听 change）
   function initPicker(root) {
     const select = root.querySelector('select');
     const button = root.querySelector('.acct-picker-btn');
@@ -275,6 +277,7 @@
     if (!select || !button || !pop || !search) return;
     button.hidden = false;
     root.classList.add('is-ready');
+    const multi = select.multiple;
     let active = -1;
 
     const shown = function () { return options.filter(function (o) { return !o.hidden; }); };
@@ -315,8 +318,20 @@
       if (refocus) button.focus();
     }
 
+    function toggle(option) {
+      const value = option.dataset.value;
+      for (const o of select.options) o.selected = value ? (o.value === value ? !o.selected : o.selected) : false;
+      const picked = [...select.selectedOptions].map(function (o) { return o.value; });
+      for (const o of options) {
+        o.setAttribute('aria-selected', String(o.dataset.value ? picked.includes(o.dataset.value) : !picked.length));
+      }
+      search.focus();       // 鼠标点的也把焦点留在搜索框：接着搜、上下键、回车接着勾
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
     function choose(option) {
       if (!option) return;
+      if (multi) { toggle(option); return; }
       close(true);
       if (select.value === option.dataset.value) return;
       // 账号页页头上的那个：直接跳到那个账号的同一个页签
@@ -882,7 +897,7 @@
   }
 
   // ------------------------------------------------------------ 图：沿横轴放大、拖动
-  // 带时间轴的图（柱子、折线、面积、还能用几天）在 svg 上写了 data-zoom="左,右"（绘图区的横向范围，
+  // 带时间轴的图（柱子、折线、面积）在 svg 上写了 data-zoom="左,右"（绘图区的横向范围，
   // viewBox 单位，见 chart._zoom_attrs）。放大只拉横轴：纵轴、字的大小都不变，柱子变宽、线拉长，
   // 横轴的字跟着挪，放得下就多显示几个。重新算的是每个图形的横坐标（不是整体缩放），所以线不会变粗、
   // 圆点不会变扁。怎么用：鼠标划到图上滚滚轮，往上放大、往下缩小（以鼠标为中心；缩到全貌还往下滚、

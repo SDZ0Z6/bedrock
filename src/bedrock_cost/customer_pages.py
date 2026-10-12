@@ -234,10 +234,12 @@ def create():
 _account_calls = cloudwatch_metrics.account_totals
 
 
-def today_estimates(accounts: list[Account], today: date, refresh: bool = False) -> tuple[dict[str, float], bool]:
-    """今天到现在每个账号的预估花费：CloudWatch 的 token × 牌价，和账号页「预估」页签一个算法。
+def daily_estimates(accounts: list[Account], start: date, end: date,
+                    refresh: bool = False) -> tuple[dict[str, list[float]], bool]:
+    """start 到 end（UTC 日期）每天每个账号的预估花费，今天算到现在：CloudWatch 的 token × 牌价，和账号页「预估」
+    页签一个算法——AWS 原价，不套台账的比率，以账单为准。
 
-    返回 ({account.key: 金额}, 有没有没算上的——读不到的区、价目表里没有的模型)。几个账号并发着查；刷新时只清一次
+    返回 ({account.key: 每天的钱}, 有没有没算上的——读不到的区、价目表里没有的模型)。几个账号并发着查；刷新时只清一次
     缓存，不让每个账号都去重拉一遍价目表。
     """
     if not accounts:
@@ -246,16 +248,53 @@ def today_estimates(accounts: list[Account], today: date, refresh: bool = False)
         cost_estimate.clear_cache()
 
     def one(account: Account):
-        return account.key, cost_estimate.build_estimate([account], today, today)
+        return account.key, cost_estimate.build_estimate([account], start, end)
 
     with ThreadPoolExecutor(max_workers=max(1, min(config.MAX_WORKERS, len(accounts)))) as pool:
         reports = dict(pool.map(one, accounts))
     partial = any(report.errors or report.unpriced or report.price_stale for report in reports.values())
-    return {key: report.total_cost for key, report in reports.items()}, partial
+    return {key: report.column_totals for key, report in reports.items()}, partial
 
 
-# 「近 24 小时调用」上的今日预估走这个名字：测试里默认换成不查的（见 tests/conftest.py）
-_estimate_today = today_estimates
+# 客户页的预估（「预估」那张、「调用次数」上的今日预估）走这个名字：测试里默认换成不查的（见 tests/conftest.py）
+_estimate_days = daily_estimates
+
+# 「预估」看几天（含今天，今天算到现在）。按 UTC 日期：CloudWatch 的日桶就是在 UTC 零点切的
+ESTIMATE_DAYS = 7
+
+
+def _estimate_window() -> tuple[date, date]:
+    end = datetime.now(timezone.utc).date()
+    return end - timedelta(days=ESTIMATE_DAYS - 1), end
+
+
+def _estimate_card(view: customers.CustomerView, names: dict[str, str], slots: dict[str, int],
+                   costs: dict[str, list[float]], partial: bool, start: date, end: date):
+    """「预估」（原来是「还能用几天」）：近 7 天每天的预估花费，按账号叠起来，颜色和「每日消费」一样。账单晚 1~2 天、
+    被 credits 抵成 0 的时候，这张照样看得到实际用了多少。和「调用次数」按天看的一个规矩：每个账号只算它算这个客户的
+    那几天（分过来那天起，到风控、换下、用完、结算的前一天）。costs 是 daily_estimates 查好的 {account.key: 每天的钱}。
+    """
+    stamps = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    width = len(stamps)
+    per_account: dict[str, list[float]] = {}
+    today_by_key: dict[str, float] = {}       # 今天还算这个客户的账号今天的预估：「调用次数」上的今日预估、签上的「今日」
+    for h in view.holdings:
+        values = costs.get(h.key)
+        if not values:
+            continue
+        begin, stop = h.joined or date.min, h.left or date.max
+        mine = [value if begin <= day < stop else 0.0 for value, day in zip(values, stamps)]
+        per_account[h.number] = [a + b for a, b in zip(per_account.get(h.number, [0.0] * width), mine)]
+        if begin <= end < stop:
+            today_by_key[h.key] = mine[-1]
+    totals = [sum(column) for column in zip(*per_account.values())] if per_account else [0.0] * width
+    labels = [day.strftime("%m-%d") for day in stamps[:-1]] + ["今天"]
+    # 和左边「调用次数」一排、一样高：图高一点，不在字和图之间空出一大块
+    bars = chart.render_bars(labels, _stacked_rows(per_account, names, width, slots), width=300, height=280,
+                             fmt=money, axis=customers.short_money)
+    return SimpleNamespace(chart=bars, total=sum(totals), today=totals[-1], yesterday=totals[-2] if width > 1 else 0.0,
+                           partial=partial, start=stamps[0].strftime("%m-%d"), end=stamps[-1].strftime("%m-%d"),
+                           today_by_key=today_by_key)
 
 
 # 「调用次数」右上角选看多久，网址上是 ?calls=（近 24 小时是默认，不带）
@@ -282,13 +321,15 @@ def _calls_window(view: customers.CustomerView, key: str) -> MetricWindow:
 
 
 def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dict[str, int], key: str = "24h",
-                 refresh: bool = False):
+                 refresh: bool = False, today_costs: dict[str, float] | None = None, partial: bool = False):
     """调用次数：CloudWatch 的调用次数（四区合计），晚几分钟出数，比账单快得多。折线图，一个账号一条线，线尾是这个
     账号的头像；颜色和「每日消费」一样。点下面的账号挑几个只看它们，纵轴跟着它们重新算（app.js）。
 
     近 24 小时只查还在用的账号——结算了、停用了的不会再有调用，少查几次。按天看的查这段时间里在这个客户名下用过的
     账号（停用的不查），每个账号只算它算这个客户的那几天（Holding.active_daily 一样的规矩：分过来那天起，到风控、
     换下、用完、结算的前一天）。一直没调用的不画线，在图下面点名；账号多过 8 个时，调用少的并成「其他」一条。
+    today_costs 是「预估」那张算好的今天还算这个客户的账号今天的预估（{account.key: 金额}，UTC 日期），加起来就是
+    今日预估，和「预估」那张的「今天到现在」是同一个数；partial 是有没有没算上的。
     """
     window = _calls_window(view, key)
     hourly = window.period_key != "1d"
@@ -324,9 +365,7 @@ def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dic
                                ends={names[number]: by_number[number].account.avatar for number in keep})
     totals = [sum(values[i] for values in series.values()) for i in range(width)]
     peak = max(range(width), key=lambda i: totals[i]) if any(totals) else None
-    # 今日预估：只估今天有调用的账号（按小时看的：这 24 小时里有调用的），没调用的今天也就是 0，不用再查
-    busy = [number for number in ranked if hourly or series[number][-1] > 0]
-    costs, partial = _estimate_today([by_number[number].account for number in busy], view.today, refresh=refresh)
+    costs = today_costs or {}
     label = dict(CALLS_RANGES).get(key, "近 24 小时")
     # 图下面的签：一条线一个，和线同一个顺序（签上的 data-s 就是线的序号），悬浮看这个账号这段时间多少次、今天预估花了多少
     legend = []
@@ -445,9 +484,16 @@ def detail(cid: str, **extra):
     trend = _spend_chart(per_account, stamps, names, height=230, width=1100, slots=slots,
                          marks=_spend_marks(view, stamps, names, slots))
     trend.label = spend.label
+    # 「预估」和「调用次数」上的今日预估一起查一次（近 7 天，UTC 日期，今天算到现在）：这几天在这个客户名下用过的
+    # 账号，停用的不查
+    est_start, est_end = _estimate_window()
+    estimated = [h.account for h in view.holdings if h.account.enabled
+                 and (h.joined or date.min) <= est_end and (h.left or date.max) > est_start]
+    costs, partial = _estimate_days(estimated, est_start, est_end, refresh=refresh)
+    estimate = _estimate_card(view, names, slots, costs, partial, est_start, est_end)
     # 「调用次数」右上角也选看多久：近 24 小时（默认）按小时，其余按天
-    calls = _calls_chart(view, names, slots, request.args.get("calls") or "24h", refresh=refresh)
-    runway = chart.render_runway(view.balance_history(21), view.burn, fmt=money, axis=customers.short_money)
+    calls = _calls_chart(view, names, slots, request.args.get("calls") or "24h", refresh=refresh,
+                         today_costs=estimate.today_by_key, partial=partial)
 
     by_number = {a.account: a for a in accounts}
     timeline = _timeline_payload(view, by_number)
@@ -486,7 +532,7 @@ def detail(cid: str, **extra):
         calls=calls,
         calls_links=range_links("customers.detail", "calls", CALLS_RANGES, calls.key, "24h", cid=customer.id,
                                 spend=None if spend.key == "30" else spend.key),
-        runway=runway,
+        estimate=estimate,
         timeline=timeline,
         timeline_fallback=_timeline_fallback(view, by_number),
         categories=customers.CATEGORIES,
@@ -512,7 +558,12 @@ def detail(cid: str, **extra):
 
 
 def _timeline_payload(view: customers.CustomerView, by_number: dict[str, Account]) -> dict:
-    """时间线交给 static/timeline.js 画（横向、可拖、可筛）。卡片上那一行是账号，替换的再带上换上来的那个。"""
+    """时间线交给 static/timeline.js 画（横向、可拖、可筛）。卡片上那一行是账号，替换的再带上换上来的那个。
+
+    accounts 是「按账号筛选」下拉里的账号：名下现在的全列上，和「名下账号」表格一个顺序——一件事都没有的也在
+    （替换上来的只在「替换账号」里当换上的那个，台账里直接填的客户连「分配账号」都没有）；时间线上出现过、
+    已经不在名下的（解绑了的）排在后面，group 是 gone。
+    """
     items = []
     for item in view.timeline:
         entry = customers.item_payload(item)
@@ -523,9 +574,13 @@ def _timeline_payload(view: customers.CustomerView, by_number: dict[str, Account
             keys=[number for number in (item.account, item.peer) if number],
         )
         items.append(entry)
-    numbers = list(dict.fromkeys(item.account for item in view.timeline if item.account))
-    return {"items": items, "today": view.today.isoformat(),
-            "accounts": [customers.account_face(number, by_number) for number in numbers]}
+    current = list(dict.fromkeys(holding.number for holding in view.listed))
+    mentioned = dict.fromkeys(number for item in view.timeline for number in (item.account, item.peer) if number)
+    here = set(current)
+    gone = [number for number in mentioned if number not in here]
+    accounts = ([{**customers.account_face(number, by_number), "group": "on"} for number in current]
+                + [{**customers.account_face(number, by_number), "group": "gone"} for number in gone])
+    return {"items": items, "today": view.today.isoformat(), "accounts": accounts}
 
 
 def _timeline_fallback(view: customers.CustomerView, by_number: dict[str, Account]) -> list[tuple]:

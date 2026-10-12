@@ -112,7 +112,7 @@ def test_余额卡片写着已使用多少_额度使用拿掉了(admin, fake_cos
     html = detail(admin)
     bento = html[html.index('<section class="detail-bento"'):html.index('id="tl-title"')]
     assert [scrape(t) for t in re.findall(r'<h2 class="viz-title">(.*?)</h2>', bento)] == [
-        "账号", "余额", "调用次数", "还能用几天", "每日消费"]
+        "账号", "余额", "调用次数", "预估", "每日消费"]
     box = card(html, "余额")
     assert 'class="viz-card col-4"' in box and 'class="bal-bar bal-bar-total' in box
     budget, used, left = (int(n.replace(",", "")) for n in re.search(

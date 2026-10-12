@@ -2880,7 +2880,7 @@ a.event-who:hover { color: var(--accent-dim); }
   .hero-meta > span { padding: 0 12px; }
 }
 
-/* ---- 详情：五张图。6 栏：第一排账号、余额、额度使用，第二排每日消费（4 栏）、还能用几天 */
+/* ---- 详情：五张图。6 栏：第一排账号、余额（4 栏），第二排调用次数（4 栏）、预估，最后每日消费整行 */
 .detail-bento { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-auto-flow: row dense; gap: 16px; margin-bottom: 18px; }
 .detail-bento .col-2 { grid-column: span 2; }
 .detail-bento .col-4 { grid-column: span 4; }
@@ -2925,7 +2925,6 @@ a.event-who:hover { color: var(--accent-dim); }
 }
 .gauge-facts .state-dot { display: inline-block; margin-right: 6px; vertical-align: 1px; }
 .viz-big.tone-warn { color: var(--warn); }
-.runway-chart { display: block; width: 100%; height: auto; }
 /* 「余额」：每个使用中的账号还剩多少。卡片占两份宽，账号排两列；上面一根总条（全部使用中的账号还剩多少） */
 .bal-rows { display: flex; flex-direction: column; gap: 14px; }
 .detail-bento .col-4 .bal-rows { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 28px; }
@@ -2958,8 +2957,19 @@ a.event-who:hover { color: var(--accent-dim); }
 /* 最宽 320，手机上放不下就跟着缩，不把页面撑出横向滚动 */
 .tl-acct-filter .acct-picker { min-width: 0; }
 .tl-acct-filter .acct-picker-btn { width: 320px; max-width: 100%; height: 30px; padding-left: 10px; gap: 8px; }
-.tl-acct-filter .acct-picker-btn .mini-av[hidden] { display: none; }
 .tl-acct-filter .acct-picker-sub:empty { display: none; }
+/* 按钮上勾了的账号的小头像：多选的叠在一起，最多三个 */
+.tl-acct-avs { display: inline-flex; flex: 0 0 auto; }
+.tl-acct-avs[hidden] { display: none; }
+.tl-acct-avs .mini-av { box-shadow: 0 0 0 2px var(--panel); }
+.tl-acct-avs .mini-av + .mini-av { margin-left: -5px; }
+/* 手机上弹层从按钮左边往右开，前面还有「账号」两个字，会伸出屏幕：下拉单独占一行，弹层和它一样宽 */
+@media (max-width: 760px) {
+  .tl-acct-filter { flex-wrap: wrap; width: 100%; }
+  .tl-acct-filter .acct-picker { flex: 1 1 100%; }
+  .tl-acct-filter .acct-picker-btn { width: 100%; }
+  .tl-acct-filter .acct-picker-pop { width: 100%; }
+}
 .tl-scroll { position: relative; overflow-x: auto; overflow-y: hidden; margin: 0 -22px; padding: 0 22px; cursor: grab;
              scrollbar-width: thin; overscroll-behavior-x: contain;
              -webkit-mask-image: linear-gradient(to right, transparent 0, #000 26px, #000 calc(100% - 26px), transparent 100%);

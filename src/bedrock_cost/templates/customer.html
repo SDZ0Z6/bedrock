@@ -76,7 +76,7 @@
     {{ view.stale | map(attribute='series.stale_as_of') | min }}）。</p>
 {% endif %}
 
-<!-- ------------------------------------------------ 五张图：账号、余额 / 近 24 小时调用、还能用几天 / 每日消费 -->
+<!-- ------------------------------------------------ 五张图：账号、余额 / 调用次数、预估 / 每日消费 -->
 <section class="detail-bento" aria-label="这个客户的图表">
   <article class="viz-card col-2" data-reveal>
     <div class="viz-head">
@@ -168,7 +168,7 @@
         {# 左边是调用次数，右边是今天到现在的预估花费（用量 × 牌价，以账单为准） #}
         <div class="calls-kpis">
           <p class="viz-big"><span data-countup>{{ calls.total | compact }}</span> <small>次 · {{ calls.label }}</small></p>
-          <p class="viz-big" title="CloudWatch 的用量 × 牌价，和账号页「预估」页签一个算法，以账单为准">
+          <p class="viz-big" title="CloudWatch 的用量 × 牌价（UTC 日期），和账号页「预估」页签、旁边的「预估」一个算法，以账单为准">
             <span data-countup>{{ calls.today_cost | money }}</span> <small>今日预估{% if calls.partial %}（有的没算上）{% endif %}</small></p>
         </div>
         <p class="viz-meta">
@@ -197,27 +197,32 @@
     {% endif %}
   </article>
 
-  <article class="viz-card col-2" data-reveal>
+  {# 预估（原来是「还能用几天」）：账单晚 1~2 天，被 credits 抵掉时甚至一直是 0；这张看 CloudWatch 的用量 × 牌价，
+     近 7 天一天一根（UTC 日期，今天算到现在），按账号叠起来，颜色和「每日消费」一样，悬浮看每个账号；
+     点下面的账号挑几个只看它们（和每日消费一样，纵轴跟着它们重新算） #}
+  <article class="viz-card col-2" id="estimate" data-reveal>
     <div class="viz-head">
       <div>
-        <h2 class="viz-title">还能用几天</h2>
-        <p class="viz-sub">余额 ÷ 近 7 天日均，虚线是预测</p>
+        <h2 class="viz-title">预估</h2>
+        <p class="viz-sub">{{ estimate.start }} ~ {{ estimate.end }} · CloudWatch 用量 × 牌价，按 UTC 日期 · 以账单为准</p>
       </div>
     </div>
     <div>
-      {% set left = view.days_left %}
-      {% if left is none %}
-        <p class="viz-big">— <small>最近 7 天没有消费</small></p>
-      {% elif left <= 0 %}
-        <p class="viz-big tone-warn">0 天 <small>没有余额了，该换账号了</small></p>
-      {% elif view.long_runway %}
-        <p class="viz-big">一年以上 <small>一年内用不完</small></p>
-      {% else %}
-        <p class="viz-big {% if left < 14 %}tone-warn{% endif %}">约 {{ left | int }} 天 <small>{{ view.runs_out_on.strftime('%m-%d') }} 前后用完</small></p>
-      {% endif %}
-      <p class="viz-meta">余额 <strong>{{ view.balance | money0 }}</strong> · 日均 <strong>{{ view.avg7 | money0 }}</strong></p>
+      <p class="viz-big"><span data-countup>{{ estimate.total | money0 }}</span>
+        <small>近 7 天预估{% if estimate.partial %}（有的没算上）{% endif %}</small></p>
+      <p class="viz-meta">今天到现在 <strong>{{ estimate.today | money }}</strong> · 昨天 <strong>{{ estimate.yesterday | money }}</strong></p>
     </div>
-    <div class="viz-chart">{{ runway | safe }}</div>
+    <div class="viz-chart" id="cust-estimate" data-tip-src="cust-estimate-data">{{ estimate.chart.svg | safe }}</div>
+    {% if estimate.chart.legend %}
+      <div class="legend-toggles" data-legend-for="cust-estimate" role="group" aria-label="挑几个账号只看它们">
+        {% for item in estimate.chart.legend %}
+          <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
+                  title="{{ item.name }} 近 7 天预估 {{ item.total | money }}">
+            <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
+        {% endfor %}
+      </div>
+    {% endif %}
+    <script id="cust-estimate-data" type="application/json">{{ estimate.chart.tooltip | tojson }}</script>
   </article>
 
   {# 每日消费：竖虚线是每个账号的启用、风控、换下、用完、结算、恢复（停的那条写着从启用起用了多少，悬浮看全）。
