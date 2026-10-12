@@ -11,17 +11,39 @@
 走过去的地方草被踩弯、树叶晃一晃掉一片，走路时脚后面扬一点小灰。系统设了「减少动态效果」就都站着不动，
 风景也不动，对话框照样有。
 
+背景（SCENES）：白天、黄昏、夜晚、夏夜萤火虫、下雨、雨后彩虹、下雪、樱花、秋天落叶。默认按时间和季节自动挑
+（auto_scene），欢迎条右上角能自己挑，挑过的记在自己的资料里（users.Look.scene，空着是自动）。换背景不用刷新页面：
+颜色由 style.css 按 data-kind 换，雨、雪、花瓣、落叶、萤火虫由 mascots.js 撒。小家伙也跟着变：
+  · 台词（SCENE_LINES）：下雨说「记得带伞」、下雪说「账单都冻住了」……；
+  · 小道具：下雨撑伞，下雪戴围巾，樱花、秋天头上顶一片花瓣 / 叶子；
+  · 动作：夜里有一只睡着了冒「Zzz」（说梦话，SLEEPY），下雪走着走着会打滑，下雨爱往树底下躲。
+
 小家伙就是侧边栏、登录页上那只（tools/make_mascot_assets.py 的格子，10 × 8）；帧和风景都在 templates/_mascot.html。
 """
 
 from __future__ import annotations
 
+import math
+import zlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 from . import customers, presence, users
 
 WEEKDAYS = "一二三四五六日"
+
+# 背景：key -> 名字。顺序就是挑背景那个菜单里的顺序
+SCENES = {
+    "day": "白天",
+    "dusk": "黄昏",
+    "night": "夜晚",
+    "fireflies": "夏夜萤火虫",
+    "rain": "下雨",
+    "rainbow": "雨后彩虹",
+    "snow": "下雪",
+    "sakura": "樱花",
+    "autumn": "秋天落叶",
+}
 
 SHARED = (
     "人类怎么了？",
@@ -109,6 +131,28 @@ MOODS = {
     ),
 }
 
+# 跟着背景说的
+SCENE_LINES = {
+    "day": ("今天天气真好。", "晒太阳中，勿扰。", "阳光正好，适合……工作。", "云在天上，账单在页面上。", "这么好的天，token 也想出去玩。"),
+    "dusk": ("太阳要下班了，你呢？", "晚霞好看吧？比账单好看。", "天边红红的，像不像使用率？", "黄昏了，今天的 token 烧完了吗？",
+             "落日的余晖，照在余额上。"),
+    "night": ("好困……", "夜深了，账单也要睡觉。", "嘘，星星在数数。", "月亮今天也在加班。", "熬夜对像素不好。",
+              "我们小声点，别吵醒它。"),
+    "fireflies": ("萤火虫在开派对！", "一闪一闪，像告警灯。", "夏天的晚上最舒服了。", "我想抓一只萤火虫……可惜没有手。",
+                  "它们是不是也在烧 token？"),
+    "rain": ("下雨了，记得带伞！", "我的伞是像素做的，有点漏。", "雨声好适合写代码。", "云在哭，可能看到账单了。",
+             "别淋湿了，会短路的。", "快到树底下躲雨！"),
+    "rainbow": ("看！彩虹！", "雨停了，彩虹出来了。", "彩虹的尽头有额度吗？", "踩水坑最好玩了！", "七种颜色，比折线图好看。"),
+    "snow": ("好冷，账单都冻住了。", "下雪啦！堆个雪人吧！", "围巾是 Claude 织的。", "小心，地上滑！", "雪花和 token 一样多。",
+             "哎呀，又滑了一跤。"),
+    "sakura": ("花瓣掉我头上了。", "樱花开了，春天来了。", "好香……是花还是咖啡？", "樱花雨！快许愿！", "春天适合上量。"),
+    "autumn": ("秋天到了，叶子在下班。", "落叶好好踩，咔嚓咔嚓。", "秋高气爽，适合对账。", "一片叶子掉我头上了。",
+               "秋天的风有点凉。"),
+}
+
+# 夜里睡着的那只说梦话
+SLEEPY = ("呼……呼……", "再睡五分钟……", "Zzz……额度……还够……", "别吵，梦到上量了。", "呼噜……", "唔……账单……明天再看……")
+
 # 被点了：一多半说这些
 POKED = (
     "哎哟！",
@@ -168,6 +212,53 @@ def facts_from(cards, report, customer_count: int) -> Facts:
     )
 
 
+def rainy(day: date) -> bool:
+    """哪天下雨：按日期算的，大约一周一天；同一天谁来看都一样。"""
+    return zlib.crc32(day.isoformat().encode("ascii")) % 7 == 0
+
+
+def auto_scene(now: datetime) -> str:
+    """自动挑背景：晚上 7 点到早上 6 点是夜里（6–8 月有萤火虫），下午 5 点到 7 点是黄昏；白天看月份——12–2 月下雪，
+    下雨的日子（rainy）上午下雨、下午 2 点以后雨停了出彩虹，3–4 月樱花，9–11 月秋天落叶，别的日子是晴天。"""
+    hour, month = now.hour, now.month
+    if hour < 6 or hour >= 19:
+        return "fireflies" if month in (6, 7, 8) else "night"
+    if hour >= 17:
+        return "dusk"
+    if month in (12, 1, 2):
+        return "snow"
+    if rainy(now.date()):
+        return "rainbow" if hour >= 14 else "rain"
+    if month in (3, 4):
+        return "sakura"
+    if month in (9, 10, 11):
+        return "autumn"
+    return "day"
+
+
+def _rainbow(radius: int = 18, bands: int = 6) -> list[tuple[int, int, int, int]]:
+    """彩虹：半个圆环，一圈一个颜色，按格子画（一行里同一圈连着的格子并成一个矩形）。
+    返回 [(x, y, 宽, 第几圈)]，画在 2·radius × radius 的格子里，圆心在底边正中。"""
+    out = []
+    for y in range(radius):
+        run = None   # [起点, 宽, 圈]
+        for x in range(2 * radius + 1):
+            band = None
+            if x < 2 * radius:
+                gap = radius - math.hypot(x + 0.5 - radius, y + 0.5 - radius)
+                band = int(gap) if 0 <= gap < bands else None
+            if run and band == run[2]:
+                run[1] += 1
+                continue
+            if run:
+                out.append((run[0], y, run[1], run[2]))
+            run = [x, 1, band] if band is not None else None
+    return out
+
+
+RAINBOW = _rainbow()
+
+
 def context_lines(person: users.Person, seconds: int, now: datetime, facts: Facts | None = None) -> list[str]:
     """看场合说的：叫名字，看几点、星期几、今天在线多久，看概览上的数。"""
     out = [f"{person.label}，欢迎回来！", f"{person.label}，今天也很努力呢。"]
@@ -214,17 +305,21 @@ def context_lines(person: users.Person, seconds: int, now: datetime, facts: Fact
 
 
 def context(person: users.Person, now: datetime | None = None, facts: Facts | None = None) -> dict:
-    """概览模板要的：谁、今天在线多少秒（和说人话的写法）、今天几号星期几、白天还是夜里（画太阳还是月亮），
+    """概览模板要的：谁、今天在线多少秒（和说人话的写法）、今天几号星期几，背景（这个人挑的，没挑就是自动挑的），
     小家伙们和它们能说的话。"""
     now = now or datetime.now()
     seconds = presence.seconds_on(person.name, now.date())
+    chosen = person.look.scene if person.look.scene in SCENES else ""
+    auto = auto_scene(now)
     return {
         "person": person,
         "seconds": seconds,
         "online": presence.label(seconds),
         "today": f"{now.month} 月 {now.day} 日 星期{WEEKDAYS[now.weekday()]}",
-        "night": now.hour < 6 or now.hour >= 19,
+        "scene": {"kind": chosen or auto, "auto": auto, "chosen": chosen, "options": list(SCENES.items()),
+                  "rainbow": RAINBOW},
         "mascots": MASCOTS,
         "talk": {"shared": list(SHARED), "moods": {mood: list(lines) for mood, lines in MOODS.items()},
-                 "poked": list(POKED), "context": context_lines(person, seconds, now, facts)},
+                 "poked": list(POKED), "context": context_lines(person, seconds, now, facts),
+                 "scenes": {kind: list(lines) for kind, lines in SCENE_LINES.items()}, "sleepy": list(SLEEPY)},
     }

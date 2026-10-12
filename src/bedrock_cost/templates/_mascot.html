@@ -2,13 +2,26 @@
      · 身子是一整块（第 0~5 行，第 1~8 列），两边的「手」单独画：平时在第 2~3 行，跳舞时往上挪一格（举手）
      · 腿四条（第 6~7 行）：站着四条都着地；走路两帧轮流抬起一对
      · 眼睛两套：正脸（第 2、7 列）；走路时看着前面（第 3、8 列，往左走整个翻过来）
-   哪一帧露出来由 CSS 管（.is-walking / .is-dancing，style.css 的「小家伙」那一节），走到哪、什么时候跳舞、说什么由
-   static/mascots.js 安排。spec 是 welcome.Mascot：一格画几个像素（整数倍才不糊）、眨眼错开多久、一开始站哪、什么脾气 #}
+     · 小道具（跟着背景，style.css 按 data-kind 露出来）：下雨撑伞、下雪戴围巾、樱花 / 秋天头上顶一片花瓣 / 叶子；
+       夜里睡着的那只头上冒「Zzz」
+   哪一帧露出来由 CSS 管（.is-walking / .is-dancing / .is-sleeping，style.css 的「小家伙」那一节），走到哪、什么时候跳舞、
+   说什么由 static/mascots.js 安排。spec 是 welcome.Mascot：一格画几个像素（整数倍才不糊）、眨眼错开多久、一开始站哪、
+   什么脾气。画多大最后由 CSS 定：一格 = --s + --grow 个像素（电脑的宽屏上 --grow 是 2，整只大两号）；width / height 只是兜底 #}
 {% macro mascot(spec) -%}
   <button class="mascot" type="button" data-mascot data-start="{{ spec.start }}" data-mood="{{ spec.mood }}"
           style="--s: {{ spec.scale }}; --blink: {{ spec.blink }}s" aria-label="像素小家伙：点一下听它说一句">
     <span class="mascot-bubble" data-bubble hidden></span>
     <span class="mascot-flip">
+      {# 伞：撑在头顶上，伞柄落在身子正中 #}
+      <svg class="mascot-prop prop-umbrella" viewBox="0 0 12 7" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+        <rect class="u-top" x="4" y="0" width="4" height="1"/><rect class="u-top" x="2" y="1" width="8" height="1"/>
+        <rect class="u-top" x="1" y="2" width="10" height="1"/><rect class="u-edge" x="0" y="3" width="12" height="1"/>
+        <rect class="u-light" x="3" y="1" width="2" height="1"/><rect class="u-stick" x="6" y="4" width="1" height="3"/>
+      </svg>
+      {# 头上的一片花瓣 / 叶子 #}
+      <svg class="mascot-prop prop-petal" viewBox="0 0 3 2" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+        <rect x="0" y="0" width="2" height="1"/><rect x="1" y="1" width="2" height="1"/>
+      </svg>
       <svg class="mascot-sprite" viewBox="0 0 10 8" width="{{ 10 * spec.scale }}" height="{{ 8 * spec.scale }}"
            shape-rendering="crispEdges" aria-hidden="true" focusable="false">
         <rect x="1" y="0" width="8" height="6"/>
@@ -16,6 +29,7 @@
         <g class="m-arms-up"><rect x="0" y="1" width="1" height="2"/><rect x="9" y="1" width="1" height="2"/></g>
         <g class="m-eyes m-eyes-front"><rect x="2" y="1" width="1" height="1"/><rect x="7" y="1" width="1" height="1"/></g>
         <g class="m-eyes m-eyes-side"><rect x="3" y="1" width="1" height="1"/><rect x="8" y="1" width="1" height="1"/></g>
+        <g class="m-scarf"><rect x="1" y="3" width="8" height="1"/><rect x="6" y="4" width="1" height="2"/></g>
         <g class="m-legs-stand"><rect x="1" y="6" width="1" height="2"/><rect x="3" y="6" width="1" height="2"/>
           <rect x="6" y="6" width="1" height="2"/><rect x="8" y="6" width="1" height="2"/></g>
         <g class="m-legs-a"><rect x="1" y="6" width="1" height="2"/><rect x="3" y="6" width="1" height="1"/>
@@ -24,21 +38,27 @@
           <rect x="6" y="6" width="1" height="1"/><rect x="8" y="6" width="1" height="2"/></g>
       </svg>
     </span>
+    <span class="mascot-zzz" aria-hidden="true"><i>z</i><i>z</i><i>Z</i></span>
     <span class="mascot-shadow" aria-hidden="true"></span>
   </button>
 {%- endmacro %}
 
 {# ---------------------------------------------------------------- 风景：同一套像素画法
    几层叠着，越远的越跟着小家伙们挪（static/mascots.js 按它们站的地方算 --cam，style.css 里各层乘自己的深度）：
-     sky   天：太阳（夜里是月亮和几颗星），几朵云自己慢慢飘
-     far   远山
-     mid   树：有小家伙从底下走过就晃一晃、掉一片叶子
-     ground 地面和草、花：不跟着挪（小家伙站在上面），被踩到就弯一下
-   都是装饰，读屏软件不念（aria-hidden） #}
+     sky    天：太阳（夜里是月亮和星星），彩虹，几朵云自己慢慢飘
+     far    远山
+     mid    树：有小家伙从底下走过就晃一晃、掉一片叶子
+     ground 地面和草、花、水坑：不跟着挪（小家伙站在上面），被踩到就弯一下
+     weather 雨、雪、花瓣、落叶、萤火虫：mascots.js 按背景撒
+   九种背景用的是同一套东西：颜色由 style.css 按欢迎条上的 data-kind 换，哪样露出来也是（下雨不见太阳，
+   夜里才有月亮星星……），所以换背景不用刷新页面。都是装饰，读屏软件不念（aria-hidden）。
+   每张小图（.px）的大小也由 CSS 定：--w × --h 个格子，一格 --c 个像素，再乘上 --zoom（电脑的宽屏上放大，style.css）；
+   width / height 只是兜底 #}
 {# 一朵云：从右往左飘，飘一趟 speed 秒；delay 是负的，一开始就散在半路上。x 是不飘的时候（减少动态效果）停在哪 #}
 {% macro _cloud(x, y, cell, speed, delay) -%}
-  <svg class="scene-cloud" viewBox="0 0 12 5" width="{{ 12 * cell }}" height="{{ 5 * cell }}" shape-rendering="crispEdges"
-       style="left: {{ x }}%; top: {{ y }}px; animation-duration: {{ speed }}s; animation-delay: {{ delay }}s">
+  <svg class="scene-cloud px" viewBox="0 0 12 5" width="{{ 12 * cell }}" height="{{ 5 * cell }}" shape-rendering="crispEdges"
+       style="--w: 12; --h: 5; --c: {{ cell }}; left: {{ x }}%; top: calc({{ y }}px * var(--zoom, 1));
+              animation-duration: {{ speed }}s; animation-delay: {{ delay }}s">
     <rect x="4" y="0" width="4" height="1"/><rect x="2" y="1" width="8" height="1"/><rect x="1" y="2" width="10" height="1"/>
     <rect x="0" y="3" width="12" height="1"/><rect class="cloud-shade" x="1" y="4" width="10" height="1"/>
   </svg>
@@ -49,23 +69,27 @@
   {% set rows = [(13, 8), (10, 14), (8, 18), (6, 22), (4, 26), (2, 30), (0, 34)] if back
                 else [(9, 8), (6, 14), (4, 18), (2, 22), (0, 26)] %}
   {% set width = 34 if back else 26 %}
-  <svg class="scene-hill{% if back %} is-back{% endif %}" viewBox="0 0 {{ width }} {{ rows | length }}"
-       width="{{ width * cell }}" height="{{ (rows | length) * cell }}" shape-rendering="crispEdges" style="left: {{ x }}%">
+  <svg class="scene-hill px{% if back %} is-back{% endif %}" viewBox="0 0 {{ width }} {{ rows | length }}"
+       width="{{ width * cell }}" height="{{ (rows | length) * cell }}" shape-rendering="crispEdges"
+       style="--w: {{ width }}; --h: {{ rows | length }}; --c: {{ cell }}; left: {{ x }}%">
     {% for left, span in rows %}<rect x="{{ left }}" y="{{ loop.index0 }}" width="{{ span }}" height="1"/>{% endfor %}
   </svg>
 {%- endmacro %}
 
-{% macro _tree(x, kind, cell) -%}
-  <span class="scene-tree is-{{ kind }}" data-tree style="left: {{ x }}%">
+{# 树：圆的、尖的两种；alt 是换个颜色的那几棵（秋天里一棵红一棵黄） #}
+{% macro _tree(x, kind, cell, alt=false) -%}
+  <span class="scene-tree is-{{ kind }}{% if alt %} is-alt{% endif %}" data-tree style="left: {{ x }}%">
     {% if kind == 'pine' %}
-      <svg viewBox="0 0 5 8" width="{{ 5 * cell }}" height="{{ 8 * cell }}" shape-rendering="crispEdges">
+      <svg class="px" viewBox="0 0 5 8" width="{{ 5 * cell }}" height="{{ 8 * cell }}" shape-rendering="crispEdges"
+           style="--w: 5; --h: 8; --c: {{ cell }}">
         <g class="tree-top"><rect x="2" y="0" width="1" height="1"/><rect x="1" y="1" width="3" height="1"/>
           <rect x="0" y="2" width="5" height="1"/><rect x="1" y="3" width="3" height="1"/>
           <rect x="0" y="4" width="5" height="1"/><rect class="tree-shade" x="0" y="5" width="5" height="1"/></g>
         <rect class="tree-trunk" x="2" y="6" width="1" height="2"/>
       </svg>
     {% else %}
-      <svg viewBox="0 0 7 8" width="{{ 7 * cell }}" height="{{ 8 * cell }}" shape-rendering="crispEdges">
+      <svg class="px" viewBox="0 0 7 8" width="{{ 7 * cell }}" height="{{ 8 * cell }}" shape-rendering="crispEdges"
+           style="--w: 7; --h: 8; --c: {{ cell }}">
         <g class="tree-top"><rect x="1" y="0" width="5" height="1"/><rect x="0" y="1" width="7" height="3"/>
           <rect class="tree-light" x="1" y="1" width="2" height="1"/><rect class="tree-shade" x="1" y="4" width="5" height="1"/></g>
         <rect class="tree-trunk" x="3" y="5" width="1" height="3"/>
@@ -77,41 +101,43 @@
 {% macro _tuft(x, kind) -%}
   <span class="scene-tuft is-{{ kind }}" data-tuft style="left: {{ x }}%">
     {% if kind == 'flower' %}
-      <svg viewBox="0 0 3 4" width="9" height="12" shape-rendering="crispEdges">
+      <svg class="px" viewBox="0 0 3 4" width="9" height="12" shape-rendering="crispEdges" style="--w: 3; --h: 4; --c: 3">
         <rect class="petal" x="1" y="0" width="1" height="1"/><rect class="petal" x="0" y="1" width="1" height="1"/>
         <rect class="petal" x="2" y="1" width="1" height="1"/><rect class="bud" x="1" y="1" width="1" height="1"/>
         <rect class="stem" x="1" y="2" width="1" height="2"/>
       </svg>
     {% elif kind == 'flower2' %}
-      <svg viewBox="0 0 3 4" width="9" height="12" shape-rendering="crispEdges">
+      <svg class="px" viewBox="0 0 3 4" width="9" height="12" shape-rendering="crispEdges" style="--w: 3; --h: 4; --c: 3">
         <rect class="petal" x="0" y="0" width="1" height="1"/><rect class="petal" x="2" y="0" width="1" height="1"/>
         <rect class="bud" x="1" y="0" width="1" height="2"/><rect class="stem" x="1" y="2" width="1" height="2"/>
       </svg>
     {% else %}
-      <svg viewBox="0 0 3 2" width="9" height="6" shape-rendering="crispEdges">
+      <svg class="px" viewBox="0 0 3 2" width="9" height="6" shape-rendering="crispEdges" style="--w: 3; --h: 2; --c: 3">
         <rect x="0" y="0" width="1" height="1"/><rect x="2" y="0" width="1" height="1"/><rect x="0" y="1" width="3" height="1"/>
       </svg>
     {% endif %}
   </span>
 {%- endmacro %}
 
-{% macro scene(night=false) -%}
-  <div class="scene{% if night %} is-night{% endif %}" data-scene aria-hidden="true">
+{% macro scene(info) -%}
+  <div class="scene" data-scene aria-hidden="true">
     <div class="scene-layer scene-sky" data-layer="sky">
-      {% if night %}
-        <svg class="scene-moon" viewBox="0 0 6 6" width="18" height="18" shape-rendering="crispEdges">
-          <rect x="2" y="0" width="3" height="1"/><rect x="1" y="1" width="2" height="1"/><rect x="0" y="2" width="2" height="2"/>
-          <rect x="1" y="4" width="2" height="1"/><rect x="2" y="5" width="3" height="1"/>
-        </svg>
-        {% for x, y, d in [(14, 10, 0), (31, 26, 1.1), (47, 8, 2.3), (63, 20, 0.6), (88, 30, 1.7)] %}
-          <i class="scene-star" style="left: {{ x }}%; top: {{ y }}px; animation-delay: {{ d }}s"></i>
-        {% endfor %}
-      {% else %}
-        <svg class="scene-sun" viewBox="0 0 7 7" width="21" height="21" shape-rendering="crispEdges">
-          <rect x="2" y="0" width="3" height="1"/><rect x="1" y="1" width="5" height="1"/><rect x="0" y="2" width="7" height="3"/>
-          <rect x="1" y="5" width="5" height="1"/><rect x="2" y="6" width="3" height="1"/>
-        </svg>
-      {% endif %}
+      <svg class="scene-sun px" viewBox="0 0 7 7" width="21" height="21" shape-rendering="crispEdges" style="--w: 7; --h: 7; --c: 3">
+        <rect x="2" y="0" width="3" height="1"/><rect x="1" y="1" width="5" height="1"/><rect x="0" y="2" width="7" height="3"/>
+        <rect x="1" y="5" width="5" height="1"/><rect x="2" y="6" width="3" height="1"/>
+      </svg>
+      <svg class="scene-moon px" viewBox="0 0 6 6" width="18" height="18" shape-rendering="crispEdges" style="--w: 6; --h: 6; --c: 3">
+        <rect x="2" y="0" width="3" height="1"/><rect x="1" y="1" width="2" height="1"/><rect x="0" y="2" width="2" height="2"/>
+        <rect x="1" y="4" width="2" height="1"/><rect x="2" y="5" width="3" height="1"/>
+      </svg>
+      {% for x, y, d in [(14, 10, 0), (31, 26, 1.1), (47, 8, 2.3), (63, 20, 0.6), (88, 30, 1.7), (24, 40, 2.9), (76, 9, 0.3)] %}
+        <i class="scene-star" style="left: {{ x }}%; top: calc({{ y }}px * var(--zoom, 1)); animation-delay: {{ d }}s"></i>
+      {% endfor %}
+      {# 彩虹：半个圆环一圈一个颜色（welcome.RAINBOW），脚落在远山后面 #}
+      <svg class="scene-rainbow px" viewBox="0 0 36 18" width="108" height="54" shape-rendering="crispEdges"
+           style="--w: 36; --h: 18; --c: 3">
+        {% for x, y, w, band in info.rainbow %}<rect class="b{{ band }}" x="{{ x }}" y="{{ y }}" width="{{ w }}" height="1"/>{% endfor %}
+      </svg>
       {{ _cloud(22, 8, 3, 110, -20) }}
       {{ _cloud(48, 26, 2, 150, -95) }}
       {{ _cloud(70, 14, 3, 130, -60) }}
@@ -121,13 +147,36 @@
       {{ _hill(22, 4, false) }}{{ _hill(58, 4, false) }}{{ _hill(90, 4, false) }}
     </div>
     <div class="scene-layer scene-mid" data-layer="mid">
-      {{ _tree(10, 'round', 6) }}{{ _tree(33, 'pine', 6) }}{{ _tree(61, 'round', 5) }}{{ _tree(86, 'pine', 7) }}
+      {{ _tree(17, 'round', 6) }}{{ _tree(37, 'pine', 6) }}{{ _tree(62, 'round', 5, alt=true) }}{{ _tree(86, 'pine', 7) }}
     </div>
     <div class="scene-ground">
+      {% for x in [17, 48, 73] %}<i class="scene-puddle" style="left: {{ x }}%"></i>{% endfor %}
       {% for x, kind in [(3, 'grass'), (11, 'flower'), (18, 'grass'), (26, 'grass'), (37, 'flower2'), (44, 'grass'),
                          (52, 'grass'), (59, 'flower'), (67, 'grass'), (75, 'grass'), (82, 'flower2'), (91, 'grass'),
                          (97, 'grass')] %}{{ _tuft(x, kind) }}{% endfor %}
     </div>
+    <div class="scene-weather" data-weather></div>
     <div class="scene-puffs" data-puffs></div>
+  </div>
+{%- endmacro %}
+
+{# 换背景：欢迎条右上角一个小按钮，点开一排选项（原生 popover，在顶层图层里，不会被卡片裁掉；位置由 mascots.js 算）。
+   选了马上换（不刷新页面），记在自己的资料里（POST /me/scene） #}
+{% macro scene_picker(info) -%}
+  {% set labels = dict(info.options) %}
+  <button class="scene-pick" type="button" popovertarget="scene-menu" data-scene-open
+          title="换个背景" aria-label="换个背景">
+    <svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.8"/>
+      <path d="m2.4 11.6 3.6-3.8 2.7 2.6 1.9-1.8 3.2 3"/><circle cx="10.6" cy="5.9" r="1.2"/></svg>
+    <span data-scene-label>{{ labels[info.kind] }}{% if not info.chosen %} · 自动{% endif %}</span>
+  </button>
+  <div class="scene-menu" id="scene-menu" popover>
+    <p class="scene-menu-title">背景</p>
+    <button type="button" data-scene-pick="" aria-pressed="{{ 'false' if info.chosen else 'true' }}">
+      <i class="scene-chip is-auto" aria-hidden="true"></i>自动<small>现在是{{ labels[info.auto] }}</small></button>
+    {% for key, label in info.options %}
+      <button type="button" data-scene-pick="{{ key }}" aria-pressed="{{ 'true' if info.chosen == key else 'false' }}">
+        <i class="scene-chip is-{{ key }}" aria-hidden="true"></i>{{ label }}</button>
+    {% endfor %}
   </div>
 {%- endmacro %}

@@ -7,7 +7,7 @@
 两种人都有自己的资料页（/me：显示名、头像、在线时间、登录记录），只读用户在那里改自己的密码。
 
 挡只读用户的是 _gate，每个请求都过一遍，以后加的页面、按钮不用一个个记得挡：不是 GET 的一律不让做（只放过
-改自己的密码、改自己的资料、在线时间的报到），账号管理、用户管理、设置三个蓝图和清空缓存去不了，网址上带
+改自己的密码、改自己的资料和背景、在线时间的报到），账号管理、用户管理、设置三个蓝图和清空缓存去不了，网址上带
 refresh 的拿掉再跳一次（看缓存里的数）。页面上那些按钮也藏起来（模板里的 is_admin()），这一层是兜底。
 
 会话里存 user、role（admin / viewer），只读用户还有 stamp：重置密码、停用、删除以后对不上，当没登录。
@@ -45,8 +45,8 @@ ADMIN, VIEWER = "admin", "viewer"
 # 只读用户去不了的：整个账号管理、用户管理、设置；GET 也会改东西的清空缓存
 ADMIN_BLUEPRINTS = frozenset({"accounts", "people", "settings"})
 ADMIN_ENDPOINTS = frozenset({"main.clear_cache"})
-# 只读用户也能提交的：改自己的密码、改自己的资料（显示名、头像）、在线时间的报到
-VIEWER_POSTS = frozenset({"auth.password", "profile.save", "profile.presence"})
+# 只读用户也能提交的：改自己的密码、改自己的资料（显示名、头像、概览的背景）、在线时间的报到
+VIEWER_POSTS = frozenset({"auth.password", "profile.save", "profile.scene", "profile.presence"})
 READ_ONLY = "只读用户不能改东西"
 
 # ip -> [失败次数, 首次失败时间]

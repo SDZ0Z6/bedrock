@@ -1,7 +1,7 @@
 {% extends "shell.html" %}
 {% from "_macros.html" import avatar, refresh_link, spend_switch %}
 {% from "_customer_macros.html" import cicon %}
-{% from "_mascot.html" import mascot, scene %}
+{% from "_mascot.html" import mascot, scene, scene_picker %}
 {% block title %}概览 · Bedrock 成本监控{% endblock %}
 {% block page_title %}概览{% endblock %}
 {% block loading_label %}正在查 Cost Explorer{% endblock %}
@@ -37,11 +37,15 @@
         <p class="welcome-sub">今天在线 <b data-online-today>{{ w.online }}</b><span class="dot-sep" aria-hidden="true">·</span>{{ w.today }}</p>
       </div>
     </div>
-    <div class="mascot-stage" data-mascot-stage>
-      {{ scene(w.night) }}
+    {# data-kind 是现在画哪个背景；data-auto 是自动的话该是哪个（菜单里点「自动」不用再问服务器） #}
+    <div class="mascot-stage" data-mascot-stage data-kind="{{ w.scene.kind }}" data-auto="{{ w.scene.auto }}">
+      {{ scene(w.scene) }}
       {% for spec in w.mascots %}{{ mascot(spec) }}{% endfor %}
+      {{ scene_picker(w.scene) }}
     </div>
     <script id="mascot-talk" type="application/json">{{ w.talk | tojson }}</script>
+    <script id="scene-conf" type="application/json">{{ {'url': url_for('profile.scene'), 'csrf': csrf_token(),
+      'labels': dict(w.scene.options)} | tojson }}</script>
     <script src="{{ url_for('static', filename='mascots.js') }}" defer></script>
   </section>
   {{ super() }}
