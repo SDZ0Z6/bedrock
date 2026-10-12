@@ -1,8 +1,9 @@
-"""客户页「近 24 小时调用」：账单晚 1~2 天，这张看现在——CloudWatch 的调用次数，折线图，一个账号一条线
-（四区合计、每小时一个点），线尾是这个账号的头像。只查还在用的账号；颜色和「每日消费」一样，一个账号一个颜色。
-客户页的「账号」卡片是按阶段的横条（长短按占全部账号的比例，后面是这一档的账号头像）。
+"""客户页「调用次数」（原来叫「近 24 小时调用」）：账单晚 1~2 天，这张看现在——CloudWatch 的调用次数（四区合计）。
+折线图，一个账号一条线，线尾是这个账号的头像；颜色和「每日消费」一样。下面一条线一个签，点了挑几个只看它们
+（纵轴跟着它们重新算，app.js）。右上角选看多久：近 24 小时（默认）每小时一个点、只查还在用的账号；近 7 天、
+近 30 天、全部每天一个点（UTC 日期），查这段时间在这个客户名下用过的账号，每个账号只算它在用的那几天。客户页的「账号」卡片是按阶段的横条（长短按占全部账号的比例，后面是这一档的账号头像）。
 
-账号页摘要页签的「近 24 小时调用」下面补一行「今天预估花费」（用量 × 牌价，和「预估」页签一个算法）。
+账号页摘要页签的「近 24 小时调用」（按模型的折线图，没改）下面补一行「今天预估花费」（用量 × 牌价，和「预估」页签一个算法）。
 """
 
 from __future__ import annotations
@@ -29,12 +30,12 @@ ALPHA_NO, BETA_NO = str(LEDGER_ROWS[0][1]), str(LEDGER_ROWS[1][1])
 
 @pytest.fixture
 def real_calls(monkeypatch, fake_cloudwatch):
-    """换回真的按账号汇总（conftest 默认换成了全 0），CloudWatch 用 fake_cloudwatch：每个区每小时 12 + 7 = 19 次。"""
-    monkeypatch.setattr(customer_pages, "_hourly_calls", cloudwatch_metrics.account_totals)
+    """换回真的按账号汇总（conftest 默认换成了全 0），CloudWatch 用 fake_cloudwatch：每个区每格 12 + 7 = 19 次。"""
+    monkeypatch.setattr(customer_pages, "_account_calls", cloudwatch_metrics.account_totals)
 
 
 def card(html: str) -> str:
-    start = html.index(">近 24 小时调用<")
+    start = html.index(">调用次数<")
     return html[start:html.index("</article>", start)]
 
 
@@ -50,47 +51,55 @@ def lines(html: str) -> dict:
     return json.loads(re.search(r'<script id="cust-calls-data" type="application/json">(.*?)</script>', html, re.S).group(1))
 
 
+def per_account(html: str) -> dict[str, list[float]]:
+    """{名字: 每个点的调用次数}。"""
+    return {s["name"]: s["v"] for s in lines(html)["series"]}
+
+
 def quiet_except(monkeypatch, busy: dict[str, float]):
-    """按号码给每小时的调用次数，没写的账号一直是 0。"""
+    """按号码给每格的调用次数，没写的账号一直是 0。"""
     def fake(accounts, window, metric_key="invocations", regions=None, refresh=False):
         stamps, labels = cloudwatch_metrics.build_grid(window)
         return cloudwatch_metrics.AccountHours(
             timestamps=stamps, labels=labels,
             values={a.key: [busy.get(a.account, 0.0)] * len(stamps) for a in accounts})
 
-    monkeypatch.setattr(customer_pages, "_hourly_calls", fake)
+    monkeypatch.setattr(customer_pages, "_account_calls", fake)
 
 
 # ====================================================================== 客户页
-def test_近24小时调用_一个账号一条线_线尾是头像(admin, fake_costs, real_calls):
+def test_默认近24小时_一个账号一条线_线尾是头像_下面的签能挑(admin, fake_costs, real_calls):
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
     html = detail(admin)
     text = scrape(card(html))
-    assert "3.6K 次" in text                                  # 2 个账号 × 4 个区 × 19 次 × 24 小时
+    assert "3.6K 次 · 近 24 小时" in text                     # 2 个账号 × 4 个区 × 19 次 × 24 小时
     assert "最近一小时 152" in text and "2 / 2 个在用的账号有调用" in text
     data = lines(html)
     assert data["unit"] == "次" and len(data["labels"]) == 24
-    assert {s["name"]: s["v"] for s in data["series"]} == {"acct-one": [76.0] * 24, "acct-two": [76.0] * 24}
-    # 线尾：两个头像（字母和 .av-N 的颜色），末值一样也上下错开，拉一根细线连回线尾
+    assert per_account(html) == {"acct-one": [76.0] * 24, "acct-two": [76.0] * 24}
+    # 线尾：两个头像（字母和 .av-N 的颜色），末值一样也上下错开，拉一根细线连回线尾（没错开的那根看不见）
     ends = re.search(r'<g class="chart-endavatars">(.*?)</g></g>', html, re.S).group(1)
-    assert len(re.findall(r'<g class="chart-endavatar av-\d', ends)) == 2
-    assert ends.count('style="fill: var(--av-bg)"') == 2 and ends.count("<line ") == 1
-    # 图下面：头像对邮箱，外圈是线的颜色
-    who = scrape(re.search(r'<div class="calls-legend">(.*?)</div>', html, re.S).group(1))
-    assert "acct-one@example.com 1.8K" in who and "acct-two@example.com 1.8K" in who
-    assert "data-line-src=\"cust-calls-data\"" in html
+    assert len(re.findall(r'<g class="chart-endavatar av-\d+" data-s="\d"', ends)) == 2
+    assert ends.count('style="fill: var(--av-bg)"') == 2
+    assert re.findall(r'class="end-link"[^>]*stroke-opacity="([^"]+)"', ends) == ["0", ".55"]
+    # 下面一条线一个签，和线同一个顺序（data-s），悬浮看次数和今日预估
+    box = card(html)
+    assert 'id="cust-calls" data-line-src="cust-calls-data"' in box
+    assert list(legend(box, "cust-calls")) == [s["name"] for s in data["series"]]
+    tips = re.findall(r'<button class="legend-toggle"[^>]*title="([^"]+)"', box)
+    assert "acct-one@example.com · 近 24 小时 1,824 次 · 今日 $0.00" in tips
 
 
 def test_和每日消费换了位置_在还能用几天左边(admin, fake_costs):
-    """近 24 小时调用和「还能用几天」一排（占三分之二宽）；每日消费挪到图的最后，整行宽。"""
+    """调用次数和「还能用几天」一排（占三分之二宽）；每日消费挪到图的最后，整行宽。"""
     make(admin)
     html = detail(admin)
-    assert (html.index(">近 24 小时调用<") < html.index(">还能用几天<") < html.index(">每日消费<")
+    assert (html.index(">调用次数<") < html.index(">还能用几天<") < html.index(">每日消费<")
             < html.index('id="tl-title"'))
-    calls = html.rindex("<article", 0, html.index(">近 24 小时调用<"))
+    calls = html.rindex("<article", 0, html.index(">调用次数<"))
     spend = html.rindex("<article", 0, html.index(">每日消费<"))
-    assert html.startswith('<article class="viz-card col-4"', calls)
+    assert html.startswith('<article class="viz-card col-4" id="calls"', calls)
     assert html.startswith('<article class="viz-card col-6" id="spend"', spend)
 
 
@@ -106,7 +115,7 @@ def test_和每日消费一个颜色(admin, fake_costs, real_calls, monkeypatch)
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
     html = detail(admin)
-    assert {s["name"]: s["color"] for s in lines(html)["series"]} == legend(html, "cust-spend")
+    assert legend(html, "cust-calls") == legend(html, "cust-spend")
 
 
 def test_只查还在用的账号(admin, fake_costs, monkeypatch):
@@ -118,7 +127,7 @@ def test_只查还在用的账号(admin, fake_costs, monkeypatch):
         return cloudwatch_metrics.AccountHours(timestamps=stamps, labels=labels,
                                                values={a.key: [0.0] * len(stamps) for a in accounts})
 
-    monkeypatch.setattr(customer_pages, "_hourly_calls", spy)
+    monkeypatch.setattr(customer_pages, "_account_calls", spy)
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
     post(admin, "/customers/C001/settle", key=ALPHA)          # 结算了的不会再有调用
@@ -134,7 +143,7 @@ def test_读不到CloudWatch_说一声(admin, fake_costs, monkeypatch):
         return cloudwatch_metrics.AccountHours(timestamps=stamps, labels=labels,
                                                values={a.key: [0.0] * len(stamps) for a in accounts}, errors=errors)
 
-    monkeypatch.setattr(customer_pages, "_hourly_calls", broken)
+    monkeypatch.setattr(customer_pages, "_account_calls", broken)
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA])
     html = detail(admin)
@@ -146,7 +155,7 @@ def test_一直没调用的不画线_在图下面点名(admin, fake_costs, monke
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
     html = detail(admin)
-    assert [s["name"] for s in lines(html)["series"]] == ["acct-one"]
+    assert [s["name"] for s in lines(html)["series"]] == ["acct-one"] == list(legend(html, "cust-calls"))
     assert "近 24 小时没有调用： A acct-two@example.com" in scrape(card(html))     # A 是邮箱的头一个字母
     assert "1 / 2 个在用的账号有调用" in scrape(card(html))
 
@@ -211,9 +220,10 @@ def test_末值一样的头像上下错开_一个都不省():
     report = calls_report(*(cloudwatch_metrics.MetricSeries(name=name, values=[5.0, 8.0, 3.0], slot=i)
                             for i, name in enumerate(faces)))
     svg = chart.render_lines(report, unit="次", width=900, uid="t", ends=faces).svg
-    ys = [float(y) for y in re.findall(r'<circle cx="[\d.]+" cy="([\d.]+)" r="10"', svg)]
+    ys = [float(y) for y in re.findall(r'<circle class="end-face" cx="[\d.]+" cy="([\d.]+)" r="10"', svg)]
     assert len(ys) == 3 and all(b - a >= chart.AVATAR_GAP - 0.01 for a, b in zip(sorted(ys), sorted(ys)[1:]))
-    assert svg.count('<line x1=') >= 2                       # 错开的那两个拉了线
+    # 错开的那两个拉了线；没错开的那根也画上、看不见（纵轴缩放以后可能要用）
+    assert re.findall(r'class="end-link"[^>]*stroke-opacity="([^"]+)"', svg) == ["0", ".55", ".55"]
     assert "按左右方向键逐个时间点查看各账号的调用次数" in svg
     assert svg.count('class="chart-endlabels"') == 0         # 有头像就不另标末值的那一组
 
@@ -258,8 +268,8 @@ def test_标题下面只写时间_旁边是今日预估(admin, fake_costs, real_
     sub = scrape(re.search(r'<p class="viz-sub">(.*?)</p>', box, re.S).group(1))
     assert re.fullmatch(r"\d\d-\d\d \d\d:00 ~ \d\d-\d\d \d\d:00", sub)       # 那句说明拿掉了
     assert "$20.00 今日预估" in scrape(box) and "有的没算上" not in box
-    legend_text = scrape(re.search(r'<div class="calls-legend">(.*?)</div>', box, re.S).group(1))
-    assert "acct-one@example.com 1.8K 次 · 今日 $12.50" in legend_text
+    tips = re.findall(r'<button class="legend-toggle"[^>]*title="([^"]+)"', box)
+    assert "acct-one@example.com · 近 24 小时 1,824 次 · 今日 $12.50" in tips
     assert asked == [sorted([ALPHA_NO, BETA_NO])]
 
 

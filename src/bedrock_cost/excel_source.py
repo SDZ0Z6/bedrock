@@ -1274,6 +1274,8 @@ EVENT_TITLES = {
     "rampup": "开始上量", "resume": "恢复上量", "stop": "上量终止", "quota": "额度预警", "mail": "AWS 邮件",
     "risk": "标记风控", "unrisk": "取消风控", "restore": "恢复使用", "replace": "替换账号", "settle": "结算",
     "disable": "停用", "enable": "恢复启用", "note": "备注",
+    # 账号页时间线上的告警（来自告警流水，不写进台账，也改不了），只是和时间线对得上
+    "alert": "告警", "alert-mail": "AWS 邮件",
 }
 
 

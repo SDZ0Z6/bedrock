@@ -52,8 +52,9 @@
 
 {# 横向时间线：客户页、账号页共用，画法在 static/timeline.js（页面要先引它）。
    payload 是交给脚本的数据（customers.timeline_payload 拼好的）；fallback 是没开 JS 时的清单 [(日期, 标题, 一句话)]；
-   people 是「按账号筛选」下拉里的账号（客户页才有）；hint 是图例最后那句（点卡片能做什么）。标题右边的按钮从 caller() 来 #}
-{% macro timeline_box(payload, categories, sub, fallback, hint, people=()) -%}
+   people 是「按账号筛选」下拉里的账号（客户页才有，customers.account_face），右边写着它的生命周期，颜色是 colors；
+   hint 是图例最后那句（点卡片能做什么）。标题右边的按钮从 caller() 来 #}
+{% macro timeline_box(payload, categories, sub, fallback, hint, people=(), colors={}) -%}
 <section class="viz-card tl-box" aria-labelledby="tl-title" data-reveal data-timeline>
   <div class="viz-head">
     <div>
@@ -89,7 +90,7 @@
             <span class="acct-picker-sub" data-tl-acct-sub></span>
           </button>
           <div class="acct-picker-pop" hidden>
-            <input class="acct-picker-search" type="search" placeholder="搜邮箱或 ID" autocomplete="off"
+            <input class="acct-picker-search" type="search" placeholder="搜邮箱、ID 或生命周期" autocomplete="off"
                    role="combobox" aria-expanded="true" aria-controls="tl-acct-list" aria-autocomplete="list"
                    aria-label="搜账号">
             <ul class="acct-picker-list" id="tl-acct-list" role="listbox" aria-label="账号">
@@ -99,12 +100,16 @@
                   <span class="acct-opt-sub">{{ people | length }} 个账号的事都显示</span></span>
                 <svg class="acct-opt-check" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7"/></svg>
               </li>
+              {# 和页头切换账号的下拉一个样子：右边是生命周期（风控、结算、正常……），搜索也认 #}
               {% for who in people %}
                 <li class="acct-opt" role="option" id="tl-acct-opt-{{ loop.index }}" data-group="on" data-value="{{ who.number }}"
-                    data-search="{{ who.label }} {{ who.number }}" aria-selected="false">
+                    data-search="{{ who.label }} {{ who.number }} {{ (who.tags or []) | join(' ') }}" aria-selected="false">
                   <span class="mini-av {{ who.av.css }}" aria-hidden="true">{{ who.av.text }}</span>
                   <span class="acct-opt-text"><span class="acct-opt-name">{{ who.label }}</span>
                     {%- if who.label != who.number %}<span class="acct-opt-sub">{{ who.number }}</span>{% endif %}</span>
+                  <span class="acct-opt-side">
+                    {%- for name in who.tags or [] %}<span class="pill pill-sm"><i class="tag-dot" style="--tag: {{ colors.get(name, '#87867f') }}"></i>{{ name }}</span>{% endfor -%}
+                  </span>
                   <svg class="acct-opt-check" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7"/></svg>
                 </li>
               {% endfor %}
@@ -140,7 +145,7 @@
   </div>
   <script id="tl-data" type="application/json" data-tl-data>{{ payload | tojson }}</script>
   {# 卡片上的图标：服务端画好，脚本按名字克隆 #}
-  {% for name in ['user', 'assign', 'back', 'budget', 'trend', 'play', 'pause', 'gauge', 'mail', 'flag', 'swap', 'check', 'power', 'note'] %}
+  {% for name in ['user', 'assign', 'back', 'budget', 'trend', 'play', 'pause', 'gauge', 'mail', 'send', 'flag', 'swap', 'check', 'power', 'note'] %}
     <template data-icon="{{ name }}">{{ cicon(name, '') }}</template>
   {% endfor %}
 </section>

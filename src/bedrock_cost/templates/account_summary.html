@@ -1,7 +1,8 @@
-{# 账号页的「摘要」页签：这个账号一眼看全——额度、每日消费（右上角选看多久，竖虚线是启用、分给客户、风控这些事）、告警、近 24 小时调用、
+{# 账号页的「摘要」页签：这个账号一眼看全——额度、每日消费（右上角选看多久，竖虚线是启用、分给客户、风控这些事）、告警（开关和告警流）、近 24 小时调用、
    配额最高的几个模型、台账里的资料。要细看就点各卡片右上角去对应的页签。 #}
 {% extends "account_base.html" %}
 {% from "_macros.html" import spend_switch %}
+{% from "_customer_macros.html" import cicon %}
 {% block loading_label %}正在读这个账号{% endblock %}
 
 {% block tab_content %}
@@ -85,6 +86,26 @@
         </div>
       {% endif %}
     </dl>
+    {# 告警流：这个账号发出去的 TG 告警和收到的 AWS 邮件，和客户页的告警流一个样子；先看最近 4 条 #}
+    <h3 class="feed-title">告警流{% if feed %}<small>{{ feed | length }} 条</small>{% endif %}</h3>
+    {% if feed %}
+      <ul class="feed" id="feed">
+        {% for item in feed[:40] %}
+          <li class="t-{{ item.tone }}" {% if loop.index > 4 %}hidden data-more{% endif %}>
+            <span class="feed-ico">{{ cicon('mail' if item.via == 'mail' else 'send', '') }}</span>
+            <div>
+              <div class="feed-head"><b>{{ item.title }}</b><small>{{ item.when.astimezone().strftime('%m-%d %H:%M') }} · {{ '邮件' if item.via == 'mail' else 'TG' }}</small></div>
+              {% if item.text %}<p class="feed-text">{{ item.text }}</p>{% endif %}
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+      {% if feed | length > 4 %}
+        <button class="btn btn-sm feed-more" type="button" data-feed-more data-more-label="更早的 {{ [feed | length, 40] | min - 4 }} 条">更早的 {{ [feed | length, 40] | min - 4 }} 条</button>
+      {% endif %}
+    {% else %}
+      <p class="viz-empty">还没有发过告警。开了 TG 告警或者邮件告警以后，发出去的都在这里。</p>
+    {% endif %}
   </article>
 </section>
 

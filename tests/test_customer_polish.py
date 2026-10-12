@@ -68,17 +68,28 @@ def test_余额卡片里不算的那几行_小头像的字母居中():
 
 
 # ====================================================================== 4. 时间线按账号筛
-def test_时间线按账号筛_能搜邮箱或ID(admin, fake_costs):
+def test_时间线按账号筛_能搜邮箱或ID_右边是生命周期(admin, fake_costs):
+    """和页头切换账号的下拉一个样子：每个账号右边是它的生命周期（风控、正常……），搜索也认。"""
+    from bedrock_cost import excel_source
+
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
+    post(admin, "/customers/C001/risk", key=BETA, action="mark")
     html = detail(admin)
     box = re.search(r'<div class="tl-acct-filter" data-tl-acct>(.*?)</ul>', html, re.S).group(1)
-    assert 'placeholder="搜邮箱或 ID"' in box and "data-picker" in box
+    assert 'placeholder="搜邮箱、ID 或生命周期"' in box and "data-picker" in box
     options = re.findall(r'<li class="acct-opt"[^>]*data-value="([^"]*)"[^>]*data-search="([^"]*)"', box)
     assert options[0] == ("", "全部账号")
     found = dict(options[1:])
     assert set(found) == {ALPHA_NO, BETA_NO}
-    assert found[ALPHA_NO] == f"acct-one@example.com {ALPHA_NO}"
+    lifecycle = {a.account: list(a.lifecycle) for a in excel_source.load_accounts(include_disabled=True, force=True)}
+    assert "风控" in lifecycle[BETA_NO]
+    for number, email in ((ALPHA_NO, "acct-one@example.com"), (BETA_NO, "acct-two@example.com")):
+        assert found[number] == " ".join([email, number, *lifecycle[number]])
+    colors = excel_source.lifecycle_colors()
+    sides = re.findall(r'data-value="(\d+)".*?<span class="acct-opt-side">(.*?)</span>\s*<svg', box, re.S)
+    pills = {number: re.findall(r'<i class="tag-dot" style="--tag: ([^"]+)"></i>([^<]+)</span>', side) for number, side in sides}
+    assert pills[BETA_NO] == [(colors.get(name, "#87867f"), name) for name in lifecycle[BETA_NO]]
     assert 'data-tl-filter="acct"' not in html           # 不再是一排签
 
 

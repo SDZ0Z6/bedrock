@@ -1950,6 +1950,12 @@ dialog.modal > form { display: flex; flex-direction: column; max-height: calc(10
   .chart-bars [data-s] { transition: opacity .2s ease .38s; }
   .bar-chart[data-focus] .chart-bars [data-s] { transition: opacity .18s ease; }
 }
+/* 折线图的图例挑了几项（客户页「调用次数」）：别的线、面积、点、线尾头像淡出（!important：面积和点的进场动画
+   停在 opacity 1，普通的规则压不过它）；挑中的按新的纵轴拉高——app.js 给线和面积加 transform，线宽照旧
+   （non-scaling-stroke），点、头像挪到新的高度 */
+.line-chart .chart-line { vector-effect: non-scaling-stroke; }
+.line-chart .chart-area, .line-chart .chart-line, .line-chart .chart-marker, .line-chart .chart-endavatar { transition: opacity .18s ease; }
+.line-chart[data-focus] [data-s]:not(.is-focus) { opacity: 0 !important; pointer-events: none; }
 /* 竖虚线（客户页「每日消费」上的启用、风控……）：图例挑了几项时只留它们的线，别人的藏起来；线头悬浮看详情（app.js 的 data-tip） */
 .chart-marks [data-s] { transition: opacity .18s ease; }
 .bar-chart[data-focus] .chart-marks [data-s]:not(.is-focus) { opacity: 0; pointer-events: none; }
@@ -1986,11 +1992,11 @@ svg.is-zoomed.is-panning { cursor: grabbing; }
   @keyframes bubble-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
   @keyframes bubble-pop { from { transform: scale(0); opacity: 0; } }
   /* 折线从左往右画出来，填充随后淡入。切区域页签时重新播一遍（JS 换 class） */
-  .line-chart .chart-line { stroke-dasharray: 1; stroke-dashoffset: 1; animation: line-draw 1.1s cubic-bezier(.4, 0, .2, 1) forwards; }
+  .line-chart .chart-line { animation: line-draw 1.1s cubic-bezier(.4, 0, .2, 1) backwards; }
   .line-chart .chart-area,
   .line-chart .chart-marker,
   .line-chart .chart-endlabels { opacity: 0; animation: fade-in .5s ease .55s forwards; }
-  @keyframes line-draw { to { stroke-dashoffset: 0; } }
+  @keyframes line-draw { from { stroke-dasharray: 1; stroke-dashoffset: 1; } to { stroke-dasharray: 1; stroke-dashoffset: 0; } }
   @keyframes fade-in { to { opacity: 1; } }
   /* 额度仪表：进度弧从起点画出来，端点的圆点同步沿弧转过去，中间的数字从 0 数上来（app.js）。
      三者同一条缓动（easeOutCubic）、同样长，所以点始终压在弧的头上 */
@@ -2592,10 +2598,10 @@ a.event-who:hover { color: var(--accent-dim); }
 .stage-row.is-zero .stage-line, .stage-row.is-zero .stage-line b { color: var(--text-mute); }
 .stage-bar { height: 8px; margin-top: 7px; border-radius: 999px; background: var(--panel-3); overflow: hidden; }
 .stage-bar > i { display: block; height: 100%; border-radius: inherit; }
-/* 「近 24 小时调用」：线尾的头像放大时藏起来（标的是全貌里的末值）；图下面是头像对邮箱 */
+/* 客户页「调用次数」：线尾的头像放大时藏起来（标的是全貌里的末值） */
 .line-chart.is-zoomed .chart-endavatars { display: none; }
-/* 手机上整张图缩到三分之一，线尾的头像只剩几个像素：给个最小宽度，左右滑着看（app.js 一打开先停在最右边）。
-   整行宽的柱状图（客户页「每日消费」、概览「近 30 天成本」，.wide-chart）一样 */
+/* 手机上整张图缩到三分之一，线尾的头像、柱子只剩几个像素：给个最小宽度，左右滑着看（app.js 一打开先停在最右边）。
+   客户页「调用次数」（.calls-chart）、整行宽的柱状图（客户页、概览的「每日消费」，.wide-chart） */
 @media (max-width: 760px) {
   .calls-chart .chart-svg, .wide-chart .chart-svg { min-width: 680px; }
   .wide-chart { overflow-x: auto; }
@@ -2606,10 +2612,7 @@ a.event-who:hover { color: var(--accent-dim); }
 @media (max-width: 760px) { .viz-head { flex-wrap: wrap; } }
 .seg-sm .seg-item { height: 26px; padding: 0 10px; font-size: 12.5px; }
 .calls-kpis { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 40px; }
-.calls-legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 10px; }
 .calls-who { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-dim); }
-.calls-who b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
-.calls-legend .mini-av { width: 20px; height: 20px; font-size: 10px; }
 .calls-silent { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 10px 0 0; font-size: 12.5px; color: var(--text-mute); }
 .calls-silent .mini-av { width: 16px; height: 16px; font-size: 8.5px; }
 @media (max-width: 1200px) {
@@ -2789,6 +2792,9 @@ a.event-who:hover { color: var(--accent-dim); }
 .feed-acct .mini-av { width: 16px; height: 16px; font-size: 9px; }
 .feed-acct span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .feed-more { align-self: flex-start; }
+/* 账号页摘要：「告警」卡片里开关下面的告警流（和上面隔一道线；上下的间距是卡片的 gap） */
+.feed-title { margin: 0; padding-top: 14px; border-top: 1px solid var(--line-soft); font-size: 13.5px; font-weight: 600; }
+.feed-title small { margin-left: 6px; font-size: 12px; font-weight: 400; color: var(--text-mute); }
 
 /* ---- 详情：月度对账单 */
 .stmt td, .stmt th { white-space: nowrap; }

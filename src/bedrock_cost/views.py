@@ -53,10 +53,16 @@ def flash_result(title: str, who: str = "", text: str = "", tone: str = "ok") ->
     flash({"title": title, "sub": who, "text": text}, tone)
 
 
+def range_links(endpoint: str, name: str, ranges, current: str, default: str, **params) -> list[tuple[str, str, bool]]:
+    """卡片右上角「看多久」那一排：(名字, 网址, 是不是选中的)。网址上是 ?name=key，默认那一项不带。
+    params 里值是 None 的不带：同一页上另一排选了什么，切这一排时照样带着（客户页的「每日消费」和「调用次数」）。"""
+    return [(label, url_for(endpoint, **params, **({} if key == default else {name: key})), key == current)
+            for key, label in ranges]
+
+
 def spend_links(endpoint: str, current: str, **params) -> list[tuple[str, str, bool]]:
-    """「每日消费」右上角那一排（dashboard.SPEND_RANGES）：(名字, 网址, 是不是选中的)。近 30 天是默认，网址上不带。"""
-    return [(label, url_for(endpoint, **params, **({} if key == "30" else {"spend": key})), key == current)
-            for key, label in dashboard.SPEND_RANGES]
+    """「每日消费」右上角那一排（dashboard.SPEND_RANGES），近 30 天是默认。"""
+    return range_links(endpoint, "spend", dashboard.SPEND_RANGES, current, "30", **params)
 
 
 def tz_name() -> str:

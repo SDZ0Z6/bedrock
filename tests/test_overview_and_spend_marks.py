@@ -112,7 +112,7 @@ def test_余额卡片写着已使用多少_额度使用拿掉了(admin, fake_cos
     html = detail(admin)
     bento = html[html.index('<section class="detail-bento"'):html.index('id="tl-title"')]
     assert [scrape(t) for t in re.findall(r'<h2 class="viz-title">(.*?)</h2>', bento)] == [
-        "账号", "余额", "近 24 小时调用", "还能用几天", "每日消费"]
+        "账号", "余额", "调用次数", "还能用几天", "每日消费"]
     box = card(html, "余额")
     assert 'class="viz-card col-4"' in box and 'class="bal-bar bal-bar-total' in box
     budget, used, left = (int(n.replace(",", "")) for n in re.search(
@@ -343,7 +343,8 @@ def test_柱状图写着绘图区上下边_图例能挑几项_纵轴跟着重新
     # 纵轴：挑中的每天加起来最多的那天，照 chart.py 取整；段子从基线起叠，上面还有段的让出一道缝
     assert "const step = niceStep(most || 1, 3);" in js and "const scale = (base - plotTop) / (step * ticks);" in js
     assert "goal.set(seg, [n === mine.length - 1 ? high : Math.min(bottom, high + BAR_GAP), bottom]);" in js
-    assert "text.textContent = axisMoney(plan.step * tick, symbol);" in js
+    assert "text.textContent = label(plan.step * tick);" in js
+    assert "redrawAxis(grid, gridOriginal, plan, base, function (value) { return axisMoney(value, symbol); });" in js
     # 放大着也对：柱顶圆头那段交给放大的脚本重画
     assert "if (svg.zoomReshape) svg.zoomReshape(seg.el, d); else seg.el.setAttribute('d', d);" in js
     assert "svg.zoomReshape = function (el, d) {" in js

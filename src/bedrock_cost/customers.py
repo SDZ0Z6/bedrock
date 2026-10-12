@@ -457,8 +457,14 @@ EVENT_TYPES = {
     "disable": ("停用", "acct", "misc", "power"),
     "enable": ("恢复启用", "acct", "misc", "power"),
     "note": ("备注", "misc", "misc", "note"),
+    # 账号页的时间线才有：告警流水里这个账号发出去的 TG 告警、收到的 AWS 邮件（风控那几类是上面的 mail）。
+    # 颜色跟发出去的那张卡片（Item.tone，见 _ALERT_COLORS）
+    "alert": ("告警", "alert", "misc", "send"),
+    "alert-mail": ("AWS 邮件", "alert", "misc", "mail"),
 }
 CATEGORIES = [("acct", "账号"), ("use", "用量"), ("risk", "风控"), ("money", "结算、额度"), ("misc", "其他")]
+# 账号页的时间线多一个筛选：告警
+ALERT_CATEGORY = ("alert", "告警")
 # 「记一笔」能记的几类
 MANUAL_KINDS = NOTE_TYPES
 # 「记一笔」弹窗里的类型：上面几类只是记下来；「标记风控」和名下账号里的「标记风控」一样，生命周期换成风控、
@@ -471,7 +477,8 @@ LONG_RUNWAY_DAYS = 365
 # 同一天的几件事按这个顺序排；同一组里的（标记 / 取消风控、停用 / 恢复）按记下来的先后
 _TYPE_ORDER = {kind: position for position, group in enumerate((
     ("signup",), ("start",), ("assign",), ("budget",), ("rampup",), ("resume",), ("quota",), ("stop",), ("mail",),
-    ("risk", "unrisk", "restore"), ("replace",), ("settle",), ("disable", "enable"), ("unassign",), ("note",),
+    ("alert", "alert-mail"), ("risk", "unrisk", "restore"), ("replace",), ("settle",), ("disable", "enable"),
+    ("unassign",), ("note",),
 )) for kind in group}
 # 告警流水里算「AWS 风控邮件」的几类（mail_rules 的 abuse / compromised / suspended）
 RISK_MAIL_KINDS = ("mail-abuse", "mail-compromised", "mail-suspended")
@@ -580,14 +587,15 @@ def item_payload(item: Item) -> dict:
 
 
 def account_face(number: str, by_number: dict[str, Account]) -> dict | None:
-    """时间线卡片上的一个账号：号码、邮箱（没填就是号码）、小头像。台账里已经没有的号码也画得出来。"""
+    """时间线卡片上的一个账号：号码、邮箱（没填就是号码）、小头像、生命周期（「按账号筛选」下拉里写在右边）。
+    台账里已经没有的号码也画得出来。"""
     if not number:
         return None
     account = by_number.get(number)
     if account is None:
-        return {"number": number, "label": number, "av": {"text": number[:1], "css": "av-7"}}
+        return {"number": number, "label": number, "av": {"text": number[:1], "css": "av-7"}, "tags": []}
     return {"number": number, "label": account.email or number,
-            "av": {"text": account.avatar.text, "css": account.avatar.css}}
+            "av": {"text": account.avatar.text, "css": account.avatar.css}, "tags": list(account.lifecycle)}
 
 
 def auto_items(holding: Holding, today: date, mails: list | None = None) -> list[Item]:
@@ -1044,10 +1052,7 @@ def build_views(customers: list[Customer], accounts: list[Account], events: list
                 continue
             if event.kind in RISK_MAIL_KINDS:
                 mails.setdefault(event.account, []).append(event)
-            feed.setdefault(owner[event.account], []).append(FeedItem(
-                when=event.when, kind=event.kind, title=event.title, text=event.text, tone=event.tone,
-                account=event.account, email=event.email or email_of.get(event.account, ""),
-            ))
+            feed.setdefault(owner[event.account], []).append(_feed_item(event, email_of.get(event.account, "")))
 
     views: dict[str, CustomerView] = {}
     for customer in customers:
@@ -1089,19 +1094,77 @@ def _owners(number: str, events: list[CustomerEvent]) -> list[tuple[date, int, s
     return sorted(changes)
 
 
-def risk_mails(number: str) -> list:
-    """告警流水里这个账号的 AWS 风控邮件（滥用、盗用、暂停）。"""
+def _feed_item(event, email: str = "") -> FeedItem:
+    return FeedItem(when=event.when, kind=event.kind, title=event.title, text=event.text, tone=event.tone,
+                    account=event.account, email=event.email or email)
+
+
+def account_alerts(number: str) -> list:
+    """告警流水里这个账号的每一条：发出去的 TG 告警和收到的 AWS 邮件，新的在前。日报不是哪一个账号的，不算。"""
     return [event for event in alert_events.recent(limit=alert_events.KEEP_LINES)
-            if event.account == number and event.kind in RISK_MAIL_KINDS]
+            if event.account == number and event.kind != "daily"]
+
+
+def account_feed(alerts: list, email: str = "") -> list[FeedItem]:
+    """账号页摘要的「告警流」：account_alerts 拿到的那些，和客户页的告警流一个样子。"""
+    return [_feed_item(event, email) for event in alerts]
+
+
+# 时间线上告警的颜色跟发出去的那张卡片：报错红、预警黄、好消息绿、其余灰
+_ALERT_COLORS = {"error": "risk", "warn": "warn", "ok": "up", "info": "misc"}
+# 「用量开始 / 中断」：MAP 的流量一阵一阵的，一天能来回好几次，同一天的并成一张卡
+_USAGE_ALERTS = {"stopped": "中断", "started": "开始"}
+
+
+def _clip(text: str, limit: int = 80) -> str:
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def alert_items(number: str, alerts: list) -> list[Item]:
+    """告警流水里这个账号的告警（account_alerts 拿到的）放进账号页的时间线，按发出去那天（本机日期），一条一张卡，
+    卡上写几点几分。AWS 风控邮件（滥用、盗用、暂停）已经是风控那一类的「AWS 邮件」，这里不重复；
+    「用量开始 / 中断」同一天不止一条的并成一张，写开始、中断各几次，最后一次是什么。"""
+    items: list[Item] = []
+    usage: dict[date, list] = {}
+    for event in alerts:
+        if event.kind in RISK_MAIL_KINDS or event.kind == "daily":
+            continue
+        local = event.when.astimezone()
+        if event.kind in _USAGE_ALERTS:
+            usage.setdefault(local.date(), []).append(event)
+            continue
+        kind = "alert-mail" if event.kind.startswith("mail-") else "alert"
+        items.append(Item(
+            ident=f"auto:alert:{number}:{local:%Y-%m-%dT%H%M%S}:{event.kind}", date=local.date(), kind=kind,
+            title=event.title or EVENT_TYPES[kind][0], text=f"{local:%H:%M}" + (f" · {_clip(event.text)}" if event.text else ""),
+            account=number, source="auto", tone=_ALERT_COLORS.get(event.tone, "misc"),
+            order=int(event.when.timestamp()),          # 同一天的几条按几点几分排
+        ))
+    for day, group in usage.items():
+        group.sort(key=lambda event: event.when)
+        last = group[-1]
+        at = last.when.astimezone()
+        if len(group) == 1:
+            title, text = last.title, f"{at:%H:%M}" + (f" · {_clip(last.text)}" if last.text else "")
+        else:
+            kinds = [kind for kind in _USAGE_ALERTS if any(event.kind == kind for event in group)]
+            title = "用量" + "、".join(_USAGE_ALERTS[kind] for kind in kinds)
+            counts = "、".join(f"{_USAGE_ALERTS[kind]} {sum(event.kind == kind for event in group)} 次" for kind in kinds)
+            text = f"{counts} · 最后一次 {at:%H:%M} {_USAGE_ALERTS[last.kind]}"
+        items.append(Item(ident=f"auto:alert:{number}:{day.isoformat()}:usage", date=day, kind="alert", title=title,
+                          text=text, account=number, source="auto", tone=_ALERT_COLORS.get(last.tone, "misc"),
+                          order=int(group[0].when.timestamp())))
+    return items
 
 
 def account_timeline(account: Account, events: list[CustomerEvent], series: Series, today: date,
-                     mails: list | None = None) -> list[Item]:
+                     mails: list | None = None, alerts: list | None = None) -> list[Item]:
     """一个账号自己的时间线：从启用到今天，中间换过几个客户、解绑过都在——解绑以后也追得回来。
 
     手动记的按 ACCOUNT 认（替换上来的按 PEER），不管记在哪个客户名下，还是在库存时记的（CUSTOMER 空着）；
     按数据算的（上量、终止、额度预警、AWS 邮件）和客户页一个算法，只是从启用日期算起。客户页上对自动事件的
-    改动（改日期、删掉）这里照样认。每件事的 customer 是那时候它归哪个客户。
+    改动（改日期、删掉）这里照样认。alerts 给了（account_alerts）就把告警也放进来（见 alert_items）。
+    每件事的 customer 是那时候它归哪个客户。
     """
     number = account.account
     manual = [event for event in events if event.source == "manual" and not event.deleted]
@@ -1134,7 +1197,7 @@ def account_timeline(account: Account, events: list[CustomerEvent], series: Seri
         if event.account == number or event.peer == number:
             items.append(_manual_item(event, {number: account.partner}))
     overrides = {event.key: event for event in events if event.source == "auto" and event.key}
-    for item in auto_items(holding, today, mails):
+    for item in auto_items(holding, today, mails) + alert_items(number, alerts or []):
         override = overrides.get(item.ident[len("auto:"):])
         if override is not None:
             if override.deleted:
