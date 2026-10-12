@@ -24,14 +24,16 @@ JetBrains Mono 管 UID。不用系统字体，本地和服务器画出来一模�
 from __future__ import annotations
 
 import io
+import math
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
-from . import config
+from . import avatars, config
+from .chart import _nice_step, short_money
 from .telegram import visible
 
 FONT_DIR = Path(__file__).with_name("fonts")
@@ -58,10 +60,18 @@ TEXT_2 = (190, 190, 190)   # 标签、说明
 TEXT_3 = (135, 135, 135)   # 署名、占位
 LINE = (46, 46, 46)
 PANEL = (26, 26, 26)       # 数字格、说明框的底色
-CHIP = (32, 32, 32)        # UID 小块
-CHIP_ON_PANEL = (14, 14, 14)  # 面板里的 UID 小块要比面板暗，放在黑底上的才比黑底亮
+CHIP = (32, 32, 32)        # 小标签（「运行中」「已停用」）没有颜色时的底色
 TRACK = (42, 42, 42)       # 进度条的底槽
 QUOTE_TEXT = (214, 214, 214)  # 引用的邮件原文：比正文暗一点，看得出是贴过来的
+BASELINE = (74, 74, 74)    # 折线图的零线：比网格线亮一档
+
+# 账号头像的底色和字色：和 style.css 的 .av-0 … .av-7 一样，同一个账号在网页上、卡片上是一个颜色
+AVATAR_COLORS = [
+    ((243, 217, 203), (138, 63, 34)), ((214, 228, 242), (43, 90, 138)),
+    ((211, 230, 223), (47, 107, 87)), ((224, 221, 241), (79, 74, 140)),
+    ((239, 227, 200), (122, 90, 18)), ((242, 214, 220), (140, 51, 70)),
+    ((223, 232, 208), (77, 107, 42)), ((230, 228, 220), (77, 76, 72)),
+]
 
 
 @dataclass(frozen=True)
@@ -92,30 +102,32 @@ def _color(tone: str) -> tuple[int, int, int]:
 # ---------------------------------------------------------------- 卡片上有什么
 @dataclass
 class Uid:
-    """「账号 UID」标签 + 等宽字的账号小块；填了账号邮箱就跟在小块右边。"""
+    """「账号」标签 + 账号头像，主行账号邮箱、副行账号 ID（等宽字）——和日报表格里一个写法。号码一眼认不出
+    是谁，邮箱能；没填邮箱的主行就是 ID。有没有邮箱一样高；邮箱太长就截断补省略号，不画出这一块的宽度。"""
 
     uid: str
-    label: str = "账号 UID"
-    chip: tuple[int, int, int] = CHIP
+    label: str = "账号"
     email: str = ""
+    face: Face | None = None    # 没给就按邮箱、号码算（和网页上默认的头像一样）
+
+    HEIGHT = 62
+    R = 18           # 头像半径
 
     def strings(self) -> list[str]:
-        return [self.label, self.uid, self.email] if self.email else [self.label, self.uid]
+        return [self.label, self.email, self.uid] if self.email else [self.label, self.uid]
 
     def layout(self, pen: _Pen, x: float, y: float, w: float, tone: Tone) -> float:
         pen.text(x, y + 9, self.label, _font(13), TEXT_2)
-        font = _font(16, 700, mono=True)
-        top = y + 26
-        width = _width(self.uid, font) + 18
-        pen.box((x, top, x + width, top + 30), 7, fill=self.chip)
-        pen.text(x + 9, top + 15, self.uid, font, WHITE)
+        middle = y + 26 + self.R
+        _draw_face(pen, self.face or account_face(None, self.email, self.uid), x + self.R, middle, self.R)
+        left = x + self.R * 2 + 12
         if self.email:
-            # 号码一眼认不出是谁，邮箱和它写在同一行，块的高度不变。太长就截断补省略号，
-            # 不能画出这一块的宽度
-            left = x + width + 12
-            small = _font(15)
-            pen.text(left, top + 15, _fit(self.email, small, x + w - left), small, TEXT_2)
-        return 56
+            main = _font(16, 600)
+            pen.text(left, middle - 9, _fit(self.email, main, x + w - left), main, WHITE)
+            pen.text(left, middle + 11, self.uid, _font(12.5, mono=True), TEXT_2)
+        else:
+            pen.text(left, middle, self.uid, _font(16, 700, mono=True), WHITE)
+        return self.HEIGHT
 
 
 @dataclass
@@ -192,26 +204,56 @@ class Meter:
         return 52 + 12 + 10 + 18
 
 
+@dataclass(frozen=True)
+class Face:
+    """账号头像：圆圈里一个字（邮箱首字母之类），底色、字色见 AVATAR_COLORS。"""
+
+    text: str
+    bg: tuple[int, int, int]
+    fg: tuple[int, int, int]
+
+
+def face(text: str, tone: int) -> Face:
+    """按 avatars.Avatar 的 text、tone 配好颜色。"""
+    bg, fg = AVATAR_COLORS[tone % len(AVATAR_COLORS)]
+    return Face(text, bg, fg)
+
+
+def account_face(avatar: avatars.Avatar | None, email: str, number: str) -> Face:
+    """一个账号在卡片上的头像，字和颜色和网页上一样（avatar 是 Account.avatar；没给就按邮箱、号码算）。
+    卡片画不了彩色表情：台账里选了表情的，写邮箱（没有就号码）的首字母。"""
+    avatar = avatar or avatars.avatar_for(email, number)
+    text = avatar.text
+    if avatar.emoji:
+        text = next((char.upper() for char in (email or number) if char.isalnum()), "?")
+    return face(text, avatar.tone)
+
+
 @dataclass
 class Cell:
     text: str
     tone: str = ""    # 字的颜色，见 _color
-    mark: str = ""    # 只用在 UID 列：后面加一个彩色小圆点，表示这一行在下面有说明
-    # 值下面再补一行灰色小字（「截至 09-28」）；这一行会跟着变高。UID 列里写的是账号邮箱
+    mark: str = ""    # 只用在账号列：后面加一个彩色小圆点，表示这一行在下面有说明
+    # 值下面再补一行灰色小字（「截至 09-28」「↑ $1,298」）；这一行会跟着变高。账号列里写的是账号 ID
     note: str = ""
+    face: Face | None = None   # 只用在账号列：最前面的头像
 
 
 @dataclass
 class Table:
-    """日报的表格。第一列是 UID，画成等宽字的小块（填了邮箱就写在小块下面）；其余列右对齐。"""
+    """日报的表格。第一列是账号：头像，主行账号邮箱，副行账号 ID（等宽字）；没填邮箱的主行就是 ID。
+    其余列右对齐，按列里最宽的字定宽，剩下的都给第一列——邮箱长的放不下就截断补省略号。"""
 
     columns: list[str]
     rows: list[list[Cell]]
 
-    UID_COLUMN = 150
     HEAD = 34
     ROW = 46
     NOTED_ROW = 60   # 有一格带小字时的行高
+    GAP = 14         # 列与列之间
+    FACE = 26        # 头像直径
+    FACE_GAP = 10    # 头像和邮箱之间
+    CELL = 14.5      # 数字的字号：比别的卡片小半号，给第一列的邮箱多留点地方
 
     def strings(self) -> list[str]:
         return [*self.columns, *(s for row in self.rows for cell in row for s in (cell.text, cell.note) if s)]
@@ -219,48 +261,148 @@ class Table:
     def _height(self, row: list[Cell]) -> float:
         return self.NOTED_ROW if any(cell.note for cell in row) else self.ROW
 
-    def _email_room(self, row: list[Cell], step: float, cell_font, note_font) -> float:
-        """UID 下面那行邮箱能写多宽：UID 这一列总归是它的，还可以伸进第一列左边的空白，
-        但要和那一列的字留出间距——那一列是右对齐的，空白有多大看字有多长。"""
-        if len(row) < 2:
-            return self.UID_COLUMN - 10
-        cell = row[1]
-        used = max(_width(cell.text, cell_font), _width(cell.note, note_font) if cell.note else 0)
-        return max(self.UID_COLUMN - 10, self.UID_COLUMN + step - used - 14)
+    def edges(self, w: float) -> tuple[float, list[float]]:
+        """(第一列能用多宽, 其余每一列字的右边)，都从左边 0 算起。"""
+        head, cell_font, note_font = _font(14, 700), _font(self.CELL), _font(11.5)
+        rights, right = [], w
+        for index in range(len(self.columns) - 1, 0, -1):
+            widest = max([_width(self.columns[index], head)] + [
+                max(_width(row[index].text, cell_font), _width(row[index].note, note_font)) for row in self.rows
+            ])
+            rights.insert(0, right)
+            right -= widest + self.GAP
+        return right, rights
 
     def layout(self, pen: _Pen, x: float, y: float, w: float, tone: Tone) -> float:
-        step = (w - self.UID_COLUMN) / (len(self.columns) - 1)
+        first, rights = self.edges(w)
         head = _font(14, 700)
         pen.text(x, y + self.HEAD / 2, self.columns[0], head, WHITE)
-        for index, name in enumerate(self.columns[1:], start=1):
-            pen.text(x + self.UID_COLUMN + step * index, y + self.HEAD / 2, name, head, WHITE, anchor="rm")
+        for name, right in zip(self.columns[1:], rights):
+            pen.text(x + right, y + self.HEAD / 2, name, head, WHITE, anchor="rm")
 
-        uid_font, cell_font, note_font = _font(14, 700, mono=True), _font(15), _font(11.5)
+        cell_font, note_font = _font(self.CELL), _font(11.5)
         top = y + self.HEAD
         for row in self.rows:
             height = self._height(row)
             pen.line(x, top, x + w, top, LINE)
             middle = top + height / 2
-            uid = row[0]
-            # 带邮箱的 UID 和带小字的格子一个排法：小块往上挪，邮箱写在下面
-            center = middle - 8 if uid.note else middle
-            chip = _width(uid.text, uid_font) + 14
-            pen.box((x, center - 13, x + chip, center + 13), 6, fill=CHIP)
-            pen.text(x + 7, center, uid.text, uid_font, WHITE)
-            if uid.mark:
-                pen.ellipse((x + chip + 8, center - 4, x + chip + 16, center + 4), fill=_color(uid.mark))
-            if uid.note:
-                room = self._email_room(row, step, cell_font, note_font)
-                pen.text(x, middle + 14, _fit(uid.note, note_font, room), note_font, TEXT_2)
-            for index, cell in enumerate(row[1:], start=1):
-                right = x + self.UID_COLUMN + step * index
+            self._account(pen, row[0], x, middle, first)
+            for cell, right in zip(row[1:], rights):
                 # 带小字的格子：值往上挪，小字放在值下面
                 value_y = middle - 8 if cell.note else middle
-                pen.text(right, value_y, cell.text, cell_font, _color(cell.tone), anchor="rm")
+                pen.text(x + right, value_y, cell.text, cell_font, _color(cell.tone), anchor="rm")
                 if cell.note:
-                    pen.text(right, middle + 12, cell.note, note_font, TEXT_2, anchor="rm")
+                    pen.text(x + right, middle + 12, cell.note, note_font, TEXT_2, anchor="rm")
             top += height
         return self.HEAD + sum(self._height(row) for row in self.rows)
+
+    def _account(self, pen: _Pen, cell: Cell, x: float, middle: float, room: float) -> None:
+        left = x
+        if cell.face:
+            _draw_face(pen, cell.face, x + self.FACE / 2, middle, self.FACE / 2)
+            left += self.FACE + self.FACE_GAP
+        # 没填邮箱：主行就是账号 ID，等宽字
+        main = _font(13.5, 700, mono=True) if cell.text.isdigit() else _font(13.5, 600)
+        center = middle - 8 if cell.note else middle
+        text = _fit(cell.text, main, x + room - left - (16 if cell.mark else 0))
+        pen.text(left, center, text, main, WHITE)
+        if cell.mark:
+            dot = left + _width(text, main) + 8
+            pen.ellipse((dot, center - 4, dot + 8, center + 4), fill=_color(cell.mark))
+        if cell.note:
+            small = _font(11.5, mono=True)
+            pen.text(left, middle + 12, _fit(cell.note, small, x + room - left), small, TEXT_2)
+
+
+@dataclass
+class TrendLine:
+    name: str                       # 账号邮箱（没填就是 ID）；「其他」是并进去的那几个
+    values: list[float]             # 每天一个数，和 Trend.labels 一样长
+    color: tuple[int, int, int]
+    face: Face | None = None        # 线尾的头像；「其他」没有，画个灰点
+
+
+@dataclass
+class Trend:
+    """日报表格上面的折线图：一个账号一条线，每天一个点。线是平滑的、不冲过头（不会画出负数），线下一层往下
+    渐隐的填充；线尾是账号的头像（圈是线的颜色）和最后一天的数，挨在一起的上下错开、拉一根细线连回线尾。"""
+
+    title: str
+    labels: list[str]               # 横轴：每天一个（MM-DD）
+    lines: list[TrendLine]
+    hint: str = ""                  # 标题右边的灰色小字
+    notes: list[str] = field(default_factory=list)   # 图下面的灰色小字（没画线的账号）
+
+    PLOT_H = 150
+    AXIS_W = 46     # 左边纵轴的字
+    END_W = 84      # 右边线尾的头像和数
+    R = 9           # 线尾头像的半径
+    SPACING = 21    # 线尾头像之间至少隔多远
+
+    def strings(self) -> list[str]:
+        return [s for s in (self.title, self.hint, *self.labels, *(line.name for line in self.lines), *self.notes) if s]
+
+    def layout(self, pen: _Pen, x: float, y: float, w: float, tone: Tone) -> float:
+        pen.text(x, y + 9, self.title, _font(13, 700), TEXT_2)
+        if self.hint:
+            pen.text(x + w, y + 9, self.hint, _font(12), TEXT_3, anchor="rm")
+        top = y + 18 + 16
+        bottom = top + self.PLOT_H
+        left, right = x + self.AXIS_W, x + w - self.END_W
+        count = len(self.labels)
+        most = max([value for line in self.lines for value in line.values] + [0.0])
+        step = _nice_step(most or 1.0, 4)
+        ceiling = step * max(1, math.ceil((most or 1.0) / step - 1e-9))
+
+        def at_x(index: int) -> float:
+            return left + (right - left) * index / max(1, count - 1)
+
+        def at_y(value: float) -> float:
+            return bottom - (bottom - top) * max(0.0, value) / ceiling
+
+        small = _font(11)
+        tick = 0.0
+        while tick <= ceiling + 1e-9:
+            pen.line(left, at_y(tick), right, at_y(tick), BASELINE if not tick else LINE)
+            pen.text(left - 8, at_y(tick), short_money(tick, config.CURRENCY_SYMBOL), small, TEXT_3, anchor="rm")
+            tick += step
+        for index, label in enumerate(self.labels):
+            pen.text(at_x(index), bottom + 14, label, small, TEXT_3, anchor="mm")
+
+        drawn = []
+        for line in self.lines:
+            points = [(at_x(index), at_y(value)) for index, value in enumerate(line.values)]
+            curve = _smooth(points)
+            drawn.append((line, points, curve))
+            # 填充先画，压在所有线下面；从图顶往下淡出
+            pen.area([*curve, (curve[-1][0], bottom), (curve[0][0], bottom)], line.color, top, bottom)
+        for line, _, curve in drawn:
+            pen.lines(curve, line.color, width=2)
+        for line, points, _ in drawn:
+            for px, py in points:
+                pen.ellipse((px - 3.2, py - 3.2, px + 3.2, py + 3.2), fill=line.color, outline=BLACK, width=1.2)
+
+        # 线尾：从上到下排好，挤在一起的错开
+        ends = sorted(((points[-1][1], line) for line, points, _ in drawn), key=lambda pair: pair[0])
+        spots = _spread([end for end, _ in ends], top + self.R, bottom - self.R, self.SPACING)
+        cx = right + 10 + self.R
+        for (end, line), spot in zip(ends, spots):
+            if abs(spot - end) > 1:
+                pen.line(right + 4, end, cx - self.R, spot, _mix(line.color, BLACK, 0.45))
+            if line.face:
+                _draw_face(pen, line.face, cx, spot, self.R, ring=line.color)
+            else:
+                pen.ellipse((cx - 5, spot - 5, cx + 5, spot + 5), fill=line.color)
+            value = short_money(line.values[-1], config.CURRENCY_SYMBOL) if line.values else ""
+            pen.text(cx + self.R + 6, spot, value, _font(11.5, 700), WHITE)
+
+        height = bottom + 28 - y
+        note_font = _font(12)
+        for note in self.notes:
+            for text in _wrap(note, note_font, w):
+                pen.text(x, y + height + 9, text, note_font, TEXT_3)
+                height += 19
+        return height
 
 
 @dataclass
@@ -395,26 +537,27 @@ class Row:
 
 @dataclass
 class Details:
-    """一块深色面板：顶上可选一行灰色小标题、「账号 UID」+ 账号小块（+ 账号邮箱），
+    """一块深色面板：顶上可选一行灰色小标题、账号（头像、主行邮箱、副行 ID，见 Uid），
     下面一行行标签和值。"""
 
     rows: list[Row]
     uid: str = ""
     ruled: bool = False   # 行与行之间画分隔线（测试消息那种）
     title: str = ""       # 面板顶上的灰色小标题（「上一次有调用的那一小时」）
-    email: str = ""       # 账号邮箱，写在账号小块右边；没有 uid 时不画
+    email: str = ""       # 账号邮箱：主行邮箱、副行 ID（见 Uid）；没有 uid 时不画
+    face: Face | None = None   # 账号头像，跟着 uid
 
     TITLE_H = 30
 
     def strings(self) -> list[str]:
         title = [self.title] if self.title else []
-        head = Uid(self.uid, email=self.email).strings() if self.uid else []
+        head = Uid(self.uid, email=self.email, face=self.face).strings() if self.uid else []
         return [*title, *head, *(s for row in self.rows for s in (row.label, row.value))]
 
     def layout(self, pen: _Pen, x: float, y: float, w: float, tone: Tone) -> float:
         pad = 18
         row_h = 50 if self.ruled else 38
-        head = (56 + 16) if self.uid else 0
+        head = (Uid.HEIGHT + 16) if self.uid else 0
         title_h = self.TITLE_H if self.title else 0
         height = title_h + (14 if self.uid else 0) + head + row_h * len(self.rows) + (0 if self.ruled else 8)
         pen.box((x, y, x + w, y + height), 12, fill=PANEL)
@@ -424,8 +567,8 @@ class Details:
             top += title_h
         if self.uid:
             top += 14
-            Uid(self.uid, chip=CHIP_ON_PANEL, email=self.email).layout(pen, x + pad, top, w - pad * 2, tone)
-            top += 56 + 8
+            Uid(self.uid, email=self.email, face=self.face).layout(pen, x + pad, top, w - pad * 2, tone)
+            top += Uid.HEIGHT + 8
             pen.line(x + pad, top, x + w - pad, top, LINE)
             top += 8
         label, value = _font(15), _font(16, 700)
@@ -677,6 +820,20 @@ class _Pen:
         if self.draw is not None:
             self.draw.polygon([(_px(px), _px(py)) for px, py in points], fill=fill)
 
+    def area(self, points, fill, top, bottom, alpha=0.2):
+        """半透明的填充，从 top 往下淡到 bottom 全透明（折线图线下面那一层）。Pillow 的几何图形没有透明度：
+        画到一张蒙版上，乘一道从上到下的渐变，再按蒙版把颜色贴上来。"""
+        if self.image is None:
+            return
+        x0 = min(_px(px) for px, _ in points)
+        x1 = max(_px(px) for px, _ in points)
+        y0, y1 = _px(top), _px(bottom)
+        size = (max(1, x1 - x0 + 1), max(1, y1 - y0 + 1))
+        mask = Image.new("L", size, 0)
+        ImageDraw.Draw(mask).polygon([(_px(px) - x0, _px(py) - y0) for px, py in points], fill=255)
+        fade = Image.linear_gradient("L").rotate(180).resize(size).point(lambda v: round(v * alpha))
+        self.image.paste(fill, (x0, y0, x0 + size[0], y0 + size[1]), ImageChops.multiply(mask, fade))
+
     def layer(self, x, y, s, draw, angle=0.0):
         """在一层透明小画布上画（坐标是画布像素，边长 _px(s)），转 angle 度后贴上来。
 
@@ -718,6 +875,55 @@ def _fit(text: str, font: ImageFont.FreeTypeFont, width: float) -> str:
     while text and _width(text + "…", font) > width:
         text = text[:-1]
     return text.rstrip() + "…"
+
+
+def _draw_face(pen: _Pen, who: Face, cx: float, cy: float, r: float, ring=None) -> None:
+    """账号头像：圆圈 + 一个字；ring 给了就描一圈那个颜色（折线图线尾的头像，圈是线的颜色）。"""
+    pen.ellipse((cx - r, cy - r, cx + r, cy + r), fill=who.bg, outline=ring, width=1.6 if ring else 0)
+    pen.text(cx, cy, who.text, _font(r * 1.05, 700), who.fg, anchor="mm")
+
+
+def _mix(color, other, t: float) -> tuple[int, int, int]:
+    return tuple(round(a + (b - a) * t) for a, b in zip(color, other))
+
+
+def _smooth(points: list[tuple[float, float]], steps: int = 14) -> list[tuple[float, float]]:
+    """经过每个点的平滑曲线，切成一段段折线给 Pillow 画。单调三次样条（Fritsch–Carlson，和网页上的
+    chart._smooth_path 一样）：两点之间不会冲过头，挨着 0 的那段不会画成负数。"""
+    n = len(points)
+    if n < 3:
+        return list(points)
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    dx = [xs[i + 1] - xs[i] for i in range(n - 1)]
+    slope = [(ys[i + 1] - ys[i]) / dx[i] if dx[i] else 0.0 for i in range(n - 1)]
+    tangent = [slope[0]] + [0.0] * (n - 2) + [slope[-1]]
+    for i in range(1, n - 1):
+        if slope[i - 1] * slope[i] <= 0:
+            continue          # 拐点处切线放平，保证不冲过头
+        w1, w2 = 2 * dx[i] + dx[i - 1], dx[i] + 2 * dx[i - 1]
+        tangent[i] = (w1 + w2) / (w1 / slope[i - 1] + w2 / slope[i])
+    out = [points[0]]
+    for i in range(n - 1):
+        h = dx[i]
+        for step in range(1, steps + 1):
+            t = step / steps
+            h00, h10 = 2 * t**3 - 3 * t**2 + 1, t**3 - 2 * t**2 + t
+            h01, h11 = -2 * t**3 + 3 * t**2, t**3 - t**2
+            out.append((xs[i] + h * t, h00 * ys[i] + h10 * h * tangent[i] + h01 * ys[i + 1] + h11 * h * tangent[i + 1]))
+    return out
+
+
+def _spread(ys: list[float], top: float, bottom: float, gap: float) -> list[float]:
+    """线尾头像的纵坐标：ys 从上到下排好，挤在一起的往下错开 gap，挤出底了再从下往上推（和网页上的
+    chart.end_spots 一个排法）。"""
+    spots: list[float] = []
+    for y in ys:
+        spots.append(max(y, top) if not spots else max(y, spots[-1] + gap))
+    if spots and spots[-1] > bottom:
+        spots[-1] = bottom
+        for i in range(len(spots) - 2, -1, -1):
+            spots[i] = min(spots[i], spots[i + 1] - gap)
+    return spots
 
 
 # 能连在一起不断开的一串：英文单词、数字、金额、模型 ID 之类

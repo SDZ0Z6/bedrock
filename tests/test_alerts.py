@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from bedrock_cost import alerts, cards, config, cost_explorer, events, excel_source, telegram
+from bedrock_cost import alerts, cards, config, cost_explorer, events, excel_source, telegram, usage_explorer
 from bedrock_cost.alerts import AccountState, load_state, run_daily, run_hourly, save_state
 from bedrock_cost.cost_estimate import HourUsage, SplitEstimate
 from bedrock_cost.cost_explorer import CostSplit
@@ -328,6 +328,11 @@ class TestState:
 
 
 # ================================================================== 日报
+def table_of(card) -> cards.Table:
+    """日报卡片上的表格（有近 7 天的折线图时它排在图后面）。"""
+    return next(block for block in card.blocks if isinstance(block, cards.Table))
+
+
 class TestDaily:
     TODAY = date(2026, 8, 17)
 
@@ -363,10 +368,63 @@ class TestDaily:
         tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
         run_daily(self.TODAY, log=quiet)
         card = sent.cards[0][1]
-        table = card.blocks[0]
-        assert table.columns == ["UID", "授信额度", "累计消费", "剩余额度"]
+        table = table_of(card)
+        assert table.columns == ["账号", "额度", "累计消费", "剩余额度"]
         assert [cell.text for cell in table.rows[0]][:2] == [ALPHA, "$500,000.00"]
         assert card.kind == "daily" and card.badge == "DAILY REPORT"
+
+    def test_a_trend_of_the_last_seven_days_sits_above_the_table(self, ledger, fake_costs, sent):
+        """表格上面一张折线图：每个账号近 7 天每天的账（到昨天为止），花得多的在前。fake CE：每天 TAG 100、
+        UNTAG 50，折算后 ALPHA 152.50（UNTAG × 1.05）、BETA 155.00（× 1.10）。"""
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A), BETA: (True, CHAT_A)})
+        run_daily(self.TODAY, log=quiet)
+        card = sent.cards[0][1]
+        trend = card.blocks[0]
+        assert isinstance(trend, cards.Trend) and card.blocks[1] is table_of(card)
+        assert trend.labels == [(self.TODAY - timedelta(days=7 - i)).strftime("%m-%d") for i in range(7)]
+        assert [line.name for line in trend.lines] == [BETA, ALPHA]
+        assert trend.lines[0].values == [pytest.approx(155.0)] * 7 and trend.lines[1].values == [pytest.approx(152.5)] * 7
+
+    def test_yesterday_sits_under_the_spend(self, ledger, fake_costs, sent):
+        """累计消费下面一行：昨天的账让它涨了多少，一百块以上写到元；caption 里写到分。"""
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
+        run_daily(self.TODAY, log=quiet)
+        card = sent.cards[0][1]
+        _, _, spent, balance = table_of(card).rows[0]
+        assert (spent.note, balance.note) == (f"↑ ${152.5:,.0f}", "")
+        assert "· 昨天 $152.50" in card.caption
+
+    def test_without_the_trend_the_report_still_goes_out(self, ledger, fake_costs, sent, monkeypatch):
+        """近 7 天的账查不到：照样发，只是没有折线图、没有「↑」。"""
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A)})
+
+        def broken(account, start, end, granularity="daily", refresh=False):
+            raise RuntimeError("CE 不可用")
+
+        monkeypatch.setattr(usage_explorer, "account_series", broken)
+        summary = run_daily(self.TODAY, log=quiet)
+        card = sent.cards[0][1]
+        assert summary.ok and not any(isinstance(block, cards.Trend) for block in card.blocks)
+        assert table_of(card).rows[0][2].note == "" and "昨天" not in card.caption
+
+    def test_daily_spend_counts_from_the_start_date(self, monkeypatch):
+        """启用日期之前的天算 0（累计消费也是从启用日期算起）；查不到的是 None，原因写进日志。"""
+        from bedrock_cost.excel_source import Account
+
+        def fake(account, start, end, granularity="daily", refresh=False):
+            if account.account == BETA:
+                return [], [], [], False, "AccessDenied"
+            days = [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
+            return days, [9.0] * len(days), [10.0] * len(days), False, None
+
+        monkeypatch.setattr(usage_explorer, "account_series", fake)
+        fresh = Account(partner="p", account=ALPHA, budget=1, tag_ratio=1, untag_ratio=1,
+                        start_date=self.TODAY - timedelta(days=3))
+        broken = Account(partner="p", account=BETA, budget=1, tag_ratio=1, untag_ratio=1)
+        said = []
+        assert alerts.daily_spend([fresh, broken], self.TODAY, log=said.append) == {
+            ALPHA: [0.0, 0.0, 0.0, 0.0, 10.0, 10.0, 10.0], BETA: None}
+        assert said == [f"[近 7 天消费] {BETA}：AccessDenied"]
 
     def test_problem_rows_are_red_and_explained(self, ledger, sent, monkeypatch):
         """查询失败、超额的数字标红，原因逐条写在表格下面。"""
@@ -1134,9 +1192,9 @@ class TestAccountEmail:
         tg_ledger(ledger, {ALPHA: (True, CHAT_A), BETA: (True, CHAT_A)}, EMAIL={ALPHA: ALPHA_MAIL})
         run_daily(date(2026, 8, 17), log=quiet)
         card = sent.cards[0][1]
-        first, second = card.blocks[0].rows
-        assert (first[0].text, first[0].note) == (ALPHA, ALPHA_MAIL)
-        assert (second[0].text, second[0].note) == (BETA, "")          # 没填邮箱的照旧
+        first, second = table_of(card).rows
+        assert (first[0].text, first[0].note) == (ALPHA_MAIL, ALPHA)     # 主行是邮箱，副行是账号 ID
+        assert (second[0].text, second[0].note) == (BETA, "")          # 没填邮箱的主行就是 ID
         assert f"<code>{ALPHA}</code> · {ALPHA_MAIL} 累计消费" in card.caption
         assert f"<code>{BETA}</code> 累计消费" in card.caption
         assert ALPHA_MAIL in sent[0][1]                                 # dry-run 打印的文字里也有
