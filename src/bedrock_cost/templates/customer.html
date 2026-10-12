@@ -1,6 +1,6 @@
 {% extends "shell.html" %}
 {% from "_customer_macros.html" import cicon, cust_avatar, status_pill, mini, customer_fields, timeline_box with context %}
-{% from "_macros.html" import spend_switch %}
+{% from "_macros.html" import range_switch, spend_switch %}
 {% block title %}{{ customer.name }} · 客户 · Bedrock 成本监控{% endblock %}
 {% block page_header %}{% endblock %}
 {% block loading_label %}正在处理{% endblock %}
@@ -150,44 +150,48 @@
     {% endif %}
   </article>
 
-  {# 账单要晚 1~2 天，这张看现在：CloudWatch 的调用次数，晚几分钟。颜色和「每日消费」一样，一个账号一个颜色 #}
-  <article class="viz-card col-4" data-reveal>
+  {# 账单要晚 1~2 天，这张看现在：CloudWatch 的调用次数，晚几分钟。折线图，一个账号一条线，线尾是它的头像，颜色和
+     「每日消费」一样；点下面的账号挑几个只看它们，纵轴跟着它们重新算（app.js）。右上角选看多久：近 24 小时每小时
+     一个点，其余每天一个点（UTC 日期） #}
+  <article class="viz-card col-4" id="calls" data-reveal>
     <div class="viz-head">
       <div>
-        <h2 class="viz-title">近 24 小时调用</h2>
-        {% if calls.start %}<p class="viz-sub">{{ calls.start }} ~ {{ calls.end }}</p>{% endif %}
+        <h2 class="viz-title">调用次数</h2>
+        {% if calls.start %}<p class="viz-sub">{{ calls.start }} ~ {{ calls.end }}{% if not calls.hourly %} · 按 UTC 日期{% endif %}</p>{% endif %}
       </div>
+      {{ range_switch(calls_links, 'calls', '正在读调用次数') }}
     </div>
     {% if calls.watched %}
       <div>
         {# 左边是调用次数，右边是今天到现在的预估花费（用量 × 牌价，以账单为准） #}
         <div class="calls-kpis">
-          <p class="viz-big"><span data-countup>{{ calls.total | compact }}</span> <small>次</small></p>
+          <p class="viz-big"><span data-countup>{{ calls.total | compact }}</span> <small>次 · {{ calls.label }}</small></p>
           <p class="viz-big" title="CloudWatch 的用量 × 牌价，和账号页「预估」页签一个算法，以账单为准">
             <span data-countup>{{ calls.today_cost | money }}</span> <small>今日预估{% if calls.partial %}（有的没算上）{% endif %}</small></p>
         </div>
-        <p class="viz-meta">最近一小时 <strong>{{ calls.last | compact }}</strong>
-          {%- if calls.peak_label %} · 最多的一小时 <strong>{{ calls.peak_value | compact }}</strong>（{{ calls.peak_label }}）{% endif %}
-          · {{ calls.active }} / {{ calls.watched }} 个在用的账号有调用</p>
+        <p class="viz-meta">
+          {%- if calls.hourly %}最近一小时 <strong>{{ calls.last | compact }}</strong>
+          {%- else %}日均 <strong>{{ calls.average | compact }}</strong>{% endif %}
+          {%- if calls.peak_label %} · 最多的{{ '一小时' if calls.hourly else '一天' }} <strong>{{ calls.peak_value | compact }}</strong>（{{ calls.peak_label }}）{% endif %}
+          · {{ calls.active }} / {{ calls.watched }} 个{{ '在用的' if calls.hourly else '' }}账号有调用</p>
       </div>
-      <div class="chart-wrap chart-fluid calls-chart" data-line-src="cust-calls-data">{{ calls.chart.svg | safe }}</div>
+      <div class="chart-wrap chart-fluid calls-chart" id="cust-calls" data-line-src="cust-calls-data">{{ calls.chart.svg | safe }}</div>
       {% if calls.chart.tooltip %}<script id="cust-calls-data" type="application/json">{{ calls.chart.tooltip | tojson }}</script>{% endif %}
-      {# 头像对邮箱：两个账号可能是同一个字母，外圈的颜色就是它那条线的颜色 #}
+      {# 一条线一个签（和「每日消费」下面的一样，签上的 data-s 是线的序号）：挑几个只看它们 #}
       {% if calls.legend %}
-        <div class="calls-legend">
+        <div class="legend-toggles" data-legend-for="cust-calls" role="group" aria-label="挑几个账号只看它们">
           {% for item in calls.legend %}
-            <span class="calls-who"><span class="mini-av {{ item.account.avatar.css }}" style="box-shadow: 0 0 0 2px {{ item.color }}"
-              aria-hidden="true">{{ item.account.avatar.text }}</span>{{ item.account.email or item.account.account }}
-              <b>{{ item.total | compact }}</b> 次 · 今日 <b>{{ item.today | money }}</b></span>
+            <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false" title="{{ item.tip }}">
+              <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
           {% endfor %}
         </div>
       {% endif %}
       {% if calls.silent %}
-        <p class="calls-silent">近 24 小时没有调用：
+        <p class="calls-silent">{{ '这段时间' if calls.key == 'all' else calls.label }}没有调用：
           {%- for h in calls.silent %}<span class="calls-who">{{ mini(h.account) }}{{ h.account.email or h.number }}</span>{% endfor %}</p>
       {% endif %}
     {% else %}
-      <p class="viz-empty">没有在用的账号。</p>
+      <p class="viz-empty">{{ '没有在用的账号。' if calls.hourly else '这段时间没有在这个客户名下用过的账号。' }}</p>
     {% endif %}
   </article>
 
@@ -240,7 +244,7 @@
 <!-- ------------------------------------------------ 时间线 -->
 {% call timeline_box(timeline, categories,
                      (customer.since.isoformat() ~ ' 开始合作到今天 · ' if customer.since else '') ~ (view.timeline | length) ~ ' 件事',
-                     timeline_fallback, '点卡片可以改日期、删掉', people=timeline.accounts) %}
+                     timeline_fallback, '点卡片可以改日期、删掉', people=timeline.accounts, colors=lifecycle_colors) %}
   <button class="btn btn-sm btn-primary" type="button" data-open="dlg-note">记一笔</button>
 {% endcall %}
 
@@ -981,16 +985,6 @@
       dialog.querySelector('input[name="key"]').value = act.dataset.key;
       actions[act.dataset.act](dialog, h);
       open(dialog);
-      return;
-    }
-    // 告警流：看更早的
-    const more = event.target.closest('[data-feed-more]');
-    if (more) {
-      const hidden = document.querySelectorAll('#feed [data-more]');
-      const showing = more.getAttribute('aria-expanded') === 'true';
-      for (const item of hidden) item.hidden = showing;
-      more.setAttribute('aria-expanded', String(!showing));
-      more.textContent = showing ? more.dataset.moreLabel : '收起';
       return;
     }
     // 月度对账单「按月」：点月份展开 / 收起这个月每个账号的那几行

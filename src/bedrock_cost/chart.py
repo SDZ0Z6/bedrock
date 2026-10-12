@@ -544,9 +544,12 @@ def render_lines(report, unit: str = "", width: int = IDEAL_W, uid: str = "ln", 
         return plot_bottom - value * scale
 
     safe_uid = html.escape(uid)
+    # data-base / data-top / data-ymax：绘图区底边、顶边，纵轴最高那个刻度。图例挑了几项时（客户页的「调用次数」），
+    # app.js 按挑中的重新算纵轴，线按比例拉高（每条线、面积、点、线尾头像上的 data-s 是它在 series 里的序号）
     parts: list[str] = [
         f'<svg class="chart-svg line-chart" viewBox="0 0 {width} {height}" '
-        f'width="{width}" height="{height}" {_zoom_attrs(PAD_L, PAD_L + plot_w, count, step or plot_w, 0.0)} role="img" '
+        f'width="{width}" height="{height}" {_zoom_attrs(PAD_L, PAD_L + plot_w, count, step or plot_w, 0.0)} '
+        f'data-base="{plot_bottom:.2f}" data-top="{PAD_T:.2f}" data-ymax="{y_max:g}" role="img" '
         f'aria-label="{html.escape(report.metric_label)}随时间变化的折线图，'
         f"{count} 个时间点，{len(series_list)} 条序列，"
         f'纵轴单位 {html.escape(unit or report.unit)}">'
@@ -592,34 +595,34 @@ def render_lines(report, unit: str = "", width: int = IDEAL_W, uid: str = "ln", 
             )
         parts.append('</defs><g class="chart-areas">')
         # 先画完所有填充再画线，否则后一条的填充会盖在前一条的线上
-        for series in series_list:
+        for k, series in enumerate(series_list):
             points = geometry[series.slot]
             parts.append(
-                f'<path class="chart-area" d="{paths[series.slot]} L{points[-1][0]:.1f},{plot_bottom:.1f} '
+                f'<path class="chart-area" data-s="{k}" d="{paths[series.slot]} L{points[-1][0]:.1f},{plot_bottom:.1f} '
                 f'L{points[0][0]:.1f},{plot_bottom:.1f} Z" fill="url(#{safe_uid}-fade{series.slot})"></path>'
             )
         parts.append("</g>")
 
     parts.append('<g class="chart-lines">')
-    for series in series_list:
+    for k, series in enumerate(series_list):
         colour = color_for(series.slot)
         points = geometry[series.slot]
         if count == 1:
             parts.append(
-                f'<circle cx="{points[0][0]:.2f}" cy="{points[0][1]:.2f}" '
+                f'<circle class="chart-marker" data-s="{k}" cx="{points[0][0]:.2f}" cy="{points[0][1]:.2f}" '
                 f'r="{MARKER_R:.1f}" fill="{colour}"></circle>'
             )
             continue
         # pathLength="1"：进场时「画出来」的动画按比例走，不用知道线有多长
         parts.append(
-            f'<path class="chart-line" pathLength="1" d="{paths[series.slot]}" fill="none" '
+            f'<path class="chart-line" data-s="{k}" pathLength="1" d="{paths[series.slot]}" fill="none" '
             f'stroke="{colour}" stroke-width="{LINES_W}" stroke-linejoin="round" '
             f'stroke-linecap="round"></path>'
         )
         if count <= MARKER_MAX_POINTS:
             for x, y in points:
                 parts.append(
-                    f'<circle class="chart-marker" cx="{x:.2f}" cy="{y:.2f}" r="{MARKER_R:.1f}" '
+                    f'<circle class="chart-marker" data-s="{k}" cx="{x:.2f}" cy="{y:.2f}" r="{MARKER_R:.1f}" '
                     f'fill="{colour}" stroke="{SURFACE}" stroke-width="2"></circle>'
                 )
     parts.append("</g>")
@@ -645,7 +648,8 @@ def render_lines(report, unit: str = "", width: int = IDEAL_W, uid: str = "ln", 
         parts.append("</g>")
 
     if ends:
-        parts.append(_end_avatars(series_list, ends, x_at(count - 1), y_at, plot_bottom))
+        parts.append(_end_avatars(series_list, ends, x_at(count - 1), y_at, plot_bottom,
+                                  "最后一天" if report.window.period >= 86400 else "最后一小时"))
 
     stamps = getattr(report, "timestamps", None)
     if stamps and len(stamps) == count:
@@ -681,9 +685,9 @@ def render_lines(report, unit: str = "", width: int = IDEAL_W, uid: str = "ln", 
         f'<path d="M-4.5,{plot_bottom + 9:.0f} L4.5,{plot_bottom + 9:.0f} L0,{plot_bottom + 2:.0f} Z" '
         f'fill="{LABEL_TEXT}"></path></g>'
     )
-    for series in series_list:
+    for k, series in enumerate(series_list):
         parts.append(
-            f'<circle class="chart-focus" cx="0" cy="0" r="{MARKER_R + 1:.1f}" '
+            f'<circle class="chart-focus" data-s="{k}" cx="0" cy="0" r="{MARKER_R + 1:.1f}" '
             f'fill="{color_for(series.slot)}" stroke="{SURFACE}" stroke-width="2.5"></circle>'
         )
     parts.append("</g>")
@@ -715,38 +719,46 @@ def render_lines(report, unit: str = "", width: int = IDEAL_W, uid: str = "ln", 
     return Chart(svg="".join(parts), width=width, height=height, tooltip=tooltip)
 
 
-def _end_avatars(series_list, ends: dict, end_x: float, y_at, plot_bottom: float) -> str:
-    """线尾的头像 + 末值（render_lines 的 ends）。按末值的高低排，压在一起的往下错开，挤出底了再从下往上推；
-    错开了就拉一根细线连回线尾。头像的底色、字色是页面上 .av-N 的那一套（CSS 变量），外圈是线的颜色。"""
-    cx = end_x + AVATAR_R + 10
-    marks = sorted(((y_at(s.values[-1]), s) for s in series_list), key=lambda item: item[0])
-    top, bottom = PAD_T + AVATAR_R, plot_bottom - AVATAR_R
+def end_spots(ys: list[float], top: float, bottom: float) -> list[float]:
+    """线尾头像的纵坐标：ys 是各条线末端的高低（从上到下排好），压在一起的往下错开 AVATAR_GAP，挤出底了再从下往上推。
+    app.js 的 endSpots 照抄这一段：图例挑了几项、纵轴缩放以后，在浏览器里重新排。"""
     spots: list[float] = []
-    for y, _ in marks:
+    for y in ys:
         spots.append(max(y, top) if not spots else max(y, spots[-1] + AVATAR_GAP))
     if spots and spots[-1] > bottom:
         spots[-1] = bottom
         for i in range(len(spots) - 2, -1, -1):
             spots[i] = min(spots[i], spots[i + 1] - AVATAR_GAP)
+    return spots
+
+
+def _end_avatars(series_list, ends: dict, end_x: float, y_at, plot_bottom: float, last_label: str) -> str:
+    """线尾的头像 + 末值（render_lines 的 ends）。按末值的高低排，压在一起的往下错开，挤出底了再从下往上推；
+    错开了就拉一根细线连回线尾（没错开的那根也画上、看不见：纵轴缩放以后可能要用）。头像的底色、字色是页面上
+    .av-N 的那一套（CSS 变量），外圈是线的颜色。每个头像上 data-s 是它在 series 里的序号。"""
+    cx = end_x + AVATAR_R + 10
+    order = sorted(range(len(series_list)), key=lambda k: y_at(series_list[k].values[-1]))
+    ys = [y_at(series_list[k].values[-1]) for k in order]
+    spots = end_spots(ys, PAD_T + AVATAR_R, plot_bottom - AVATAR_R)
     out = ['<g class="chart-endavatars">']
-    for (y, series), spot in zip(marks, spots):
+    for k, y, spot in zip(order, ys, spots):
+        series = series_list[k]
         face = ends.get(series.name)
         colour = color_for(series.slot)
         last = compact_number(series.values[-1])
-        out.append(f'<g class="chart-endavatar {html.escape(face.css) if face else ""}">'
-                   f'<title>{html.escape(series.name)}：最后一小时 {html.escape(last)}</title>')
-        if abs(spot - y) > 1:
-            out.append(f'<line x1="{end_x + 4:.2f}" y1="{y:.2f}" x2="{cx - AVATAR_R - 1:.2f}" y2="{spot:.2f}" '
-                       f'stroke="{colour}" stroke-width="1" stroke-opacity=".55"></line>')
+        out.append(f'<g class="chart-endavatar {html.escape(face.css) if face else ""}" data-s="{k}">'
+                   f'<title>{html.escape(series.name)}：{last_label} {html.escape(last)}</title>'
+                   f'<line class="end-link" x1="{end_x + 4:.2f}" y1="{y:.2f}" x2="{cx - AVATAR_R - 1:.2f}" y2="{spot:.2f}" '
+                   f'stroke="{colour}" stroke-width="1" stroke-opacity="{".55" if abs(spot - y) > 1 else "0"}"></line>')
         if face:
             size = 12 if face.emoji else 10
-            out.append(f'<circle cx="{cx:.2f}" cy="{spot:.2f}" r="{AVATAR_R:.0f}" style="fill: var(--av-bg)" '
+            out.append(f'<circle class="end-face" cx="{cx:.2f}" cy="{spot:.2f}" r="{AVATAR_R:.0f}" style="fill: var(--av-bg)" '
                        f'stroke="{colour}" stroke-width="2"></circle>'
-                       f'<text x="{cx:.2f}" y="{spot + size * 0.36:.2f}" text-anchor="middle" font-size="{size}" '
-                       f'font-weight="600" style="fill: var(--av-fg)">{html.escape(face.text)}</text>')
+                       f'<text class="end-letter" x="{cx:.2f}" y="{spot + size * 0.36:.2f}" text-anchor="middle" '
+                       f'font-size="{size}" font-weight="600" style="fill: var(--av-fg)">{html.escape(face.text)}</text>')
         else:                       # 「其他」：没有头像，一个灰点
-            out.append(f'<circle cx="{cx:.2f}" cy="{spot:.2f}" r="{AVATAR_R - 4:.0f}" fill="{colour}"></circle>')
-        out.append(f'<text x="{cx + AVATAR_R + 6:.2f}" y="{spot + 4:.2f}" fill="{LABEL_TEXT}" font-size="11" '
+            out.append(f'<circle class="end-face" cx="{cx:.2f}" cy="{spot:.2f}" r="{AVATAR_R - 4:.0f}" fill="{colour}"></circle>')
+        out.append(f'<text class="end-value" x="{cx + AVATAR_R + 6:.2f}" y="{spot + 4:.2f}" fill="{LABEL_TEXT}" font-size="11" '
                    f'font-weight="600" style="font-variant-numeric:tabular-nums">{html.escape(last)}</text></g>')
     out.append("</g>")
     return "".join(out)

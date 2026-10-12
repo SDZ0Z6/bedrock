@@ -10,7 +10,7 @@ from __future__ import annotations
 import csv
 import io
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from flask import Blueprint, Response, flash, redirect, render_template, request, session, url_for
@@ -20,8 +20,8 @@ from .auth import csrf_protect, login_required
 from .dates import parse_date
 from .excel_source import Account, ExcelSourceError
 from .filters import money, money0
-from .views import flash_result, page_meta, spend_links
-from .windows import resolve_window
+from .views import flash_result, page_meta, range_links, spend_links
+from .windows import PERIODS, MetricWindow, resolve_window
 
 bp = Blueprint("customers", __name__, url_prefix="/customers")
 
@@ -230,8 +230,8 @@ def create():
     return redirect(url_for("customers.detail", cid=cid))
 
 
-# 客户页「近 24 小时调用」的取数（每个账号四区合计）。测试里默认换成不查 CloudWatch 的（见 tests/conftest.py）
-_hourly_calls = cloudwatch_metrics.account_totals
+# 客户页「调用次数」的取数（每个账号四区合计）。测试里默认换成不查 CloudWatch 的（见 tests/conftest.py）
+_account_calls = cloudwatch_metrics.account_totals
 
 
 def today_estimates(accounts: list[Account], today: date, refresh: bool = False) -> tuple[dict[str, float], bool]:
@@ -258,20 +258,58 @@ def today_estimates(accounts: list[Account], today: date, refresh: bool = False)
 _estimate_today = today_estimates
 
 
-def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dict[str, int], refresh: bool = False):
-    """近 24 小时调用：折线图，一个账号一条线（四区合计、每小时一个点），线尾是这个账号的头像。
-    CloudWatch 晚几分钟出数，比账单快得多。
+# 「调用次数」右上角选看多久，网址上是 ?calls=（近 24 小时是默认，不带）
+CALLS_RANGES = (("24h", "近 24 小时"), ("7", "近 7 天"), ("30", "近 30 天"), ("all", "全部"))
 
-    最后一个点是上一个整点那一小时：没过完的这一小时不画，免得线尾凭空塌下去。只查还在用的账号——
-    结算了、停用了的不会再有调用，少查几次。一直没调用的不画线（一堆贴着 0 的线叠在一起认不出），
-    在图下面点名。账号多过 8 个时，调用少的并成「其他」一条。
+
+def _calls_window(view: customers.CustomerView, key: str) -> MetricWindow:
+    """近 24 小时每小时一根，最后一根是上一个整点那一小时（没过完的这一小时不画）。近 7 天、近 30 天、全部每天一根，
+    按 UTC 日期——和 Cost Explorer 的账、「每日消费」一个分法——今天算到现在。全部从最早分过来的那个账号算起，
+    不早于 CloudWatch 按天能查的最早一天（455 天）。"""
+    if key not in dict(CALLS_RANGES) or key == "24h":
+        return resolve_window({"win": "24h", "period": "1h"})[0]
+    today = datetime.now(timezone.utc).date()
+    if key == "all":
+        first = min((h.joined for h in view.holdings if h.joined), default=today - timedelta(days=29))
+        start = max(min(first, today), today - timedelta(days=PERIODS["1d"][2] - 1))
+    else:
+        start = today - timedelta(days=int(key) - 1)
+
+    def midnight(day: date) -> datetime:
+        return datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+
+    return MetricWindow(start=midnight(start), end=midnight(today + timedelta(days=1)), period_key="1d", window_key=key)
+
+
+def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dict[str, int], key: str = "24h",
+                 refresh: bool = False):
+    """调用次数：CloudWatch 的调用次数（四区合计），晚几分钟出数，比账单快得多。折线图，一个账号一条线，线尾是这个
+    账号的头像；颜色和「每日消费」一样。点下面的账号挑几个只看它们，纵轴跟着它们重新算（app.js）。
+
+    近 24 小时只查还在用的账号——结算了、停用了的不会再有调用，少查几次。按天看的查这段时间里在这个客户名下用过的
+    账号（停用的不查），每个账号只算它算这个客户的那几天（Holding.active_daily 一样的规矩：分过来那天起，到风控、
+    换下、用完、结算的前一天）。一直没调用的不画线，在图下面点名；账号多过 8 个时，调用少的并成「其他」一条。
     """
-    watched = [h for h in view.holdings if h.stage != "settled" and h.account.enabled]
-    window, _ = resolve_window({"win": "24h", "period": "1h"})
-    hours = _hourly_calls([h.account for h in watched], window, "invocations", refresh=refresh)
-    width = len(hours.labels)
+    window = _calls_window(view, key)
+    hourly = window.period_key != "1d"
+    if hourly:
+        watched = [h for h in view.holdings if h.stage != "settled" and h.account.enabled]
+    else:
+        first, last = window.start.date(), (window.end - timedelta(days=1)).date()
+        watched = [h for h in view.holdings if h.account.enabled
+                   and (h.joined or date.min) <= last and (h.left or date.max) > first]
+    counts = _account_calls([h.account for h in watched], window, "invocations", refresh=refresh)
+    width = len(counts.timestamps)
     by_number = {h.number: h for h in watched}
-    series = {h.number: hours.values.get(h.key) or [0.0] * width for h in watched}
+    series = {}
+    for h in watched:
+        values = counts.values.get(h.key) or [0.0] * width
+        if not hourly:
+            begin, stop = h.joined or date.min, h.left or date.max
+            values = [value if begin <= stamp.date() < stop else 0.0 for value, stamp in zip(values, counts.timestamps)]
+        series[h.number] = values
+    # 悬浮提示里的时间：按小时的写 10-12 13:00（本机时间），按天的写 10-12（UTC 日期）
+    labels = counts.labels if hourly else [stamp.strftime("%m-%d") for stamp in counts.timestamps]
     ranked = sorted((number for number in series if any(series[number])), key=lambda number: -sum(series[number]))
     keep, rest = ranked[: usage_explorer.MAX_SERIES], ranked[usage_explorer.MAX_SERIES:]
     lines = [cloudwatch_metrics.MetricSeries(name=names[number], values=series[number],
@@ -280,27 +318,41 @@ def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dic
         lines.append(cloudwatch_metrics.MetricSeries(
             name=usage_explorer.OTHER_LABEL, values=[sum(series[number][i] for number in rest) for i in range(width)],
             slot=-1))
-    report = SimpleNamespace(labels=hours.labels, timestamps=hours.timestamps, window=window, series=lines,
+    report = SimpleNamespace(labels=labels, timestamps=counts.timestamps, window=window, series=lines,
                              metric_label="调用次数", unit="次", dimension_label="账号")
     drawn = chart.render_lines(report, unit="次", width=760, uid="calls",
                                ends={names[number]: by_number[number].account.avatar for number in keep})
     totals = [sum(values[i] for values in series.values()) for i in range(width)]
     peak = max(range(width), key=lambda i: totals[i]) if any(totals) else None
-    # 今日预估：只估这 24 小时里有调用的账号（一直没调用的今天也就是 0，不用再查）
-    costs, partial = _estimate_today([by_number[number].account for number in ranked], view.today, refresh=refresh)
+    # 今日预估：只估今天有调用的账号（按小时看的：这 24 小时里有调用的），没调用的今天也就是 0，不用再查
+    busy = [number for number in ranked if hourly or series[number][-1] > 0]
+    costs, partial = _estimate_today([by_number[number].account for number in busy], view.today, refresh=refresh)
+    label = dict(CALLS_RANGES).get(key, "近 24 小时")
+    # 图下面的签：一条线一个，和线同一个顺序（签上的 data-s 就是线的序号），悬浮看这个账号这段时间多少次、今天预估花了多少
+    legend = []
+    for number in keep:
+        tip = f"{by_number[number].account.email or number} · {label} {sum(series[number]):,.0f} 次"
+        if by_number[number].key in costs:
+            tip += f" · 今日 {money(costs[by_number[number].key])}"
+        legend.append(SimpleNamespace(name=names[number], color=chart.color_for(slots.get(names[number], -1)), tip=tip))
+    if rest:
+        legend.append(SimpleNamespace(name=usage_explorer.OTHER_LABEL, color=chart.color_for(-1),
+                                      tip=f"调用少的 {len(rest)} 个账号并在一起 · {label}"))
+    if hourly:
+        # 写到窗口的末尾（最后一个点是 17:00 那一小时，数到 18:00），不写最后一个点的起点
+        start = counts.labels[0] if width else ""
+        end = window.end.astimezone().strftime("%m-%d %H:00") if width else ""
+    else:
+        start, end = (labels[0], labels[-1]) if width else ("", "")
     return SimpleNamespace(
-        chart=drawn, total=sum(totals), last=totals[-1] if totals else 0.0,
+        key=key if key in dict(CALLS_RANGES) else "24h", label=label, hourly=hourly,
+        chart=drawn, legend=legend, total=sum(totals), last=totals[-1] if totals else 0.0,
+        average=sum(totals) / width if width else 0.0,
         today_cost=sum(costs.values()), partial=partial,
-        legend=[SimpleNamespace(account=by_number[number].account, total=sum(series[number]),
-                                today=costs.get(by_number[number].key, 0.0),
-                                color=chart.color_for(slots.get(names[number], -1))) for number in keep],
         silent=[h for h in watched if not any(series[h.number])],
-        peak_label=hours.labels[peak] if peak is not None else "", peak_value=totals[peak] if peak is not None else 0.0,
+        peak_label=labels[peak] if peak is not None else "", peak_value=totals[peak] if peak is not None else 0.0,
         active=sum(1 for values in series.values() if any(values)), watched=len(watched),
-        # 写到窗口的末尾（最后一根是 17:00 那一小时，数到 18:00），不写最后一根的起点
-        start=hours.labels[0] if width else "",
-        end=window.end.astimezone().strftime("%m-%d %H:00") if width else "",
-        errors=hours.errors, accounts=[h.account for h in watched],
+        start=start, end=end, errors=counts.errors, accounts=[h.account for h in watched],
     )
 
 
@@ -393,7 +445,8 @@ def detail(cid: str, **extra):
     trend = _spend_chart(per_account, stamps, names, height=230, width=1100, slots=slots,
                          marks=_spend_marks(view, stamps, names, slots))
     trend.label = spend.label
-    calls = _calls_chart(view, names, slots, refresh=refresh)
+    # 「调用次数」右上角也选看多久：近 24 小时（默认）按小时，其余按天
+    calls = _calls_chart(view, names, slots, request.args.get("calls") or "24h", refresh=refresh)
     runway = chart.render_runway(view.balance_history(21), view.burn, fmt=money, axis=customers.short_money)
 
     by_number = {a.account: a for a in accounts}
@@ -427,12 +480,17 @@ def detail(cid: str, **extra):
         stage_rows=stage_rows,
         trend=trend,
         spend=spend,
-        spend_links=spend_links("customers.detail", spend.key, cid=customer.id),
+        # 两排「看多久」互相带着对方选的，切一排另一排不变
+        spend_links=spend_links("customers.detail", spend.key, cid=customer.id,
+                                calls=None if calls.key == "24h" else calls.key),
         calls=calls,
+        calls_links=range_links("customers.detail", "calls", CALLS_RANGES, calls.key, "24h", cid=customer.id,
+                                spend=None if spend.key == "30" else spend.key),
         runway=runway,
         timeline=timeline,
         timeline_fallback=_timeline_fallback(view, by_number),
         categories=customers.CATEGORIES,
+        lifecycle_colors=excel_source.lifecycle_colors(),
         stock=stock,
         by_number=by_number,
         holdings_data=holdings_data,

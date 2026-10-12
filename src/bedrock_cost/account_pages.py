@@ -177,6 +177,8 @@ def summary(number: str):
                      gauge=chart.render_gauge(None if row.usage_pct is None else row.usage_pct / 100, row.level),
                      trend=trend, spend=spend, spend_links=spend_links("account.summary", spend.key, number=account.account),
                      calls=calls, today_cost=today_cost, quota_top=_quota_top(account), toasts=toasts,
+                     # 告警流：这个账号发出去的 TG 告警和收到的 AWS 邮件（告警流水里留着的那些，新的在前）
+                     feed=customers.account_feed(customers.account_alerts(account.account), account.email),
                      notes=[])
     context["query_failed"] = bool(row.error)
     return render_template("account_summary.html", **context)
@@ -619,7 +621,10 @@ def timeline(number: str):
     events = load_events()
     owners = {customer.id: customer for customer in load_customers()}
     series = customers.fetch_series([account], today, refresh).get(account.key) or customers.Series()
-    items = customers.account_timeline(account, events, series, today, customers.risk_mails(account.account))
+    # 告警流水里这个账号的：风控邮件照旧是风控那一类的「AWS 邮件」，别的（TG 告警、其他 AWS 邮件）归「告警」
+    alerts = customers.account_alerts(account.account)
+    mails = [event for event in alerts if event.kind in customers.RISK_MAIL_KINDS]
+    items = customers.account_timeline(account, events, series, today, mails, alerts)
     by_number = {a.account: a for a in accounts}
 
     toasts = []
@@ -649,7 +654,7 @@ def timeline(number: str):
         timeline_fallback=[(row.item.date, row.item.title,
                             " · ".join(bit for bit in (row.owner.name if row.owner else row.cid, row.text) if bit))
                            for row in rows],
-        rows=rows, categories=customers.CATEGORIES, series=series,
+        rows=rows, categories=customers.CATEGORIES + [customers.ALERT_CATEGORY], series=series,
         event_count=sum(1 for item in items if not item.auto),
         # 「记一笔」：和客户页一样的几类；「标记风控」只在还没打风控、也没结算的时候能选
         note_kinds=[(kind, customers.EVENT_TYPES[kind][0]) for kind in customers.NOTE_KINDS],

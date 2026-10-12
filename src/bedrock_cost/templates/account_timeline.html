@@ -1,6 +1,6 @@
 {# 账号页的「时间线」页签：这个账号从启用到今天的事，不管中间换过几个客户、解绑过没有。
    上面是和客户页同一个样子的横向时间线（卡片上那一行是那时候归哪个客户），下面是一张事件表，
-   手动记的写着谁、几点几分记的。「记一笔」记在账号现在归的客户名下（库存里的只记账号）；
+   手动记的写着谁、几点几分记的。比客户页多一类「告警」：这个账号发出去的 TG 告警、收到的 AWS 邮件。「记一笔」记在账号现在归的客户名下（库存里的只记账号）；
    「记一笔」那几类（备注、上量、终止、恢复）和在库存里时记的（没有客户，不连着谁的钱）这里就能改日期、删掉，
    别的连着钱和阶段，去客户页的时间线改。 #}
 {% extends "account_base.html" %}
@@ -21,7 +21,7 @@
   <div class="card-head">
     <div class="card-title">
       <h2 id="ev-table-title">事件表</h2>
-      <span class="card-note">最近的在上面。手动记的存在台账的 EVENTS 表里，写着谁、几点几分记的；自动的按每天的消费和告警现算</span>
+      <span class="card-note">最近的在上面。手动记的存在台账的 EVENTS 表里，写着谁、几点几分记的；自动的按每天的消费现算；告警（TG 告警、AWS 邮件）来自告警流水，写着几点几分发的</span>
     </div>
   </div>
   {% if rows %}
@@ -47,6 +47,7 @@
             </td>
             <td class="ev-who">
               {%- if item.kind == 'start' %}<span class="tone-muted">台账的启用日期</span>
+              {%- elif item.kind in ('alert', 'alert-mail') %}<span class="tone-muted">{{ 'AWS 邮件' if item.kind == 'alert-mail' else 'TG 告警' }}</span>
               {%- elif item.auto %}<span class="tone-muted">自动</span>
               {%- else %}{{ item.actor or '—' }}
                 {%- if item.created_at %}<small class="tab-num">{{ item.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</small>{% endif %}
@@ -176,8 +177,10 @@
     fill('title', item.title);
     const facts = dialog.querySelector('[data-fill="facts"]');
     facts.replaceChildren();
+    const alert = item.kind === 'alert' || item.kind === 'alert-mail';
     const rows = [['日期', item.date], ['客户', item.who ? item.who.label : (item.none || '—')], ['内容', item.text || '—'],
       ['来源', item.id === 'start' ? '台账里的启用日期'
+        : item.kind === 'alert' ? '告警流水：发到 TG 群的告警' : item.kind === 'alert-mail' ? '告警流水：收到的 AWS 邮件'
         : item.auto ? '系统按数据自动记的' : '手动记的' + (item.actor ? '（' + item.actor + (item.created ? '，' + item.created : '') + '）' : '')]];
     for (const pair of rows) {
       const term = document.createElement('dt');
@@ -190,6 +193,7 @@
       : mine ? '在库存里时记的（没有客户），不连着哪个客户的钱，就在这里改。改日期、删掉都会写进操作日志；'
         + '删掉只是不在时间线上显示，生命周期、额度不会跟着变。' + (item.kind === 'risk' ? dialog.dataset.riskTip || '' : '')
       : item.id === 'start' ? '启用日期在账号管理里改。'
+      : alert ? '告警是发出去（收到）的时候记下来的，改不了日期，也删不掉。'
       : item.who ? '这一条连着钱和阶段：要改日期或者删掉，去「' + item.who.label + '」的客户页，在时间线上点这一条。'
       : '按每天的消费和告警算出来的；那时候账号在库存里，没有客户页可改。');
     dialog.showModal();

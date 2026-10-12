@@ -79,6 +79,18 @@
     for (const link of document.querySelectorAll('[data-refresh].is-busy')) link.classList.remove('is-busy');
   });
 
+  // ------------------------------------------------------------ 告警流：看更早的
+  // 客户页、账号页摘要的告警流先只露最近 4 条，[data-feed-more] 展开 / 收起同一张卡片里藏着的那些
+  document.addEventListener('click', function (event) {
+    const more = event.target instanceof Element ? event.target.closest('[data-feed-more]') : null;
+    if (!more) return;
+    const box = more.closest('.viz-card') || document;
+    const showing = more.getAttribute('aria-expanded') === 'true';
+    for (const item of box.querySelectorAll('.feed [data-more]')) item.hidden = showing;
+    more.setAttribute('aria-expanded', String(!showing));
+    more.textContent = showing ? more.dataset.moreLabel : '收起';
+  });
+
   // ------------------------------------------------------------ 导出 CSV
   // 带 data-export 的下载链接用 fetch 取：要查几秒钟，等的时候按钮写「正在导出…」；拿到 CSV 就存下来，
   // 拿到的是报错（服务端回一句纯文本）就在右上角说——不让浏览器把报错存成一个文件。没开 JS 就是普通下载
@@ -432,9 +444,120 @@
   });
   window.addEventListener('scroll', function () { tipOwner = null; }, { passive: true });
 
+  // ------------------------------------------------------------ 图的共用件
+  // 图例挑了几项、纵轴跟着缩放时在浏览器里重新画（柱状图、折线图）。下面几样和 chart.py 一样，两边要一起改：
+  // 段与段之间的缝（BAR_GAP）、柱顶的圆角（BAR_RADIUS）、线尾头像的半径和间距（AVATAR_R、AVATAR_GAP）、
+  // 刻度取整（_nice_step）、圆头柱子的路径（_round_top）、纵轴金额的写法（short_money）、
+  // 纵轴次数的写法（compact_number）、线尾头像怎么错开（end_spots）
+  const BAR_GAP = 2, BAR_RADIUS = 4, AVATAR_R = 10, AVATAR_GAP = 24;
+  function niceStep(span, intervals) {
+    if (span <= 0) return 1;
+    const rough = span / intervals;
+    const base = Math.pow(10, Math.floor(Math.log10(rough)));
+    for (const multiple of [1, 2, 2.5, 5, 10]) if (rough <= base * multiple) return base * multiple;
+    return base * 10;
+  }
+  function roundTop(x, top, w, bottom, radius) {
+    const r = Math.max(0, Math.min(radius, w / 2, bottom - top));
+    const f = function (n) { return n.toFixed(2); };
+    return 'M' + f(x) + ',' + f(bottom) + ' L' + f(x) + ',' + f(top + r) + ' Q' + f(x) + ',' + f(top) + ' ' + f(x + r) + ',' + f(top) +
+      ' L' + f(x + w - r) + ',' + f(top) + ' Q' + f(x + w) + ',' + f(top) + ' ' + f(x + w) + ',' + f(top + r) +
+      ' L' + f(x + w) + ',' + f(bottom) + ' Z';
+  }
+  // Python 的 f"{v:.2f}"：正好在一半上的（1.25、12.5）取偶数那边，toFixed 是往大的取
+  function fixed(value, digits) {
+    const scaled = value * Math.pow(10, digits), low = Math.floor(scaled);
+    return (scaled - low === 0.5 && low % 2 === 0 ? low / Math.pow(10, digits) : value).toFixed(digits);
+  }
+  function axisMoney(value, symbol) {
+    const v = Math.abs(value);
+    const text = v >= 1e9 ? fixed(v / 1e9, 2) + 'B' : v >= 1e6 ? fixed(v / 1e6, 2) + 'M'
+      : v >= 1e3 ? fixed(v / 1e3, 1) + 'K' : v === 0 ? '0' : fixed(v, 2);
+    const unit = /[KMB]$/.test(text) ? text.slice(-1) : '';
+    let number = unit ? text.slice(0, -1) : text;
+    if (number.indexOf('.') >= 0) number = number.replace(/0+$/, '').replace(/\.$/, '');
+    return (value < 0 ? '-' : '') + symbol + number + unit;
+  }
+  function compactNumber(value) {
+    const v = Math.abs(value);
+    const text = v >= 1e9 ? fixed(v / 1e9, 2) + 'B' : v >= 1e6 ? fixed(v / 1e6, 1) + 'M'
+      : v >= 1e3 ? fixed(v / 1e3, 1) + 'K' : v === 0 ? '0'
+      : v < 10 ? fixed(v, 2).replace(/0+$/, '').replace(/\.$/, '') : Number(fixed(v, 0)).toLocaleString('en-US');
+    return (value < 0 ? '-' : '') + text;
+  }
+  function endSpots(ys, top, bottom) {
+    const spots = [];
+    for (const y of ys) spots.push(spots.length ? Math.max(y, spots[spots.length - 1] + AVATAR_GAP) : Math.max(y, top));
+    if (spots.length && spots[spots.length - 1] > bottom) {
+      spots[spots.length - 1] = bottom;
+      for (let i = spots.length - 2; i >= 0; i--) spots[i] = Math.min(spots[i], spots[i + 1] - AVATAR_GAP);
+    }
+    return spots;
+  }
+  const easeInOut = function (t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; };
+  // 系统开了「减弱动画」：图例挑了几项时直接到位、纵轴不淡入；下面放大缩放也不做平滑
+  const calm = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 纵轴换刻度：plan 是 {step, ticks, scale}（scale 是一个单位多少高），横线、字的样子照服务端画的那几条
+  // （original 是一开始存下的）；plan 没有 step 就换回原样。label 把刻度值写成字
+  function redrawAxis(grid, original, plan, base, label) {
+    const lines = original.filter(function (el) { return el.tagName.toLowerCase() === 'line'; });
+    const text0 = original.find(function (el) { return el.tagName.toLowerCase() === 'text'; });
+    if (!grid || !lines.length || !text0) return;
+    let parts;
+    if (!plan.step) {
+      parts = original.map(function (el) { return el.cloneNode(true); });
+    } else {
+      parts = [];
+      for (let tick = 0; tick <= plan.ticks; tick++) {
+        const y = base - plan.step * tick * plan.scale;
+        const line = lines[tick === 0 ? 0 : Math.min(1, lines.length - 1)].cloneNode(false);
+        line.setAttribute('y1', y.toFixed(2));
+        line.setAttribute('y2', y.toFixed(2));
+        const text = text0.cloneNode(false);
+        text.setAttribute('y', (y + 4).toFixed(2));
+        text.textContent = label(plan.step * tick);
+        parts.push(line, text);
+      }
+    }
+    grid.replaceChildren.apply(grid, parts);
+    if (!calm && grid.animate) grid.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 260, easing: 'ease-out' });
+  }
+
+  // 图例做成可以挑几项的签（柱状图、折线图共用）：点一个加一个，再点放回去；挑了以后最后有「显示全部」。
+  // picked 是挑中的序号；每次变了调 change(before)，before 是这次点之前看得见的那几项（null = 全看得见）
+  function legendPicker(legend, picked, change) {
+    const toggles = [...legend.querySelectorAll('.legend-toggle')];
+    // 挑了以后才出来：一下子全放回来，不用一个个点掉
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'legend-reset';
+    reset.textContent = '显示全部';
+    reset.hidden = true;
+    legend.append(reset);
+    legend.addEventListener('click', function (event) {
+      const before = picked.size ? new Set(picked) : null;
+      if (event.target.closest('.legend-reset')) {
+        picked.clear();
+        // 用键盘按的：按钮马上藏起来，焦点交给第一个签，不丢到页面开头
+        if (document.activeElement === reset && toggles[0]) toggles[0].focus();
+      } else {
+        const button = event.target.closest('.legend-toggle');
+        if (!button) return;
+        const index = Number(button.dataset.s);
+        if (picked.has(index)) picked.delete(index); else picked.add(index);
+      }
+      for (const t of toggles) t.setAttribute('aria-pressed', String(picked.has(Number(t.dataset.s))));
+      legend.classList.toggle('has-focus', picked.size > 0);
+      reset.hidden = picked.size === 0;
+      change(before);
+    });
+  }
+
   // ---- 折线图：一条虚线准线跟着鼠标找最近的时间点，每条线上一个带白圈的点，
   //      提示里列出这一刻的全部序列（值在前、名字在后，大的在上）。
-  //      也能 Tab 进图里用左右方向键逐点看。数据见 chart.render_lines 的 tooltip
+  //      也能 Tab 进图里用左右方向键逐点看。数据见 chart.render_lines 的 tooltip。
+  //      有图例的（客户页「调用次数」）点签挑几条只看它们，纵轴跟着它们重新算
   for (const holder of document.querySelectorAll('[data-line-src]')) {
     const source = document.getElementById(holder.dataset.lineSrc);
     const svg = holder.querySelector('.line-chart');
@@ -446,7 +569,11 @@
     if (!overlay || !cross || !data.x || !data.x.length) continue;
     const count = data.x.length;
     const number = function (v) { return Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 }); };
+    const base = Number(svg.dataset.base) || 0;
+    const picked = new Set();   // 图例里挑中的那几条（序号），空的 = 全看
+    let lift = 1;               // 挑了几条以后纵向拉高了几倍（按基线往上拉），1 = 服务端画的原样
     let current = -1;
+    const yAt = function (y) { return base ? base - (base - y) * lift : y; };
 
     // 放大了（见下面的「沿横轴放大、拖动」）：时间点的位置跟着换算
     const zx = function (x) { return svg.zoomX ? svg.zoomX(x) : x; };
@@ -466,18 +593,21 @@
       const x = zx(data.x[index]);
       cross.setAttribute('transform', 'translate(' + x + ',0)');
       cross.style.opacity = '1';
-      const rows = data.series.map(function (s) { return { name: s.name, color: s.color, value: s.v[index], y: s.y[index] }; });
+      const rows = data.series.map(function (s, i) {
+        return { name: s.name, color: s.color, value: s.v[index], y: yAt(s.y[index]), on: !picked.size || picked.has(i) };
+      });
       rows.forEach(function (row, i) {
         const dot = dots[i];
         if (!dot) return;
         dot.setAttribute('cx', x);
         dot.setAttribute('cy', row.y);
         dot.setAttribute('fill', row.color);
-        dot.style.opacity = row.value > 0 ? '1' : '0';
+        dot.style.opacity = row.on && row.value > 0 ? '1' : '0';
       });
-      const live = rows.filter(function (r) { return r.value > 0; }).sort(function (a, b) { return b.value - a.value; });
-      const total = rows.reduce(function (sum, r) { return sum + r.value; }, 0);
-      fillTip(data.labels[index], '合计 ' + number(total) + ' ' + data.unit,
+      const live = rows.filter(function (r) { return r.on && r.value > 0; }).sort(function (a, b) { return b.value - a.value; });
+      const total = rows.reduce(function (sum, r) { return sum + (r.on ? r.value : 0); }, 0);
+      // 挑了几条的时候只列这几条，合计也只加它们；只剩一条就不写合计（图上已经只剩它了）
+      fillTip(data.labels[index], !picked.size || live.length > 1 ? '合计 ' + number(total) + ' ' + data.unit : '',
               live.map(function (r) { return { name: r.name, color: r.color, value: number(r.value) }; }),
               live.length ? '' : '这个时间点没有调用');
       // 提示挨着准线、和这一刻最高的那个点齐平，右边放不下就放左边
@@ -513,39 +643,77 @@
       e.preventDefault();
       show(Math.max(0, Math.min(count - 1, index)));
     });
+
+    // 图例挑了几条：别的线、面积、点、线尾头像淡出（style.css）；纵轴按挑中的重新算——挑中的线和面积按基线拉高
+    // lift 倍（transform，线宽照旧：non-scaling-stroke），点挪到新的高度，线尾头像按新的末端重新排（end_spots）。
+    // 放大缩放挪的是横坐标（线的 d、点的 cx），和这里不打架
+    const legend = document.querySelector('[data-legend-for="' + holder.id + '"]');
+    if (!legend || !base) continue;
+    const plotTop = Number(svg.dataset.top), ymax = Number(svg.dataset.ymax);
+    const grid = svg.querySelector('.chart-grid');
+    const gridOriginal = grid ? [...grid.children].map(function (el) { return el.cloneNode(true); }) : [];
+    const shapes = [...svg.querySelectorAll('.chart-area[data-s], .chart-line[data-s]')];
+    const markers = [...svg.querySelectorAll('.chart-marker[data-s]')].map(function (el) {
+      return { el: el, y: Number(el.getAttribute('cy')) };
+    });
+    const faces = [...svg.querySelectorAll('.chart-endavatar[data-s]')].map(function (g) {
+      const face = g.querySelector('.end-face'), link = g.querySelector('.end-link');
+      return { s: Number(g.dataset.s), face: face, link: link, end: Number(link.getAttribute('y1')),
+               spot: Number(face.getAttribute('cy')),
+               texts: [...g.querySelectorAll('text')].map(function (t) { return [t, Number(t.getAttribute('y'))]; }) };
+    });
+    const draw = function (times) {
+      lift = times;
+      const how = lift === 1 ? '' : 'translate(0 ' + (base * (1 - lift)).toFixed(2) + ') scale(1 ' + lift.toFixed(5) + ')';
+      for (const el of shapes) { if (how) el.setAttribute('transform', how); else el.removeAttribute('transform'); }
+      for (const m of markers) m.el.setAttribute('cy', yAt(m.y).toFixed(2));
+      const shown = faces.filter(function (f) { return !picked.size || picked.has(f.s); })
+        .map(function (f) { return { f: f, y: yAt(f.end) }; })
+        .sort(function (a, b) { return a.y - b.y; });
+      const spots = endSpots(shown.map(function (one) { return one.y; }), plotTop + AVATAR_R, base - AVATAR_R);
+      shown.forEach(function (one, i) {
+        const f = one.f, spot = spots[i];
+        f.face.setAttribute('cy', spot.toFixed(2));
+        for (const pair of f.texts) pair[0].setAttribute('y', (pair[1] + spot - f.spot).toFixed(2));
+        f.link.setAttribute('y1', one.y.toFixed(2));
+        f.link.setAttribute('y2', spot.toFixed(2));
+        f.link.setAttribute('stroke-opacity', Math.abs(spot - one.y) > 1 ? '.55' : '0');
+      });
+    };
+    let frame = 0, waiting = 0;
+    legendPicker(legend, picked, function (before) {
+      for (const el of svg.querySelectorAll('[data-s]')) el.classList.toggle('is-focus', picked.has(Number(el.dataset.s)));
+      if (picked.size) svg.dataset.focus = [...picked].join(' '); else delete svg.dataset.focus;
+      // 纵轴：挑中的里面最高的那个点，照 chart.py 取整（render_lines 分 4 格）；全放回来就是原样
+      let plan = { step: 0 }, target = 1;
+      if (picked.size) {
+        const most = Math.max(0, ...data.series.filter(function (s, i) { return picked.has(i); })
+          .map(function (s) { return Math.max(0, ...s.v); }));
+        const step = niceStep(most || 1, 4), ticks = Math.max(1, Math.ceil((most || 1) / step - 1e-9));
+        plan = { step: step, ticks: ticks, scale: (base - plotTop) / (step * ticks) };
+        target = ymax / (step * ticks);
+      }
+      const leaving = data.series.some(function (s, i) { return (before === null || before.has(i)) && picked.size && !picked.has(i); });
+      cancelAnimationFrame(frame);
+      clearTimeout(waiting);
+      const from = lift;
+      const run = function () {
+        redrawAxis(grid, gridOriginal, plan, base, compactNumber);
+        if (calm || Math.abs(target - from) < 1e-6) { draw(target); return; }
+        const start = performance.now();
+        const step = function (now) {
+          const t = Math.min(1, (now - start) / 420);
+          draw(from + (target - from) * easeInOut(t));
+          if (t < 1) frame = requestAnimationFrame(step);
+        };
+        frame = requestAnimationFrame(step);
+      };
+      // 有要藏的：等它们淡出（0.18 秒）再动；只是多挑上一条、或者全放回来：马上动
+      if (leaving && !calm) waiting = setTimeout(run, 160); else run();
+    });
   }
 
   // ---- 堆叠柱状图：划到哪一格那一格亮、其余变淡；点图例挑几项，只看这几项，纵轴跟着它们重新算
-  // 下面几样和 chart.py 一样，两边要一起改：段与段之间的缝（BAR_GAP）、柱顶的圆角（BAR_RADIUS）、
-  // 刻度取整（_nice_step）、圆头柱子的路径（_round_top）、纵轴金额的写法（short_money）
-  const BAR_GAP = 2, BAR_RADIUS = 4;
-  function niceStep(span, intervals) {
-    if (span <= 0) return 1;
-    const rough = span / intervals;
-    const base = Math.pow(10, Math.floor(Math.log10(rough)));
-    for (const multiple of [1, 2, 2.5, 5, 10]) if (rough <= base * multiple) return base * multiple;
-    return base * 10;
-  }
-  function roundTop(x, top, w, bottom, radius) {
-    const r = Math.max(0, Math.min(radius, w / 2, bottom - top));
-    const f = function (n) { return n.toFixed(2); };
-    return 'M' + f(x) + ',' + f(bottom) + ' L' + f(x) + ',' + f(top + r) + ' Q' + f(x) + ',' + f(top) + ' ' + f(x + r) + ',' + f(top) +
-      ' L' + f(x + w - r) + ',' + f(top) + ' Q' + f(x + w) + ',' + f(top) + ' ' + f(x + w) + ',' + f(top + r) +
-      ' L' + f(x + w) + ',' + f(bottom) + ' Z';
-  }
-  function axisMoney(value, symbol) {
-    const v = Math.abs(value);
-    const text = v >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(2) + 'M'
-      : v >= 1e3 ? (v / 1e3).toFixed(1) + 'K' : v === 0 ? '0' : v.toFixed(2);
-    const unit = /[KMB]$/.test(text) ? text.slice(-1) : '';
-    let number = unit ? text.slice(0, -1) : text;
-    if (number.indexOf('.') >= 0) number = number.replace(/0+$/, '').replace(/\.$/, '');
-    return (value < 0 ? '-' : '') + symbol + number + unit;
-  }
-  const easeInOut = function (t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; };
-  // 系统开了「减弱动画」：柱子直接到位、纵轴不淡入；下面放大缩放也不做平滑
-  const calm = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
   for (const holder of document.querySelectorAll('[data-tip-src]')) {
     const source = document.getElementById(holder.dataset.tipSrc);
     const svg = holder.querySelector('.bar-chart');
@@ -581,14 +749,6 @@
 
     const legend = document.querySelector('[data-legend-for="' + holder.id + '"]');
     if (!legend) continue;
-    const toggles = [...legend.querySelectorAll('.legend-toggle')];
-    // 挑了以后才出来：一下子全放回来，不用一个个点掉
-    const reset = document.createElement('button');
-    reset.type = 'button';
-    reset.className = 'legend-reset';
-    reset.textContent = '显示全部';
-    reset.hidden = true;
-    legend.append(reset);
     const base = Number(svg.dataset.base), plotTop = Number(svg.dataset.top);
 
     // 每一段：哪一项、多少钱（悬浮数据里的 v）、服务端画的上下边、现在的上下边（动画走到哪了）。
@@ -623,34 +783,11 @@
       }
     };
 
-    // 纵轴：挑了几项就按它们重画刻度（横线、字的样子照服务端画的第一条），全放回来就换回原样。
-    // 金额的前缀（$）照第一个刻度「$0」
+    // 纵轴：挑了几项就按它们重画刻度，全放回来就换回原样。金额的前缀（$）照第一个刻度「$0」
     const grid = svg.querySelector('.chart-grid');
     const gridOriginal = grid ? [...grid.children].map(function (el) { return el.cloneNode(true); }) : [];
-    const gridLines = gridOriginal.filter(function (el) { return el.tagName.toLowerCase() === 'line'; });
-    const gridText = gridOriginal.find(function (el) { return el.tagName.toLowerCase() === 'text'; });
-    const symbol = gridText ? gridText.textContent.trim().replace(/0$/, '') : '';
-    const drawAxis = function (plan) {
-      if (!grid || !gridLines.length || !gridText) return;
-      let parts;
-      if (!plan.step) {
-        parts = gridOriginal.map(function (el) { return el.cloneNode(true); });
-      } else {
-        parts = [];
-        for (let tick = 0; tick <= plan.ticks; tick++) {
-          const y = base - plan.step * tick * plan.scale;
-          const line = (gridLines[tick === 0 ? 0 : Math.min(1, gridLines.length - 1)]).cloneNode(false);
-          line.setAttribute('y1', y.toFixed(2));
-          line.setAttribute('y2', y.toFixed(2));
-          const text = gridText.cloneNode(false);
-          text.setAttribute('y', (y + 4).toFixed(2));
-          text.textContent = axisMoney(plan.step * tick, symbol);
-          parts.push(line, text);
-        }
-      }
-      grid.replaceChildren.apply(grid, parts);
-      if (!calm && grid.animate) grid.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 260, easing: 'ease-out' });
-    };
+    const firstLabel = gridOriginal.find(function (el) { return el.tagName.toLowerCase() === 'text'; });
+    const symbol = firstLabel ? firstLabel.textContent.trim().replace(/0$/, '') : '';
 
     // 挑中的几项从基线起按原来的次序重新叠；纵轴按它们每天加起来最多的那天重新算（和 chart.py 一样取整），
     // 挑的都是小的，柱子也撑得起来。什么都没挑就是服务端画的原样
@@ -681,11 +818,7 @@
     };
 
     let frame = 0, waiting = 0;
-    // before：这次点之前看得见的那几项（null = 全看得见）
-    const apply = function (before) {
-      for (const t of toggles) t.setAttribute('aria-pressed', String(picked.has(Number(t.dataset.s))));
-      legend.classList.toggle('has-focus', picked.size > 0);
-      reset.hidden = picked.size === 0;
+    legendPicker(legend, picked, function (before) {
       for (const el of svg.querySelectorAll('[data-s]')) el.classList.toggle('is-focus', picked.has(Number(el.dataset.s)));
       if (picked.size) svg.dataset.focus = [...picked].join(' '); else delete svg.dataset.focus;
       if (!base || !plotTop) return;
@@ -709,7 +842,7 @@
       cancelAnimationFrame(frame);
       clearTimeout(waiting);
       const run = function () {
-        drawAxis(plan);
+        redrawAxis(grid, gridOriginal, plan, base, function (value) { return axisMoney(value, symbol); });
         // 段太多（「全部」几百天 × 好几项）就不动画了，直接到位
         if (calm || moves.length > 2400) { for (const m of moves) place(m[0], m[3], m[4]); return; }
         const start = performance.now();
@@ -722,20 +855,6 @@
       };
       // 有要藏的：等它们淡出（0.18 秒）再动；只是多挑上一项、或者全放回来：马上动
       if (leaving && !calm) waiting = setTimeout(run, 160); else run();
-    };
-    legend.addEventListener('click', function (event) {
-      const before = picked.size ? new Set(picked) : null;
-      if (event.target.closest('.legend-reset')) {
-        picked.clear();
-        // 用键盘按的：按钮马上藏起来，焦点交给第一个签，不丢到页面开头
-        if (document.activeElement === reset && toggles[0]) toggles[0].focus();
-      } else {
-        const button = event.target.closest('.legend-toggle');
-        if (!button) return;
-        const index = Number(button.dataset.s);
-        if (picked.has(index)) picked.delete(index); else picked.add(index);
-      }
-      apply(before);
     });
   }
 
@@ -972,7 +1091,7 @@
 
   for (const svg of document.querySelectorAll('svg[data-zoom]')) zoomable(svg);
 
-  // 手机上比屏幕宽、能左右滑的图（客户页「近 24 小时调用」、整行宽的柱状图）：一打开先停在最右边，最近的那几个小时、那几天
+  // 手机上比屏幕宽、能左右滑的图（客户页「调用次数」、整行宽的柱状图）：一打开先停在最右边，最近的那几个小时、那几天
   for (const wrap of document.querySelectorAll('.calls-chart, .wide-chart')) wrap.scrollLeft = wrap.scrollWidth;
 
   // ---- 气泡：悬浮的那个放大、其余变淡，提示里写名字、数和占比；
