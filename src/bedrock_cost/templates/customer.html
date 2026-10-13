@@ -198,18 +198,18 @@
   </article>
 
   {# 预估（原来是「还能用几天」）：账单晚 1~2 天，被 credits 抵掉时甚至一直是 0；这张看 CloudWatch 的用量 × 牌价，
-     近 7 天一天一根（UTC 日期，今天算到现在），按账号叠起来，颜色和「每日消费」一样，悬浮看每个账号；
-     点下面的账号挑几个只看它们（和每日消费一样，纵轴跟着它们重新算） #}
+     一天一根（UTC 日期，今天算到现在），按账号叠起来，颜色和「每日消费」一样，悬浮看每个账号；右上角选看多久
+     （近 7 天、近 30 天、全部）；点下面的账号挑几个只看它们（和每日消费一样，纵轴跟着它们重新算）。卡片窄：
+     看多久那一排和标题一行，说明挪到下面一整行 #}
   <article class="viz-card col-2" id="estimate" data-reveal>
     <div class="viz-head">
-      <div>
-        <h2 class="viz-title">预估</h2>
-        <p class="viz-sub">{{ estimate.start }} ~ {{ estimate.end }} · CloudWatch 用量 × 牌价，按 UTC 日期 · 以账单为准</p>
-      </div>
+      <h2 class="viz-title">预估</h2>
+      {{ range_switch(estimate_links, 'estimate', '正在读预估') }}
     </div>
     <div>
+      <p class="viz-sub">{{ estimate.start }} ~ {{ estimate.end }} · CloudWatch 用量 × 牌价，按 UTC 日期 · 以账单为准</p>
       <p class="viz-big"><span data-countup>{{ estimate.total | money0 }}</span>
-        <small>近 7 天预估{% if estimate.partial %}（有的没算上）{% endif %}</small></p>
+        <small>{{ estimate.what }}{% if estimate.partial %}（有的没算上）{% endif %}</small></p>
       <p class="viz-meta">今天到现在 <strong>{{ estimate.today | money }}</strong> · 昨天 <strong>{{ estimate.yesterday | money }}</strong></p>
     </div>
     <div class="viz-chart" id="cust-estimate" data-tip-src="cust-estimate-data">{{ estimate.chart.svg | safe }}</div>

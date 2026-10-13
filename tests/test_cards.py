@@ -484,35 +484,35 @@ class TestTableNotes:
 
 
 class TestDailyTrend:
-    """日报表格上面的折线图（近 7 天每天的账，到昨天为止）、累计消费下面的「↑ 昨天」、账号头像。"""
+    """日报表格上面的堆叠柱状图（近 7 天每天的账，到昨天为止）、累计消费下面的「↑ 昨天」、账号头像、生命周期。"""
 
     @staticmethod
     def accounts(count: int) -> list[Account]:
         return [Account(**{**JEFF.__dict__, "account": f"10000000000{index}", "email": f"user{index}@example.com"})
                 for index in range(count)]
 
-    def card(self, accounts, trends, faces=None):
+    def card(self, accounts, trends, faces=None, tags=None):
         emails = {a.account: a.email for a in accounts}
-        return alerts.daily_cards(TODAY, [row(a, 1) for a in accounts], emails, faces, trends)[0]
+        return alerts.daily_cards(TODAY, [row(a, 1) for a in accounts], emails, faces, trends, tags)[0]
 
-    def test_lines_go_by_spend_and_the_rest_are_named_under_the_chart(self):
+    def test_stacks_go_by_spend_and_the_rest_are_named_under_the_chart(self):
         busy, quiet, broken, small = self.accounts(4)
         trends = {busy.account: [5.0] * 7, quiet.account: [0.0] * 7, broken.account: None,
                   small.account: [0.0] * 6 + [1.0]}
         trend = self.card([busy, quiet, broken, small], trends).blocks[0]
         assert isinstance(trend, cards.Trend)
         assert trend.labels == [f"09-{day}" for day in range(21, 28)]          # 到昨天（09-27）为止
-        assert [line.name for line in trend.lines] == [busy.email, small.email]
+        assert [item.name for item in trend.series] == [busy.email, small.email]    # 花得多的叠在最底下
         assert trend.notes == [f"近 7 天没有消费：{quiet.email}", f"近 7 天的账没查到：{broken.email}"]
-        # 线的颜色按花得多少排色槽，线尾是账号头像
-        assert trend.lines[0].color == alerts._rgb(chart.color_for(0)) and trend.lines[0].face.text == "U"
+        # 颜色按花得多少排色槽
+        assert [item.color for item in trend.series] == [alerts._rgb(chart.color_for(slot)) for slot in (0, 1)]
 
     def test_more_than_eight_accounts_fold_into_other(self):
         many = self.accounts(10)
         trends = {a.account: [float(index + 1)] * 7 for index, a in enumerate(many)}
-        lines = self.card(many, trends).blocks[0].lines
-        assert len(lines) == 9 and lines[-1].name == "其他 2 个账号" and lines[-1].face is None
-        assert lines[-1].values == [3.0] * 7                                    # 花得最少的两个：1 + 2
+        series = self.card(many, trends).blocks[0].series
+        assert len(series) == 9 and series[-1].name == "其他 2 个账号"
+        assert series[-1].values == [3.0] * 7                                   # 花得最少的两个：1 + 2
 
     def test_no_spend_at_all_means_no_chart(self):
         quiet = self.accounts(2)
@@ -556,14 +556,31 @@ class TestDailyTrend:
         assert with_trend.width == 1200 and with_trend.width + with_trend.height <= 10000
         assert with_trend.height > without.height
 
-    def test_smooth_lines_never_dip_below_zero(self):
-        """单调样条：挨着 0 的那段不会冲到 0 下面（纵坐标越大越往下，0 在 y=100）。"""
-        points = [(0, 100), (10, 100), (20, 40), (30, 100), (40, 100), (50, 90)]
-        curve = cards._smooth(points)
-        assert all(y <= 100 + 1e-9 for _, y in curve)
-        assert curve[0] == points[0] and curve[-1] == pytest.approx(points[-1])
+    def test_each_bar_is_topped_with_its_day_total_and_the_legend_has_the_week(self):
+        """柱顶写这一天的合计（几个账号加起来），图例里写这几天一共多少、邮箱 @ 前面那段。"""
+        a, b = self.accounts(2)
+        trend = self.card([a, b], {a.account: [1000.0] * 7, b.account: [500.0] * 6 + [250.0]}).blocks[0]
+        pen = Recorder()
+        trend.layout(pen, 0, 0, 528, cards.TONES["ok"])
+        drawn = [text for _, text, _, _ in pen.texts]
+        tops = [text for _, text, _, anchor in pen.texts if anchor == "mm" and text.startswith("$")]
+        assert tops == [chart.short_money(1500)] * 6 + [chart.short_money(1250)]   # 两个加起来（纵轴的刻度靠右写，不算）
+        assert chart.short_money(7000) in drawn and chart.short_money(3250) in drawn  # 图例：7 天一共多少
+        assert a.email.split("@")[0] in drawn and a.email not in drawn
+        assert "U" not in drawn                                                 # 图例不放头像（头像在表格里）
 
-    def test_line_end_faces_keep_apart_and_stay_inside(self):
-        spots = cards._spread([150, 150, 151, 152], 9, 160, 21)
-        assert all(b - a >= 21 - 1e-9 for a, b in zip(spots, spots[1:]))
-        assert spots[-1] <= 160 and spots[0] >= 9
+    def test_lifecycle_tags_sit_after_the_id(self):
+        """生命周期画成副行 ID 后面的小标签（圆点是台账里这个标签的颜色）；没填邮箱的也有副行。"""
+        mailed, bare = self.accounts(2)
+        bare = Account(**{**bare.__dict__, "email": ""})
+        tags = {mailed.account: [("风控", "#d9534f"), ("结算", "#8a8a8a")], bare.account: [("正常", "#2f9e6a")]}
+        card = alerts.daily_cards(TODAY, [row(mailed, 1), row(bare, 1)], {mailed.account: mailed.email}, None, None,
+                                  tags)[0]
+        table = next(block for block in card.blocks if isinstance(block, cards.Table))
+        assert [cell.tags for cell in (r[0] for r in table.rows)] == [
+            [("风控", (217, 83, 79)), ("结算", (138, 138, 138))], [("正常", (47, 158, 106))]]
+        assert "风控" in table.strings() and "正常" in table.strings()
+        pen = Recorder()
+        assert table.layout(pen, 0, 0, 528, cards.TONES["ok"]) == cards.Table.HEAD + 2 * cards.Table.NOTED_ROW
+        uid_x, _, uid_width, _ = pen.find(mailed.account)
+        assert pen.find("风控")[0] > uid_x + uid_width
