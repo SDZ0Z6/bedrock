@@ -259,21 +259,33 @@ def daily_estimates(accounts: list[Account], start: date, end: date,
 # 客户页的预估（「预估」那张、「调用次数」上的今日预估）走这个名字：测试里默认换成不查的（见 tests/conftest.py）
 _estimate_days = daily_estimates
 
-# 「预估」看几天（含今天，今天算到现在）。按 UTC 日期：CloudWatch 的日桶就是在 UTC 零点切的
-ESTIMATE_DAYS = 7
+# 「预估」右上角选看多久，网址上是 ?estimate=（近 7 天是默认，不带）。一天一根，没有按小时的
+ESTIMATE_RANGES = (("7", "近 7 天"), ("30", "近 30 天"), ("all", "全部"))
 
 
-def _estimate_window() -> tuple[date, date]:
-    end = datetime.now(timezone.utc).date()
-    return end - timedelta(days=ESTIMATE_DAYS - 1), end
+def _estimate_window(view: customers.CustomerView, key: str) -> SimpleNamespace:
+    """「预估」看哪几天：按 UTC 日期（CloudWatch 的日桶就是在 UTC 零点切的），今天算到现在。全部从最早分过来的那个
+    账号算起，不早于 CloudWatch 按天能查的最早一天（455 天），和「调用次数」的全部一样。"""
+    key = key if key in dict(ESTIMATE_RANGES) else "7"
+    today = datetime.now(timezone.utc).date()
+    if key == "all":
+        first = min((h.joined for h in view.holdings if h.joined), default=today - timedelta(days=6))
+        start = max(min(first, today), today - timedelta(days=PERIODS["1d"][2] - 1))
+        what = f"{start:%m-%d} 起累计预估"
+    else:
+        start = today - timedelta(days=int(key) - 1)
+        what = f"{dict(ESTIMATE_RANGES)[key]}预估"
+    return SimpleNamespace(key=key, start=start, end=today, what=what)
 
 
 def _estimate_card(view: customers.CustomerView, names: dict[str, str], slots: dict[str, int],
-                   costs: dict[str, list[float]], partial: bool, start: date, end: date):
-    """「预估」（原来是「还能用几天」）：近 7 天每天的预估花费，按账号叠起来，颜色和「每日消费」一样。账单晚 1~2 天、
-    被 credits 抵成 0 的时候，这张照样看得到实际用了多少。和「调用次数」按天看的一个规矩：每个账号只算它算这个客户的
-    那几天（分过来那天起，到风控、换下、用完、结算的前一天）。costs 是 daily_estimates 查好的 {account.key: 每天的钱}。
+                   costs: dict[str, list[float]], partial: bool, window: SimpleNamespace):
+    """「预估」（原来是「还能用几天」）：每天的预估花费（右上角选近 7 天、近 30 天、全部），按账号叠起来，颜色和
+    「每日消费」一样。账单晚 1~2 天、被 credits 抵成 0 的时候，这张照样看得到实际用了多少。和「调用次数」按天看的一个
+    规矩：每个账号只算它算这个客户的那几天（分过来那天起，到风控、换下、用完、结算的前一天）。costs 是
+    daily_estimates 查好的 {account.key: 每天的钱}，window 是 _estimate_window。
     """
+    start, end = window.start, window.end
     stamps = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     width = len(stamps)
     per_account: dict[str, list[float]] = {}
@@ -294,7 +306,7 @@ def _estimate_card(view: customers.CustomerView, names: dict[str, str], slots: d
                              fmt=money, axis=customers.short_money)
     return SimpleNamespace(chart=bars, total=sum(totals), today=totals[-1], yesterday=totals[-2] if width > 1 else 0.0,
                            partial=partial, start=stamps[0].strftime("%m-%d"), end=stamps[-1].strftime("%m-%d"),
-                           today_by_key=today_by_key)
+                           today_by_key=today_by_key, key=window.key, what=window.what)
 
 
 # 「调用次数」右上角选看多久，网址上是 ?calls=（近 24 小时是默认，不带）
@@ -435,6 +447,15 @@ def _spend_marks(view: customers.CustomerView, stamps: list[date], names: dict[s
 
 
 # ---------------------------------------------------------------- 客户详情
+# 客户页三排「看多久」各自的默认值：网址上不带
+_RANGE_DEFAULTS = {"spend": "30", "calls": "24h", "estimate": "7"}
+
+
+def _ranges(**picked: str) -> dict[str, str | None]:
+    """别的几排选了什么，写进这一排的链接：选的是默认值就不带（None）。"""
+    return {name: None if key == _RANGE_DEFAULTS[name] else key for name, key in picked.items()}
+
+
 def _detail_context(cid: str, refresh: bool = False):
     """(客户, CustomerView, 全部账号, 读不了的原因)。没有这个客户时客户是 None。"""
     accounts, all_customers, events, fatal = _ledger()
@@ -484,13 +505,13 @@ def detail(cid: str, **extra):
     trend = _spend_chart(per_account, stamps, names, height=230, width=1100, slots=slots,
                          marks=_spend_marks(view, stamps, names, slots))
     trend.label = spend.label
-    # 「预估」和「调用次数」上的今日预估一起查一次（近 7 天，UTC 日期，今天算到现在）：这几天在这个客户名下用过的
-    # 账号，停用的不查
-    est_start, est_end = _estimate_window()
+    # 「预估」和「调用次数」上的今日预估一起查一次（右上角选的那几天，UTC 日期，今天算到现在）：这几天在这个客户
+    # 名下用过的账号，停用的不查
+    window = _estimate_window(view, request.args.get("estimate") or "7")
     estimated = [h.account for h in view.holdings if h.account.enabled
-                 and (h.joined or date.min) <= est_end and (h.left or date.max) > est_start]
-    costs, partial = _estimate_days(estimated, est_start, est_end, refresh=refresh)
-    estimate = _estimate_card(view, names, slots, costs, partial, est_start, est_end)
+                 and (h.joined or date.min) <= window.end and (h.left or date.max) > window.start]
+    costs, partial = _estimate_days(estimated, window.start, window.end, refresh=refresh)
+    estimate = _estimate_card(view, names, slots, costs, partial, window)
     # 「调用次数」右上角也选看多久：近 24 小时（默认）按小时，其余按天
     calls = _calls_chart(view, names, slots, request.args.get("calls") or "24h", refresh=refresh,
                          today_costs=estimate.today_by_key, partial=partial)
@@ -526,12 +547,14 @@ def detail(cid: str, **extra):
         stage_rows=stage_rows,
         trend=trend,
         spend=spend,
-        # 两排「看多久」互相带着对方选的，切一排另一排不变
-        spend_links=spend_links("customers.detail", spend.key, cid=customer.id,
-                                calls=None if calls.key == "24h" else calls.key),
+        # 三排「看多久」互相带着别的两排选的，切一排另外两排不变
+        spend_links=spend_links("customers.detail", spend.key, cid=customer.id, **_ranges(calls=calls.key,
+                                                                                      estimate=estimate.key)),
         calls=calls,
         calls_links=range_links("customers.detail", "calls", CALLS_RANGES, calls.key, "24h", cid=customer.id,
-                                spend=None if spend.key == "30" else spend.key),
+                                **_ranges(spend=spend.key, estimate=estimate.key)),
+        estimate_links=range_links("customers.detail", "estimate", ESTIMATE_RANGES, estimate.key, "7",
+                                   cid=customer.id, **_ranges(spend=spend.key, calls=calls.key)),
         estimate=estimate,
         timeline=timeline,
         timeline_fallback=_timeline_fallback(view, by_number),

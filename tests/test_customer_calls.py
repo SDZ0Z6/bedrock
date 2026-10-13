@@ -398,3 +398,52 @@ def test_预估_没有账号的客户(admin, fake_costs):
     text = scrape(estimate_card(html))
     assert "$0 近 7 天预估" in text and "今天到现在 $0.00 · 昨天 $0.00" in text and "这段时间没有数据" in text
     assert 'data-legend-for="cust-estimate"' not in html                 # 没有账号就没有签
+
+
+def switch_links(box: str) -> dict[str, str]:
+    """卡片右上角「看多久」那一排：{名字: 网址}。"""
+    return {scrape(label): href for href, label in
+            re.findall(r'<a class="seg-item[^"]*" href="([^"]+)"[^>]*>(.*?)</a>', box, re.S)}
+
+
+def test_预估_右上角选看多久_近7天近30天全部(admin, fake_costs, monkeypatch):
+    """一天一根，没有按小时的；网址上是 ?estimate=30 / all，近 7 天是默认、不带。"""
+    asked = []
+
+    def fake(accounts, start, end, refresh=False):              # 每个账号每天 $1，问多少天给多少天
+        asked.append((sorted(a.account for a in accounts), start, end))
+        return {a.key: [1.0] * ((end - start).days + 1) for a in accounts}, False
+
+    monkeypatch.setattr(customer_pages, "_estimate_days", fake)
+    make(admin)
+    post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
+    utc_today = datetime.now(timezone.utc).date()
+    box = estimate_card(detail(admin))
+    links = switch_links(box)
+    assert list(links) == ["近 7 天", "近 30 天", "全部"]
+    assert links["近 7 天"].endswith("/customers/C001#estimate") and "estimate=30" in links["近 30 天"]
+    assert re.search(r'<a class="seg-item is-on"[^>]*>近 7 天</a>', box)
+    assert asked[-1][1:] == (utc_today - timedelta(days=6), utc_today)
+
+    box = estimate_card(admin.get("/customers/C001?estimate=30").get_data(as_text=True))
+    assert asked[-1][1:] == (utc_today - timedelta(days=29), utc_today)
+    assert "近 30 天预估" in scrape(box) and len(bars(admin.get("/customers/C001?estimate=30").get_data(as_text=True))) == 30
+
+    # 全部：从最早分过来的那个账号算起（分过来的日期晚于启用日期的按启用日期算：LEDGER_ROWS 的启用日期）
+    html = admin.get("/customers/C001?estimate=all").get_data(as_text=True)
+    first = LEDGER_ROWS[0][8]
+    assert asked[-1][1:] == (first, utc_today)
+    assert f"{first:%m-%d} 起累计预估" in scrape(estimate_card(html))
+
+    admin.get("/customers/C001?estimate=24h")                         # 认不出的按默认的近 7 天
+    assert asked[-1][1:] == (utc_today - timedelta(days=6), utc_today)
+
+
+def test_预估_切看多久时别的两排照旧(admin, fake_costs):
+    """三排「看多久」互相带着：切每日消费、调用次数，预估选的不变；切预估，另外两排选的也不变。"""
+    make(admin)
+    html = admin.get("/customers/C001?estimate=30&calls=7&spend=90").get_data(as_text=True)
+    estimate_links = switch_links(estimate_card(html))
+    assert all("calls=7" in href and "spend=90" in href for href in estimate_links.values())
+    calls_links = switch_links(card(html))
+    assert all("estimate=30" in href and "spend=90" in href for href in calls_links.values())

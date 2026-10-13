@@ -374,16 +374,25 @@ class TestDaily:
         assert card.kind == "daily" and card.badge == "DAILY REPORT"
 
     def test_a_trend_of_the_last_seven_days_sits_above_the_table(self, ledger, fake_costs, sent):
-        """表格上面一张折线图：每个账号近 7 天每天的账（到昨天为止），花得多的在前。fake CE：每天 TAG 100、
-        UNTAG 50，折算后 ALPHA 152.50（UNTAG × 1.05）、BETA 155.00（× 1.10）。"""
+        """表格上面一张堆叠柱状图：近 7 天每天的账（到昨天为止），按账号叠起来，花得多的在最底下。fake CE：每天
+        TAG 100、UNTAG 50，折算后 ALPHA 152.50（UNTAG × 1.05）、BETA 155.00（× 1.10）。"""
         tg_ledger(ledger, {ALPHA: (True, CHAT_A), BETA: (True, CHAT_A)})
         run_daily(self.TODAY, log=quiet)
         card = sent.cards[0][1]
         trend = card.blocks[0]
         assert isinstance(trend, cards.Trend) and card.blocks[1] is table_of(card)
         assert trend.labels == [(self.TODAY - timedelta(days=7 - i)).strftime("%m-%d") for i in range(7)]
-        assert [line.name for line in trend.lines] == [BETA, ALPHA]
-        assert trend.lines[0].values == [pytest.approx(155.0)] * 7 and trend.lines[1].values == [pytest.approx(152.5)] * 7
+        assert [item.name for item in trend.series] == [BETA, ALPHA]
+        assert trend.series[0].values == [pytest.approx(155.0)] * 7 and trend.series[1].values == [pytest.approx(152.5)] * 7
+
+    def test_the_table_carries_the_lifecycle(self, ledger, fake_costs, sent):
+        """账号后面带着生命周期，圆点颜色是台账清单里的（默认清单：正常绿、风控红、结算灰）。"""
+        tg_ledger(ledger, {ALPHA: (True, CHAT_A), BETA: (True, CHAT_A)}, LIFECYCLE={ALPHA: "风控,结算"})
+        run_daily(self.TODAY, log=quiet)
+        first, second = (r[0] for r in table_of(sent.cards[0][1]).rows)
+        colors = excel_source.lifecycle_colors()
+        assert first.tags == [(name, alerts._rgb(colors[name])) for name in ("风控", "结算")]
+        assert second.tags == []
 
     def test_yesterday_sits_under_the_spend(self, ledger, fake_costs, sent):
         """累计消费下面一行：昨天的账让它涨了多少，一百块以上写到元；caption 里写到分。"""

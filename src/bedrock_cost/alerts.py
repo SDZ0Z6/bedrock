@@ -16,9 +16,10 @@
 
   日报      CE 实账，自启用日期累计到今天——和概览页调的是同一组函数
             （cumulative_range → cost_explorer.fetch_all → report.build_row），
-            数字一分不差。按群组 ID 拆，每个群只看到自己的账号。表格上面是每个
-            账号近 7 天每天的账单（到昨天为止，折线图），累计消费下面写着昨天的账
-            （↑），和每日消费同一个函数（usage_explorer.account_series）。
+            数字一分不差。按群组 ID 拆，每个群只看到自己的账号。表格上面是近 7 天
+            每天的账单（到昨天为止，按账号叠起来的柱状图），累计消费下面写着昨天的账
+            （↑），和每日消费同一个函数（usage_explorer.account_series）；账号后面带着
+            生命周期。
   用量切换  无用量 → 有用量、有用量 → 无用量时各发一条；持续在用不刷屏。
             「无用量」= 最近 TELEGRAM_IDLE_HOURS 个整点小时全是零调用。
   额度阈值  累计消费 = CE 实账（截至前天）+ CW 估算（昨天 + 今天），都套
@@ -55,7 +56,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from . import avatars, cards, config, cost_explorer, events, telegram, usage_explorer
+from . import avatars, cards, config, cost_explorer, events, excel_source, telegram, usage_explorer
 from .cards import (
     Card,
     Cell,
@@ -94,8 +95,10 @@ CE_SETTLED_LAG_DAYS = 2
 
 # 日报表格上面的趋势图看几天：到昨天为止（今天的账还没出），最后一天就是累计消费下面「↑」的那个数
 TREND_DAYS = 7
-# 趋势图最多画几条线，再多的并成「其他」（和网页上的图一样）
+# 趋势图最多叠几个账号，再多的并成「其他」（和网页上的图一样）
 TREND_LINES = 8
+# 生命周期标签不在台账的清单里时圆点画成灰的（和网页上一样）
+TAG_GRAY = "#87867f"
 
 
 # --------------------------------------------------------------- 状态
@@ -324,17 +327,18 @@ _RANGE_SHORT = {
 def daily_cards(
     today: date, rows: list[ReportRow], emails: dict[str, str] | None = None,
     faces: dict[str, avatars.Avatar] | None = None, trends: dict[str, list[float] | None] | None = None,
+    tags: dict[str, list[tuple[str, str]]] | None = None,
 ) -> list[Card]:
     """一个群的日报。账号多于 cards.MAX_TABLE_ROWS 个就分成几张发。
 
-    emails 是 {账号 ID: 账号邮箱}、faces 是 {账号 ID: 账号头像}：ReportRow 上没有，由调用方从台账里查好传进来
-    （没给头像的按邮箱算）。trends 是 daily_spend 查的近 7 天每天的账：给了才画表格上面的趋势图、
-    累计消费下面的「↑ 昨天」。
+    emails 是 {账号 ID: 账号邮箱}、faces 是 {账号 ID: 账号头像}、tags 是 {账号 ID: [(生命周期, 颜色 #rrggbb)]}：
+    ReportRow 上没有，由调用方从台账里查好传进来（没给头像的按邮箱算）。trends 是 daily_spend 查的近 7 天每天的
+    账：给了才画表格上面的柱状图、累计消费下面的「↑ 昨天」。
     """
     size = cards.MAX_TABLE_ROWS
     chunks = [rows[start:start + size] for start in range(0, len(rows), size)] or [[]]
     return [
-        _daily_card(today, chunk, len(rows), index, len(chunks), emails or {}, faces or {}, trends or {})
+        _daily_card(today, chunk, len(rows), index, len(chunks), emails or {}, faces or {}, trends or {}, tags or {})
         for index, chunk in enumerate(chunks, start=1)
     ]
 
@@ -384,10 +388,10 @@ def _arrow(value: float) -> str:
     return ("↓ " if round(value, 2) < 0 else "↑ ") + text
 
 
-def _trend(today: date, rows: list[ReportRow], emails: dict[str, str], faces: dict[str, avatars.Avatar],
+def _trend(today: date, rows: list[ReportRow], emails: dict[str, str],
            trends: dict[str, list[float] | None]) -> cards.Trend | None:
-    """表格上面的折线图：这张卡上的每个账号一条线，近 7 天每天的账。一分钱都没花的不画线，和查不到的一起
-    在图下面点名；花得多的在前，8 条以外并成「其他」。一条线都没有就不画这张图。"""
+    """表格上面的堆叠柱状图：近 7 天每天一根，这张卡上的账号叠起来，花得多的在最底下，8 个以外并成「其他」。
+    一分钱都没花的不叠进去，和查不到的一起在图下面点名；一个都没花就不画这张图。"""
     start, _ = _trend_window(today)
     labels = [(start + timedelta(days=i)).strftime("%m-%d") for i in range(TREND_DAYS)]
     spent, quiet, missing = [], [], []
@@ -404,23 +408,22 @@ def _trend(today: date, rows: list[ReportRow], emails: dict[str, str], faces: di
         return None
     spent.sort(key=lambda item: -sum(item[2]))
     keep, rest = spent[:TREND_LINES], spent[TREND_LINES:]
-    lines = [
-        cards.TrendLine(name=who, values=values, color=_rgb(color_for(slot)),
-                        face=cards.account_face(faces.get(number), emails.get(number, ""), number))
-        for slot, (number, who, values) in enumerate(keep)
+    series = [
+        cards.TrendSeries(name=who, values=values, color=_rgb(color_for(slot)))
+        for slot, (_, who, values) in enumerate(keep)
     ]
     if rest:
         merged = [sum(day) for day in zip(*(values for _, _, values in rest))]
-        lines.append(cards.TrendLine(name=f"其他 {len(rest)} 个账号", values=merged, color=_rgb(OTHER_COLOR)))
+        series.append(cards.TrendSeries(name=f"其他 {len(rest)} 个账号", values=merged, color=_rgb(OTHER_COLOR)))
     notes = ([f"近 7 天没有消费：{'、'.join(quiet)}"] if quiet else []) + (
         [f"近 7 天的账没查到：{'、'.join(missing)}"] if missing else [])
-    return cards.Trend(title="近 7 天消费", labels=labels, lines=lines, hint="Cost Explorer 账单 · 最近一两天可能还没出完",
-                       notes=notes)
+    return cards.Trend(title="近 7 天消费", labels=labels, series=series,
+                       hint="Cost Explorer 账单 · 最近一两天可能还没出完", notes=notes)
 
 
 def _daily_card(
     today: date, rows: list[ReportRow], everyone: int, index: int, total: int, emails: dict[str, str],
-    faces: dict[str, avatars.Avatar], trends: dict[str, list[float] | None],
+    faces: dict[str, avatars.Avatar], trends: dict[str, list[float] | None], tags: dict[str, list[tuple[str, str]]],
 ) -> Card:
     table: list[list[Cell]] = []
     notes: list[tuple[str, str]] = []
@@ -429,10 +432,11 @@ def _daily_card(
         uid = row.account
         email = emails.get(uid, "")
         face = cards.account_face(faces.get(uid), email, uid)
+        lifecycle = [(name, _rgb(color)) for name, color in tags.get(uid, [])]
         budget = Cell(_money(row.budget)) if row.budget > 0 else Cell("未设额度", "muted")
         if not row.has_numbers:
-            table.append([Cell(email or uid, mark="danger", note=uid if email else "", face=face), budget,
-                          Cell("查询失败", "danger"), Cell("—", "muted")])
+            table.append([Cell(email or uid, mark="danger", note=uid if email else "", face=face, tags=lifecycle),
+                          budget, Cell("查询失败", "danger"), Cell("—", "muted")])
             notes.append(("danger", f"{uid} 查询失败：{row.error}"))
             lines.append(f"{_uid(uid, email)} 查询失败")
             continue
@@ -462,13 +466,14 @@ def _daily_card(
         yesterday = recent[-1] if recent else None
         under = [f"截至 {stale}" if stale else "", _arrow(yesterday) if yesterday is not None else ""]
         spent = Cell(_money(row.total_cost), "warn" if stale else "", note=" · ".join(part for part in under if part))
-        table.append([Cell(email or uid, mark=mark, note=uid if email else "", face=face), budget, spent, balance])
+        table.append([Cell(email or uid, mark=mark, note=uid if email else "", face=face, tags=lifecycle),
+                      budget, spent, balance])
         remaining = f" · 剩余额度 {_money(row.balance)}" if row.budget > 0 else ""
         last = f" · 昨天 {_money(yesterday)}" if yesterday is not None else ""
         flagged = f"（{'，'.join(flags)}）" if flags else ""
         lines.append(f"{_uid(uid, email)} 累计消费 {_money(row.total_cost)}{remaining}{last}{flagged}")
 
-    trend = _trend(today, rows, emails, faces, trends) if trends else None
+    trend = _trend(today, rows, emails, trends) if trends else None
     blocks: list = [*([trend] if trend else []), Table(["账号", "额度", "累计消费", "剩余额度"], table)]
     if notes:
         blocks.append(Notes("需要注意", notes))
@@ -964,20 +969,32 @@ def run_daily(
         if row.error:
             summary.problems.append(f"{account.account} 查不到 CE：{row.error}")
 
-    # 表里账号那一格：头像、账号邮箱、账号 ID。ReportRow 上没有邮箱和头像，按账号 ID 从台账里查
+    # 表里账号那一格：头像、账号邮箱、账号 ID、生命周期。ReportRow 上没有这些，按账号 ID 从台账里查
     emails = {account.account: account.email for account in targets if account.email}
     faces = {account.account: account.avatar for account in targets}
+    colors = _lifecycle_colors(log)
+    tags = {account.account: [(name, colors.get(name, TAG_GRAY)) for name in account.lifecycle] for account in targets}
     # 表格上面的趋势图、累计消费下面的「↑ 昨天」：近 7 天每天的账，一个账号查一次
     trends = daily_spend(targets, today, log)
     send = _dry_run_sender(log, save_dir) if dry_run else _send
     reached: list[str] = []
     for chat_id, rows in by_chat.items():
         # 分成几张发的，哪一张发成功了都算这个群收到了日报
-        if sum(_deliver(chat_id, card, summary, send, log) for card in daily_cards(today, rows, emails, faces, trends)):
+        if sum(_deliver(chat_id, card, summary, send, log)
+               for card in daily_cards(today, rows, emails, faces, trends, tags)):
             reached.append(chat_id)
     if reached and not dry_run:
         _record_daily(today, by_chat, reached)
     return summary
+
+
+def _lifecycle_colors(log) -> dict[str, str]:
+    """生命周期标签的颜色（台账的清单）。读不到就都画成灰的：标签是锦上添花，不能拦住日报。"""
+    try:
+        return excel_source.lifecycle_colors()
+    except Exception as exc:
+        log(f"[生命周期颜色] {type(exc).__name__}: {exc}")
+        return {}
 
 
 def _record_daily(today: date, by_chat: dict[str, list[ReportRow]], reached: list[str]) -> None:
