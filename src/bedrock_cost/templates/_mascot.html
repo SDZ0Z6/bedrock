@@ -6,7 +6,30 @@
        夜里睡着的那只头上冒「Zzz」
    哪一帧露出来由 CSS 管（.is-walking / .is-dancing / .is-sleeping，style.css 的「小家伙」那一节），走到哪、什么时候跳舞、
    说什么由 static/mascots.js 安排。spec 是 welcome.Mascot：一格画几个像素（整数倍才不糊）、眨眼错开多久、一开始站哪、
-   什么脾气。画多大最后由 CSS 定：一格 = --s + --grow 个像素（电脑的宽屏上 --grow 是 2，整只大两号）；width / height 只是兜底 #}
+   什么脾气。画多大最后由 CSS 定：一格 = --s + --grow 个像素（电脑的宽屏上 --grow 是 2，整只大两号）；width / height 只是兜底。
+   每个页面底下那只（pet()，static/pet.js）是同一套格子 #}
+
+{# 小家伙本身：10 × 8 的格子。两套眼睛外面包一层 m-look：每个页面底下那只的眼睛跟着鼠标，整层挪一格（style.css 的 --lx、--ly） #}
+{% macro _sprite(scale) -%}
+  <svg class="mascot-sprite" viewBox="0 0 10 8" width="{{ 10 * scale }}" height="{{ 8 * scale }}"
+       shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+    <rect x="1" y="0" width="8" height="6"/>
+    <g class="m-arms-down"><rect x="0" y="2" width="1" height="2"/><rect x="9" y="2" width="1" height="2"/></g>
+    <g class="m-arms-up"><rect x="0" y="1" width="1" height="2"/><rect x="9" y="1" width="1" height="2"/></g>
+    <g class="m-look">
+      <g class="m-eyes m-eyes-front"><rect x="2" y="1" width="1" height="1"/><rect x="7" y="1" width="1" height="1"/></g>
+      <g class="m-eyes m-eyes-side"><rect x="3" y="1" width="1" height="1"/><rect x="8" y="1" width="1" height="1"/></g>
+    </g>
+    <g class="m-scarf"><rect x="1" y="3" width="8" height="1"/><rect x="6" y="4" width="1" height="2"/></g>
+    <g class="m-legs-stand"><rect x="1" y="6" width="1" height="2"/><rect x="3" y="6" width="1" height="2"/>
+      <rect x="6" y="6" width="1" height="2"/><rect x="8" y="6" width="1" height="2"/></g>
+    <g class="m-legs-a"><rect x="1" y="6" width="1" height="2"/><rect x="3" y="6" width="1" height="1"/>
+      <rect x="6" y="6" width="1" height="2"/><rect x="8" y="6" width="1" height="1"/></g>
+    <g class="m-legs-b"><rect x="1" y="6" width="1" height="1"/><rect x="3" y="6" width="1" height="2"/>
+      <rect x="6" y="6" width="1" height="1"/><rect x="8" y="6" width="1" height="2"/></g>
+  </svg>
+{%- endmacro %}
+
 {% macro mascot(spec) -%}
   <button class="mascot" type="button" data-mascot data-start="{{ spec.start }}" data-mood="{{ spec.mood }}"
           style="--s: {{ spec.scale }}; --blink: {{ spec.blink }}s" aria-label="像素小家伙：点一下听它说一句">
@@ -22,25 +45,31 @@
       <svg class="mascot-prop prop-petal" viewBox="0 0 3 2" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
         <rect x="0" y="0" width="2" height="1"/><rect x="1" y="1" width="2" height="1"/>
       </svg>
-      <svg class="mascot-sprite" viewBox="0 0 10 8" width="{{ 10 * spec.scale }}" height="{{ 8 * spec.scale }}"
-           shape-rendering="crispEdges" aria-hidden="true" focusable="false">
-        <rect x="1" y="0" width="8" height="6"/>
-        <g class="m-arms-down"><rect x="0" y="2" width="1" height="2"/><rect x="9" y="2" width="1" height="2"/></g>
-        <g class="m-arms-up"><rect x="0" y="1" width="1" height="2"/><rect x="9" y="1" width="1" height="2"/></g>
-        <g class="m-eyes m-eyes-front"><rect x="2" y="1" width="1" height="1"/><rect x="7" y="1" width="1" height="1"/></g>
-        <g class="m-eyes m-eyes-side"><rect x="3" y="1" width="1" height="1"/><rect x="8" y="1" width="1" height="1"/></g>
-        <g class="m-scarf"><rect x="1" y="3" width="8" height="1"/><rect x="6" y="4" width="1" height="2"/></g>
-        <g class="m-legs-stand"><rect x="1" y="6" width="1" height="2"/><rect x="3" y="6" width="1" height="2"/>
-          <rect x="6" y="6" width="1" height="2"/><rect x="8" y="6" width="1" height="2"/></g>
-        <g class="m-legs-a"><rect x="1" y="6" width="1" height="2"/><rect x="3" y="6" width="1" height="1"/>
-          <rect x="6" y="6" width="1" height="2"/><rect x="8" y="6" width="1" height="1"/></g>
-        <g class="m-legs-b"><rect x="1" y="6" width="1" height="1"/><rect x="3" y="6" width="1" height="2"/>
-          <rect x="6" y="6" width="1" height="1"/><rect x="8" y="6" width="1" height="2"/></g>
-      </svg>
+      {{ _sprite(spec.scale) }}
     </span>
     <span class="mascot-zzz" aria-hidden="true"><i>z</i><i>z</i><i>Z</i></span>
     <span class="mascot-shadow" aria-hidden="true"></span>
   </button>
+{%- endmacro %}
+
+{# 每个页面底下那只（pet.py、static/pet.js）：整个窗口是它的屋子，一层盖满窗口、不拦点击的图层里只有它自己、
+   对话框和右键菜单能点。对话框不放在它身上：它在墙上、顶上是转着的，字不能跟着倒过来。
+   图层一开始是 hidden：pet.js 把它放好了才露出来（没开 JS 就不出来，一只不会动的小家伙没意思） #}
+{% macro pet() -%}
+  <div class="pet-layer" data-pet-layer hidden>
+    <button class="mascot pet" type="button" data-pet
+            aria-label="像素小家伙：点一下它蹦一下，按住能拖着走、扔出去；右键可以收起来">
+      <span class="mascot-flip">{{ _sprite(5) }}</span>
+      <span class="mascot-shadow" aria-hidden="true"></span>
+    </button>
+    <p class="pet-bubble" data-pet-bubble hidden></p>
+    <div class="pet-menu" data-pet-menu role="menu" aria-label="小家伙" hidden>
+      <button type="button" role="menuitem" data-pet-off>
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m4.5 4.5 7 7m0-7-7 7"/></svg>
+        收起小家伙</button>
+      <p class="pet-menu-note">在「我的资料」里能再打开</p>
+    </div>
+  </div>
 {%- endmacro %}
 
 {# ---------------------------------------------------------------- 风景：同一套像素画法

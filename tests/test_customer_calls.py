@@ -95,7 +95,7 @@ def test_默认近24小时_一个账号一条线_线尾是头像_下面的签能
 
 
 def test_和每日消费换了位置_在预估左边(admin, fake_costs):
-    """调用次数和「预估」（原来是「还能用几天」）一排（占三分之二宽）；每日消费挪到图的最后，整行宽。"""
+    """调用次数和「预估」（原来是「还能用几天」）一排，各占一半宽；每日消费挪到图的最后，整行宽。"""
     make(admin)
     html = detail(admin)
     assert (html.index(">调用次数<") < html.index('<h2 class="viz-title">预估</h2>') < html.index(">每日消费<")
@@ -103,7 +103,7 @@ def test_和每日消费换了位置_在预估左边(admin, fake_costs):
     assert ">还能用几天<" not in html
     calls = html.rindex("<article", 0, html.index(">调用次数<"))
     spend = html.rindex("<article", 0, html.index(">每日消费<"))
-    assert html.startswith('<article class="viz-card col-4" id="calls"', calls)
+    assert html.startswith('<article class="viz-card col-3" id="calls"', calls)            # 和预估各占一半宽
     assert html.startswith('<article class="viz-card col-6" id="spend"', spend)
 
 
@@ -339,7 +339,7 @@ def test_预估_近7天每天一根_按账号叠_今天算到现在(admin, fake_
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
     html = detail(admin)
     box = estimate_card(html)
-    assert box.startswith('<article class="viz-card col-2" id="estimate"')
+    assert box.startswith('<article class="viz-card col-3" id="estimate"')
     text = scrape(box)
     assert "$287 近 7 天预估" in text and "有的没算上" not in text
     assert "今天到现在 $71.00 · 昨天 $61.00" in text
@@ -447,3 +447,39 @@ def test_预估_切看多久时别的两排照旧(admin, fake_costs):
     assert all("calls=7" in href and "spend=90" in href for href in estimate_links.values())
     calls_links = switch_links(card(html))
     assert all("estimate=30" in href and "spend=90" in href for href in calls_links.values())
+
+
+# ====================================================================== 切「看多久」只换那一张卡片
+@pytest.mark.parametrize("part, title", [("calls", "调用次数"), ("estimate", "预估"), ("spend", "每日消费")])
+def test_切看多久只取回那一张卡片(admin, fake_costs, part, title):
+    """?part=calls / estimate / spend：只给这一张卡片（和整页上的同一份宏），不画整页；链接带着另外两排选的。"""
+    make(admin)
+    post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
+    html = admin.get(f"/customers/C001?part={part}&calls=7&estimate=30&spend=90").get_data(as_text=True)
+    assert "<html" not in html and "<nav" not in html
+    assert html.strip().startswith(f'<article class="viz-card col-') and f'id="{part}" data-reveal data-part="{part}"' in html
+    assert f'<h2 class="viz-title">{title}</h2>' in html
+    links = switch_links(html)
+    assert all("part=" not in href for href in links.values())                 # 链接是整页的网址（没开 JS 照样能用）
+    others = {"calls": "calls=7", "estimate": "estimate=30", "spend": "spend=90"}
+    assert all(all(value in href for name, value in others.items() if name != part) for href in links.values())
+
+
+def test_整页上三张卡片都能只换(admin, fake_costs):
+    make(admin)
+    html = detail(admin)
+    assert [part for part in re.findall(r'data-part="(\w+)"', html)] == ["calls", "estimate", "spend"]
+    assert "<html" in admin.get("/customers/C001?part=timeline").get_data(as_text=True)     # 别的名字照常给整页
+
+
+def test_切看多久不刷新整页_脚本():
+    """app.js：点卡片右上角那一排，把选的写进现在的网址，带上 ?part= 取回那一张换上，地址栏跟着改，新卡片的图重新挂上
+    交互；挂在 window 的捕获阶段，比整页的「正在加载」先拦下；取不回来就整页跳过去。"""
+    from bedrock_cost import config as cfg
+
+    js = (cfg.BASE_DIR / "src" / "bedrock_cost" / "static" / "app.js").read_text(encoding="utf-8")
+    for piece in ("function initCharts(root) {", "initCharts(document);", "closest('[data-part] .seg-item[href]')",
+                  "part.searchParams.set('part', name);", "card.replaceWith(fresh);",
+                  "history.replaceState(history.state, '', page.pathname + page.search + page.hash);",
+                  "initCharts(fresh);", ".catch(function () { location.href = link.href; });", "}, true);"):
+        assert piece in js, piece

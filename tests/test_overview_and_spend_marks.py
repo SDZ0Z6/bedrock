@@ -16,6 +16,7 @@
 再一轮：
 - 所有进度条滚进屏幕才从左往右长出来（每根条上都有 data-reveal，app.js 加 .in 之前动画停在第一帧）；
 - 概览、客户列表、客户页、账号页摘要的图都叫「每日消费」，右上角一排：近 7 天、近 30 天（默认）、近 90 天、全部。
+  后来客户页的默认改成了近 7 天（别的页面还是近 30 天）。
 
 再一轮：图例能挑几个账号（点一个加一个，再点放回去，挑了以后有「显示全部」），挑中的从底下重新叠起来。
 账号页成本明细不并「其他」（在 test_account_pages、test_usage_explorer 里）。
@@ -123,6 +124,19 @@ def test_余额卡片写着已使用多少_额度使用拿掉了(admin, fake_cos
     assert scrape(box).count("已使用 $") == 3                                    # 合计一行 + 两个账号各一行
 
 
+def test_余额里的账号点了进它的账号页(admin, fake_costs):
+    """使用中的每一行整行是一个链接（a.bal-row）；下面不算进余额的（风控、待结算）邮箱也能点。"""
+    make(admin)
+    post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
+    post(admin, "/customers/C001/risk", key=BETA, action="mark", date=date.today().isoformat())
+    box = card(detail(admin), "余额")
+    rows = re.findall(r'<a class="bal-row" style="--i: \d+" href="([^"]+)"\s+data-loading="正在读这个账号"', box)
+    assert rows == [f"/account/{ALPHA.split('#')[0]}/"]
+    note = box[box.index('<p class="bal-note">'):]
+    assert f'<a href="/account/{BETA.split("#")[0]}/" data-loading="正在读这个账号"' in note
+    assert "风控 · 待替换，没用完的" in scrape(note)
+
+
 # ====================================================================== 5. 每日消费
 def spend_card(html: str) -> str:
     return card(html, "每日消费")
@@ -133,15 +147,16 @@ def bars(html: str) -> int:
 
 
 def test_每日消费_不写日均_能选看多久(admin, fake_costs):
+    """客户页默认近 7 天（概览、客户列表、账号页是近 30 天）：默认那一档网址上不带。"""
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA])
     html = detail(admin)
     box = spend_card(html)
     assert "日均" not in box and 'id="spend"' in box
-    assert switch(box) == [("近 7 天", "/customers/C001?spend=7", False), ("近 30 天", "/customers/C001", True),
+    assert switch(box) == [("近 7 天", "/customers/C001", True), ("近 30 天", "/customers/C001?spend=30", False),
                            ("近 90 天", "/customers/C001?spend=90", False), ("全部", "/customers/C001?spend=all", False)]
-    assert bars(html) == 30 and "近 30 天" in scrape(box)
-    for key, count in (("7", 7), ("90", 90), ("nonsense", 30)):
+    assert bars(html) == 7 and "近 7 天" in scrape(box)
+    for key, count in (("30", 30), ("90", 90), ("nonsense", 7)):
         assert bars(admin.get(f"/customers/C001?spend={key}").get_data(as_text=True)) == count
     # 全部：从最早分过来的那个账号算起（ALPHA 的启用日期 08-01）
     everything = admin.get("/customers/C001?spend=all").get_data(as_text=True)
@@ -163,6 +178,8 @@ def test_每日消费看多久():
         ("90", 90, date(2026, 7, 14), "近 90 天"), ("all", 133, date(2026, 6, 1), "06-01 起全部"),
         ("30", 30, date(2026, 9, 12), "近 30 天"), ("30", 30, date(2026, 9, 12), "近 30 天"),   # 认不出：默认近 30 天
     ]
+    # 客户页认不出的是近 7 天
+    assert dashboard.spend_range("x", today, None, default="7").key == "7"
     # 全部：不早于 Cost Explorer 能查的最早一天；不知道从哪天起就和近 30 天一样长
     from bedrock_cost.dates import earliest_queryable
     assert dashboard.spend_range("all", today, date(2020, 1, 1)).start == earliest_queryable(today)
@@ -232,7 +249,7 @@ def test_竖虚线_启用到风控用了多少(admin, fake_costs):
     ]
     # 每条线跟着图例里的那个账号走：点 acct-one 只留它的两条
     assert [s for s, *_ in marks] == [index["acct-one"], index["acct-two"], index["acct-one"]]
-    # 近 30 天：启用那天不在图里，只有风控那条，「用了多少」照样从启用日算
+    # 默认近 7 天：启用那天不在图里，只有风控那条，「用了多少」照样从启用日算
     recent = marks_of(detail(admin))
     assert [(label, foot) for *_, foot, label in recent] == [
         (f"风控 {customers.short_money(used)}", f"{RANGE_START.strftime('%m-%d')} 起用了 ${used:,.2f}")]
@@ -366,7 +383,7 @@ def test_薄得看不见的段子也画上():
 
 def test_图例能挑几项_四张图都是():
     """概览、客户页（按账号）、客户列表（按客户）、收入和毛利（按项）的图例是同一套：签上没有写死「只看一个」。"""
-    for name, label in (("index.html", "挑几个账号只看它们"), ("customer.html", "挑几个账号只看它们"),
+    for name, label in (("index.html", "挑几个账号只看它们"), ("_customer_charts.html", "挑几个账号只看它们"),
                         ("customers.html", "挑几个客户只看它们"), ("ops.html", "挑几项只看它们")):
         html = (STATIC.parent / "templates" / name).read_text(encoding="utf-8")
         assert re.search(rf'<div class="legend-toggles" data-legend-for="[^"]+" role="group" aria-label="{label}">', html), name

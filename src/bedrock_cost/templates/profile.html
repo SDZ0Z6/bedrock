@@ -1,7 +1,8 @@
 {# 一个人的资料页：自己的（/me，profile_pages.me），或者管理员在用户管理里点开的别人（/users/<用户名>）。
    自己的：改显示名和头像（一个字或表情 + 八组底色，和账号头像一样，预览跟着输入变）；只读用户还能改密码。
    别人的：名字、头像只有本人能改；管理员在页头重置密码、停用 / 恢复、删除（_people_macros.html、people.js）。
-   都有：今天和最近 7 天在线多久（presence.py：页面开着就算），这个人的登录记录 #}
+   都有：今天和最近 7 天在线多久（presence.py：页面开着就算），这个人的登录记录。
+   自己的还有：每个页面底下那只像素小家伙出不出来（pet.py） #}
 {% extends "shell.html" %}
 {% from "_macros.html" import avatar %}
 {% from "_customer_macros.html" import cicon %}
@@ -154,6 +155,33 @@
       </div>
     </div>
   </section>
+
+  {% if own %}
+  {# 每个页面底下那只像素小家伙（pet.py、static/pet.js）出不出来：开关是普通表单，点了就存、回到这一页
+     （和账号管理表格里的开关一样）；右键点它「收起小家伙」也是改的这一项 #}
+  {% set pet_on = person.look.pet_on %}
+  <section class="card" aria-labelledby="pet-title">
+    <div class="card-head">
+      <div class="card-title">
+        <h2 id="pet-title">像素小家伙</h2>
+        <span class="card-note">每个页面底下走来走去的那只</span>
+      </div>
+    </div>
+    <div class="card-pad pet-pref">
+      <img class="pet-pref-art" src="{{ url_for('static', filename='mascot.svg') }}" alt="" width="40" height="32" decoding="async">
+      <div class="pet-pref-text">
+        <p class="pet-pref-state">{{ '在页面上' if pet_on else '收起来了' }}</p>
+        <p class="form-hint">大多在底下走来走去，偶尔爬上两边的墙、倒挂在顶上。鼠标放上去它说话，点一下蹦一下，按住能拖着走、扔出去；右键点它也能收起来。</p>
+      </div>
+      <form class="inline-form" method="post" action="{{ url_for('profile.pet') }}" data-loading="正在保存">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="pet" value="{{ 'off' if pet_on else 'on' }}">
+        <button class="switch" type="submit" role="switch" aria-checked="{{ 'true' if pet_on else 'false' }}"
+                aria-label="每个页面底下的像素小家伙" title="{{ '收起来' if pet_on else '叫它出来' }}"></button>
+      </form>
+    </div>
+  </section>
+  {% endif %}
 </div>
 
 <section class="card" aria-labelledby="logins-title">

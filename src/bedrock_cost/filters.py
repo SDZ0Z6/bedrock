@@ -8,7 +8,7 @@ from pathlib import Path
 
 from flask import Flask
 
-from . import chart, config, customers, presence
+from . import chart, config, customers, pet, presence
 from .auth import csrf_token, current_user, is_admin
 
 # 等待动效的素材。webm 优先——带 alpha 通道的版本只能是 webm（mp4 的 alpha
@@ -90,6 +90,8 @@ def register_filters(app: Flask) -> None:
     # 谁在用：只读用户的页面上不画改东西的按钮（is_admin()）。放全局而不是 context_processor，
     # 这样 import 进来的宏里也能用
     app.jinja_env.globals.update(is_admin=is_admin, current_user=current_user)
+    # 每个页面底下那只小家伙（shell.html）：右键收起来往哪发、这一页能说的话
+    app.jinja_env.globals["pet_conf"] = pet.conf
     # 客户：头像（插画或首字母）、国旗、地区名、按编号找客户——客户页、概览卡片、账号页都要画
     app.jinja_env.globals.update(
         avatar_info=customers.avatar_info,

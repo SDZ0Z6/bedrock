@@ -169,8 +169,16 @@
       revealWaits.delete(entry.target);
     }
   }, { threshold: 0.12 }) : null;
-  for (const box of document.querySelectorAll('[data-reveal]')) {
-    if (revealIo) revealIo.observe(box); else box.classList.add('in');
+  function observeReveals(root) {
+    for (const box of within(root, '[data-reveal]')) {
+      if (revealIo) revealIo.observe(box); else box.classList.add('in');
+    }
+  }
+  // root 里（连 root 自己）合 selector 的元素：root 是整页（document）或者换上去的那张卡片
+  function within(root, selector) {
+    const found = [...root.querySelectorAll(selector)];
+    if (root instanceof Element && root.matches(selector)) found.unshift(root);
+    return found;
   }
   function whenRevealed(el, run) {
     const box = el.closest('[data-reveal]');
@@ -182,9 +190,10 @@
   // ------------------------------------------------------------ 数字从 0 数上来
   // 额度仪表中间的大数字和使用率，跟着弧一起动（同样 1.2 秒、同一条缓动）。只在系统没开
   // 「减弱动画」时做；最后一帧换回服务端写好的原文，格式一个字都不差
-  if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    const ease = function (t) { return 1 - Math.pow(1 - t, 3); };
-    for (const el of document.querySelectorAll('[data-countup]')) {
+  const countEase = function (t) { return 1 - Math.pow(1 - t, 3); };
+  function countUp(root) {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    for (const el of within(root, '[data-countup]')) {
       const final = el.textContent.trim();
       const parts = final.match(/^([^\d]*)([\d,]+(?:\.(\d+))?)(.*)$/);
       if (!parts) continue;
@@ -200,7 +209,7 @@
         const step = function (now) {
           const t = Math.max(0, Math.min(1, (now - begin) / 1200));
           if (t < 1) {
-            el.textContent = format(target * ease(t));
+            el.textContent = format(target * countEase(t));
             requestAnimationFrame(step);
           } else {
             el.textContent = final;
@@ -596,15 +605,15 @@
   //      提示里列出这一刻的全部序列（值在前、名字在后，大的在上）。
   //      也能 Tab 进图里用左右方向键逐点看。数据见 chart.render_lines 的 tooltip。
   //      有图例的（客户页「调用次数」）点签挑几条只看它们，纵轴跟着它们重新算
-  for (const holder of document.querySelectorAll('[data-line-src]')) {
+  function initLineChart(holder) {
     const source = document.getElementById(holder.dataset.lineSrc);
     const svg = holder.querySelector('.line-chart');
-    if (!source || !svg) continue;
+    if (!source || !svg) return;
     const data = JSON.parse(source.textContent);
     const overlay = svg.querySelector('.chart-overlay');
     const cross = svg.querySelector('.chart-cross');
     const dots = [...svg.querySelectorAll('.chart-focus')];
-    if (!overlay || !cross || !data.x || !data.x.length) continue;
+    if (!overlay || !cross || !data.x || !data.x.length) return;
     const count = data.x.length;
     const number = function (v) { return Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 }); };
     const base = Number(svg.dataset.base) || 0;
@@ -686,7 +695,7 @@
     // lift 倍（transform，线宽照旧：non-scaling-stroke），点挪到新的高度，线尾头像按新的末端重新排（end_spots）。
     // 放大缩放挪的是横坐标（线的 d、点的 cx），和这里不打架
     const legend = document.querySelector('[data-legend-for="' + holder.id + '"]');
-    if (!legend || !base) continue;
+    if (!legend || !base) return;
     const plotTop = Number(svg.dataset.top), ymax = Number(svg.dataset.ymax);
     const grid = svg.querySelector('.chart-grid');
     const gridOriginal = grid ? [...grid.children].map(function (el) { return el.cloneNode(true); }) : [];
@@ -752,10 +761,10 @@
   }
 
   // ---- 堆叠柱状图：划到哪一格那一格亮、其余变淡；点图例挑几项，只看这几项，纵轴跟着它们重新算
-  for (const holder of document.querySelectorAll('[data-tip-src]')) {
+  function initBarChart(holder) {
     const source = document.getElementById(holder.dataset.tipSrc);
     const svg = holder.querySelector('.bar-chart');
-    if (!source || !svg) continue;
+    if (!source || !svg) return;
     const data = JSON.parse(source.textContent);
     const columns = [...svg.querySelectorAll('.bar-col')];
     const picked = new Set();   // 图例里挑中的那几项（序号），空的 = 全看
@@ -786,7 +795,7 @@
     }
 
     const legend = document.querySelector('[data-legend-for="' + holder.id + '"]');
-    if (!legend) continue;
+    if (!legend) return;
     const base = Number(svg.dataset.base), plotTop = Number(svg.dataset.top);
 
     // 每一段：哪一项、多少钱（悬浮数据里的 v）、服务端画的上下边、现在的上下边（动画走到哪了）。
@@ -1127,10 +1136,58 @@
     draw();
   }
 
-  for (const svg of document.querySelectorAll('svg[data-zoom]')) zoomable(svg);
+  // 一块地方里的图都挂上交互：进场动画、数字从 0 数上来、折线图、柱状图、放大拖动。页面打开时整页挂一次；
+  // 客户页切「看多久」换上新的那张卡片以后，只给这一张再挂一次
+  function initCharts(root) {
+    observeReveals(root);
+    countUp(root);
+    for (const holder of within(root, '[data-line-src]')) initLineChart(holder);
+    for (const holder of within(root, '[data-tip-src]')) initBarChart(holder);
+    for (const svg of within(root, 'svg[data-zoom]')) zoomable(svg);
+    // 手机上比屏幕宽、能左右滑的图（客户页「调用次数」、整行宽的柱状图）：一打开先停在最右边，最近的那几个小时、那几天
+    for (const wrap of within(root, '.calls-chart, .wide-chart')) wrap.scrollLeft = wrap.scrollWidth;
+  }
+  initCharts(document);
 
-  // 手机上比屏幕宽、能左右滑的图（客户页「调用次数」、整行宽的柱状图）：一打开先停在最右边，最近的那几个小时、那几天
-  for (const wrap of document.querySelectorAll('.calls-chart, .wide-chart')) wrap.scrollLeft = wrap.scrollWidth;
+  // ------------------------------------------------------------ 客户页切「看多久」：只换那一张卡片
+  // 卡片（[data-part]）右上角那一排是普通链接：没开 JS 照样整页跳过去。开了 JS：把这一排选的写进现在的网址，带上
+  // ?part=这张卡片 取回来换上去，地址栏跟着改（刷新、复制网址还是这一档；另外两排选的也还在网址上），新卡片上的图
+  // 照样能悬浮、挑项、放大。挂在 window 的捕获阶段：比整页的「正在加载」先拦下这一下，那层遮罩就不出来了。
+  // 取不回来（断网、登录过期被转去登录页）就照旧整页跳过去
+  window.addEventListener('click', function (event) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target instanceof Element ? event.target.closest('[data-part] .seg-item[href]') : null;
+    if (!link) return;
+    const card = link.closest('[data-part]');
+    event.preventDefault();
+    if (link.classList.contains('is-on') || card.classList.contains('is-loading')) return;
+    const name = card.dataset.part;
+    const picked = new URL(link.href, location.href).searchParams.get(name);
+    const page = new URL(location.href);
+    if (picked === null) page.searchParams.delete(name); else page.searchParams.set(name, picked);
+    const part = new URL(page.href);
+    part.hash = '';
+    part.searchParams.set('part', name);
+    for (const item of card.querySelectorAll('.seg-item')) item.classList.toggle('is-on', item === link);
+    card.classList.add('is-loading');
+    card.setAttribute('aria-busy', 'true');
+    fetch(part.href, { credentials: 'same-origin', headers: { Accept: 'text/html' } })
+      .then(function (response) {
+        if (!response.ok || response.redirected) throw new Error(String(response.status));
+        return response.text();
+      })
+      .then(function (html) {
+        const holder = document.createElement('template');
+        holder.innerHTML = html.trim();
+        const fresh = holder.content.querySelector('[data-part="' + name + '"]');
+        if (!fresh) throw new Error('没有这张卡片');
+        hideTip();
+        card.replaceWith(fresh);
+        history.replaceState(history.state, '', page.pathname + page.search + page.hash);
+        initCharts(fresh);
+      })
+      .catch(function () { location.href = link.href; });
+  }, true);
 
   // ---- 气泡：悬浮的那个放大、其余变淡，提示里写名字、数和占比；
   //      还可以按住拖着走：拖着的泡跟着鼠标，挤到别的泡就把它们推开，

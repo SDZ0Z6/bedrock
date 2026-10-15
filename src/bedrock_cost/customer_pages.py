@@ -119,7 +119,7 @@ def _stacked_rows(series: dict[str, list[float]], names: dict[str, str], width: 
 
 def _spend_chart(series: dict[str, list[float]], stamps: list[date], names: dict[str, str], height: int = 230,
                  width: int = 560, slots: dict[str, int] | None = None, marks: list[chart.BarMark] | None = None):
-    """每天的消费（默认近 30 天）：一根柱一天，按客户（或账号）堆叠。8 个以外并进「其他」。marks 是竖虚线。"""
+    """每天的消费（stamps 那几天）：一根柱一天，按客户（或账号）堆叠。8 个以外并进「其他」。marks 是竖虚线。"""
     rows = _stacked_rows(series, names, len(stamps), slots)
     labels = [stamp.strftime("%m-%d") for stamp in stamps]
     bars = chart.render_bars(labels, rows, width=width, height=height, fmt=money, axis=customers.short_money,
@@ -301,8 +301,8 @@ def _estimate_card(view: customers.CustomerView, names: dict[str, str], slots: d
             today_by_key[h.key] = mine[-1]
     totals = [sum(column) for column in zip(*per_account.values())] if per_account else [0.0] * width
     labels = [day.strftime("%m-%d") for day in stamps[:-1]] + ["今天"]
-    # 和左边「调用次数」一排、一样高：图高一点，不在字和图之间空出一大块
-    bars = chart.render_bars(labels, _stacked_rows(per_account, names, width, slots), width=300, height=280,
+    # 和左边「调用次数」一排、各占一半宽：两张图一样宽、一样高（600 × 334，和调用次数的折线图一个比例）
+    bars = chart.render_bars(labels, _stacked_rows(per_account, names, width, slots), width=600, height=334,
                              fmt=money, axis=customers.short_money)
     return SimpleNamespace(chart=bars, total=sum(totals), today=totals[-1], yesterday=totals[-2] if width > 1 else 0.0,
                            partial=partial, start=stamps[0].strftime("%m-%d"), end=stamps[-1].strftime("%m-%d"),
@@ -373,7 +373,7 @@ def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dic
             slot=-1))
     report = SimpleNamespace(labels=labels, timestamps=counts.timestamps, window=window, series=lines,
                              metric_label="调用次数", unit="次", dimension_label="账号")
-    drawn = chart.render_lines(report, unit="次", width=760, uid="calls",
+    drawn = chart.render_lines(report, unit="次", width=600, uid="calls",
                                ends={names[number]: by_number[number].account.avatar for number in keep})
     totals = [sum(values[i] for values in series.values()) for i in range(width)]
     peak = max(range(width), key=lambda i: totals[i]) if any(totals) else None
@@ -447,8 +447,10 @@ def _spend_marks(view: customers.CustomerView, stamps: list[date], names: dict[s
 
 
 # ---------------------------------------------------------------- 客户详情
-# 客户页三排「看多久」各自的默认值：网址上不带
-_RANGE_DEFAULTS = {"spend": "30", "calls": "24h", "estimate": "7"}
+# 客户页三排「看多久」各自的默认值：网址上不带。「每日消费」默认近 7 天（概览、客户列表、账号页是近 30 天）
+_RANGE_DEFAULTS = {"spend": "7", "calls": "24h", "estimate": "7"}
+# 切「看多久」时能只取回来的那几张卡片（?part=…，见 customer_part.html）
+CHART_PARTS = ("calls", "estimate", "spend")
 
 
 def _ranges(**picked: str) -> dict[str, str | None]:
@@ -497,9 +499,10 @@ def detail(cid: str, **extra):
     spenders = sorted((number for number in per_account if sum(per_account[number]) > 0),
                       key=lambda number: -sum(per_account[number]))
     slots = _stable_slots([names[number] for number in spenders], names.values())
-    # 右上角选看多久，「全部」从最早分过来的那个账号算起
+    # 右上角选看多久（默认近 7 天），「全部」从最早分过来的那个账号算起
     spend = dashboard.spend_range(request.args.get("spend"), today,
-                                  min((h.joined for h in view.holdings if h.joined), default=None))
+                                  min((h.joined for h in view.holdings if h.joined), default=None),
+                                  default=_RANGE_DEFAULTS["spend"])
     if spend.days != 30:
         stamps, per_account = view.daily(spend.days)
     trend = _spend_chart(per_account, stamps, names, height=230, width=1100, slots=slots,
@@ -515,6 +518,19 @@ def detail(cid: str, **extra):
     # 「调用次数」右上角也选看多久：近 24 小时（默认）按小时，其余按天
     calls = _calls_chart(view, names, slots, request.args.get("calls") or "24h", refresh=refresh,
                          today_costs=estimate.today_by_key, partial=partial)
+    # 三排「看多久」互相带着别的两排选的，切一排另外两排不变
+    links = {
+        "spend_links": spend_links("customers.detail", spend.key, _RANGE_DEFAULTS["spend"], cid=customer.id,
+                                   **_ranges(calls=calls.key, estimate=estimate.key)),
+        "calls_links": range_links("customers.detail", "calls", CALLS_RANGES, calls.key, "24h", cid=customer.id,
+                                   **_ranges(spend=spend.key, estimate=estimate.key)),
+        "estimate_links": range_links("customers.detail", "estimate", ESTIMATE_RANGES, estimate.key, "7",
+                                      cid=customer.id, **_ranges(spend=spend.key, calls=calls.key)),
+    }
+    # 切「看多久」时 app.js 只要那一张卡片（?part=calls / estimate / spend）：同一套算法、同一份宏，不画整页
+    part = request.args.get("part")
+    if part in CHART_PARTS:
+        return render_template("customer_part.html", part=part, trend=trend, calls=calls, estimate=estimate, **links)
 
     by_number = {a.account: a for a in accounts}
     timeline = _timeline_payload(view, by_number)
@@ -547,15 +563,9 @@ def detail(cid: str, **extra):
         stage_rows=stage_rows,
         trend=trend,
         spend=spend,
-        # 三排「看多久」互相带着别的两排选的，切一排另外两排不变
-        spend_links=spend_links("customers.detail", spend.key, cid=customer.id, **_ranges(calls=calls.key,
-                                                                                      estimate=estimate.key)),
         calls=calls,
-        calls_links=range_links("customers.detail", "calls", CALLS_RANGES, calls.key, "24h", cid=customer.id,
-                                **_ranges(spend=spend.key, estimate=estimate.key)),
-        estimate_links=range_links("customers.detail", "estimate", ESTIMATE_RANGES, estimate.key, "7",
-                                   cid=customer.id, **_ranges(spend=spend.key, calls=calls.key)),
         estimate=estimate,
+        **links,
         timeline=timeline,
         timeline_fallback=_timeline_fallback(view, by_number),
         categories=customers.CATEGORIES,

@@ -1,0 +1,106 @@
+{# 客户页那三张带「看多久」的图：调用次数、预估、每日消费。整页（customer.html）和切「看多久」时只换这一张
+   （customer_part.html，app.js 取回来换上）用的是同一份，换上去的和整页上的一模一样。
+   卡片上的 data-part 是这张的名字，也是网址上那一排的参数名（?calls= / ?estimate= / ?spend=） #}
+{% from "_macros.html" import range_switch, spend_switch %}
+{% from "_customer_macros.html" import mini %}
+
+{# 账单要晚 1~2 天，这张看现在：CloudWatch 的调用次数，晚几分钟。折线图，一个账号一条线，线尾是它的头像，颜色和
+   「每日消费」一样；点下面的账号挑几个只看它们，纵轴跟着它们重新算（app.js）。右上角选看多久：近 24 小时每小时
+   一个点，其余每天一个点（UTC 日期） #}
+{% macro calls_card(calls, calls_links) -%}
+  <article class="viz-card col-3" id="calls" data-reveal data-part="calls">
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">调用次数</h2>
+        {% if calls.start %}<p class="viz-sub">{{ calls.start }} ~ {{ calls.end }}{% if not calls.hourly %} · 按 UTC 日期{% endif %}</p>{% endif %}
+      </div>
+      {{ range_switch(calls_links, 'calls', '正在读调用次数') }}
+    </div>
+    {% if calls.watched %}
+      <div>
+        {# 左边是调用次数，右边是今天到现在的预估花费（用量 × 牌价，以账单为准） #}
+        <div class="calls-kpis">
+          <p class="viz-big"><span data-countup>{{ calls.total | compact }}</span> <small>次 · {{ calls.label }}</small></p>
+          <p class="viz-big" title="CloudWatch 的用量 × 牌价（UTC 日期），和账号页「预估」页签、旁边的「预估」一个算法，以账单为准">
+            <span data-countup>{{ calls.today_cost | money }}</span> <small>今日预估{% if calls.partial %}（有的没算上）{% endif %}</small></p>
+        </div>
+        <p class="viz-meta">
+          {%- if calls.hourly %}最近一小时 <strong>{{ calls.last | compact }}</strong>
+          {%- else %}日均 <strong>{{ calls.average | compact }}</strong>{% endif %}
+          {%- if calls.peak_label %} · 最多的{{ '一小时' if calls.hourly else '一天' }} <strong>{{ calls.peak_value | compact }}</strong>（{{ calls.peak_label }}）{% endif %}
+          · {{ calls.active }} / {{ calls.watched }} 个{{ '在用的' if calls.hourly else '' }}账号有调用</p>
+      </div>
+      <div class="chart-wrap chart-fluid calls-chart" id="cust-calls" data-line-src="cust-calls-data">{{ calls.chart.svg | safe }}</div>
+      {% if calls.chart.tooltip %}<script id="cust-calls-data" type="application/json">{{ calls.chart.tooltip | tojson }}</script>{% endif %}
+      {# 一条线一个签（和「每日消费」下面的一样，签上的 data-s 是线的序号）：挑几个只看它们 #}
+      {% if calls.legend %}
+        <div class="legend-toggles" data-legend-for="cust-calls" role="group" aria-label="挑几个账号只看它们">
+          {% for item in calls.legend %}
+            <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false" title="{{ item.tip }}">
+              <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% if calls.silent %}
+        <p class="calls-silent">{{ '这段时间' if calls.key == 'all' else calls.label }}没有调用：
+          {%- for h in calls.silent %}<span class="calls-who">{{ mini(h.account) }}{{ h.account.email or h.number }}</span>{% endfor %}</p>
+      {% endif %}
+    {% else %}
+      <p class="viz-empty">{{ '没有在用的账号。' if calls.hourly else '这段时间没有在这个客户名下用过的账号。' }}</p>
+    {% endif %}
+  </article>
+{%- endmacro %}
+
+{# 预估（原来是「还能用几天」）：账单晚 1~2 天，被 credits 抵掉时甚至一直是 0；这张看 CloudWatch 的用量 × 牌价，
+   一天一根（UTC 日期，今天算到现在），按账号叠起来，颜色和「每日消费」一样，悬浮看每个账号；右上角选看多久
+   （近 7 天、近 30 天、全部）；点下面的账号挑几个只看它们（和每日消费一样，纵轴跟着它们重新算）。说明那一行
+   放在标题下面一整行：右上角那一排占了地方 #}
+{% macro estimate_card(estimate, estimate_links) -%}
+  <article class="viz-card col-3" id="estimate" data-reveal data-part="estimate">
+    <div class="viz-head">
+      <h2 class="viz-title">预估</h2>
+      {{ range_switch(estimate_links, 'estimate', '正在读预估') }}
+    </div>
+    <div>
+      <p class="viz-sub">{{ estimate.start }} ~ {{ estimate.end }} · CloudWatch 用量 × 牌价，按 UTC 日期 · 以账单为准</p>
+      <p class="viz-big"><span data-countup>{{ estimate.total | money0 }}</span>
+        <small>{{ estimate.what }}{% if estimate.partial %}（有的没算上）{% endif %}</small></p>
+      <p class="viz-meta">今天到现在 <strong>{{ estimate.today | money }}</strong> · 昨天 <strong>{{ estimate.yesterday | money }}</strong></p>
+    </div>
+    <div class="viz-chart" id="cust-estimate" data-tip-src="cust-estimate-data">{{ estimate.chart.svg | safe }}</div>
+    {% if estimate.chart.legend %}
+      <div class="legend-toggles" data-legend-for="cust-estimate" role="group" aria-label="挑几个账号只看它们">
+        {% for item in estimate.chart.legend %}
+          <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
+                  title="{{ item.name }} {{ estimate.what }} {{ item.total | money }}">
+            <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
+        {% endfor %}
+      </div>
+    {% endif %}
+    <script id="cust-estimate-data" type="application/json">{{ estimate.chart.tooltip | tojson }}</script>
+  </article>
+{%- endmacro %}
+
+{# 每日消费：竖虚线是每个账号的启用、风控、换下、用完、结算、恢复（停的那条写着从启用起用了多少，悬浮看全）。
+   右上角选看多久；点下面的账号挑几个只看它们，连同它们的竖线 #}
+{% macro spend_card(trend, spend_links) -%}
+  <article class="viz-card col-6" id="spend" data-reveal data-part="spend">
+    <div class="viz-head">
+      <div>
+        <h2 class="viz-title">每日消费</h2>
+        <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 按账号叠起来，只算在用的那几天 · 竖虚线是启用、风控这些事 · Cost Explorer 晚 1~2 天出数</p>
+      </div>
+      {{ spend_switch(spend_links) }}
+    </div>
+    <p class="viz-big"><span data-countup>{{ trend.total | money0 }}</span> <small>{{ trend.label }}</small></p>
+    <div class="viz-chart wide-chart" id="cust-spend" data-tip-src="cust-spend-data">{{ trend.chart.svg | safe }}</div>
+    <div class="legend-toggles" data-legend-for="cust-spend" role="group" aria-label="挑几个账号只看它们">
+      {% for item in trend.chart.legend %}
+        <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
+                title="{{ item.name }} {{ trend.label }} {{ item.total | money }}">
+          <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
+      {% endfor %}
+    </div>
+    <script id="cust-spend-data" type="application/json">{{ trend.chart.tooltip | tojson }}</script>
+  </article>
+{%- endmacro %}

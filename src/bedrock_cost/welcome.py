@@ -259,8 +259,8 @@ def _rainbow(radius: int = 18, bands: int = 6) -> list[tuple[int, int, int, int]
 RAINBOW = _rainbow()
 
 
-def context_lines(person: users.Person, seconds: int, now: datetime, facts: Facts | None = None) -> list[str]:
-    """看场合说的：叫名字，看几点、星期几、今天在线多久，看概览上的数。"""
+def time_lines(person: users.Person, now: datetime) -> list[str]:
+    """叫名字，看几点、星期几。欢迎条上的小家伙和每个页面底下那只（pet.py）都说。"""
     out = [f"{person.label}，欢迎回来！", f"{person.label}，今天也很努力呢。"]
     hour = now.hour
     if hour < 6:
@@ -282,6 +282,12 @@ def context_lines(person: users.Person, seconds: int, now: datetime, facts: Fact
         out.append("周五啦！周末想好去哪了吗？")
     elif weekday >= 5:
         out.append(f"周{WEEKDAYS[weekday]}还来看账单，你是真的爱。")
+    return out
+
+
+def context_lines(person: users.Person, seconds: int, now: datetime, facts: Facts | None = None) -> list[str]:
+    """看场合说的：叫名字，看几点、星期几（time_lines）、今天在线多久，看概览上的数。"""
+    out = time_lines(person, now)
     if seconds >= 2 * 3600:
         out.append(f"今天已经在线 {presence.label(seconds)} 了，起来走两步吧。")
     elif seconds < 120:

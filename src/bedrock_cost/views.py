@@ -61,9 +61,9 @@ def range_links(endpoint: str, name: str, ranges, current: str, default: str, **
             for key, label in ranges]
 
 
-def spend_links(endpoint: str, current: str, **params) -> list[tuple[str, str, bool]]:
-    """「每日消费」右上角那一排（dashboard.SPEND_RANGES），近 30 天是默认。"""
-    return range_links(endpoint, "spend", dashboard.SPEND_RANGES, current, "30", **params)
+def spend_links(endpoint: str, current: str, default: str = "30", **params) -> list[tuple[str, str, bool]]:
+    """「每日消费」右上角那一排（dashboard.SPEND_RANGES）。默认那一档网址上不带：客户页是近 7 天，别的页面是近 30 天。"""
+    return range_links(endpoint, "spend", dashboard.SPEND_RANGES, current, default, **params)
 
 
 def tz_name() -> str:

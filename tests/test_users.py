@@ -385,7 +385,7 @@ def test_自己的资料页_改名字和头像(admin):
     response = admin.post("/me", data={"csrf": token(admin), "display": "老板", "avatar_text": "🦊", "avatar_color": "2"})
     assert response.status_code == 302 and response.headers["Location"] == "/me"
     saved = json.loads(config.USERS_PATH.read_text(encoding="utf-8"))["admin"]
-    assert saved == {"display": "老板", "avatar_text": "🦊", "avatar_color": 2, "scene": ""}
+    assert saved == {"display": "老板", "avatar_text": "🦊", "avatar_color": 2, "scene": "", "pet": ""}
     page = admin.get("/").get_data(as_text=True)
     foot = page[page.index('<div class="side-foot">'):page.index("</aside>")]
     assert "🦊 老板 管理员" in scrape(foot) and "av-2 avatar-emoji" in foot
@@ -715,7 +715,7 @@ def test_能导出CSV(lily, with_customer):
 
 
 # ====================================================================== 只读用户：改不了
-VIEWER_OK = ("auth.login", "auth.password", "profile.save", "profile.scene", "profile.presence")
+VIEWER_OK = ("auth.login", "auth.password", "profile.save", "profile.scene", "profile.pet", "profile.presence")
 
 
 def _post_rules(app) -> list[str]:

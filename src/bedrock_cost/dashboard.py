@@ -250,10 +250,11 @@ def spend_share(rows, slots: dict[str, int]) -> SimpleNamespace:
 SPEND_RANGES = (("7", "近 7 天"), ("30", "近 30 天"), ("90", "近 90 天"), ("all", "全部"))
 
 
-def spend_range(picked: str | None, today: date, first: date | None) -> SimpleNamespace:
-    """「每日消费」看多久：key（7 / 30 / 90 / all，认不出是 30）、days、start、label（写在大数字旁边）。
-    「全部」从 first（最早启用、分过来的那天）起，不早于 Cost Explorer 能查的最早一天；没有 first 就和近 30 天一样长。"""
-    key = picked if picked in dict(SPEND_RANGES) else "30"
+def spend_range(picked: str | None, today: date, first: date | None, default: str = "30") -> SimpleNamespace:
+    """「每日消费」看多久：key（7 / 30 / 90 / all，认不出是 default：客户页是 7，别的页面是 30）、days、start、
+    label（写在大数字旁边）。「全部」从 first（最早启用、分过来的那天）起，不早于 Cost Explorer 能查的最早一天；
+    没有 first 就和近 30 天一样长。"""
+    key = picked if picked in dict(SPEND_RANGES) else default
     if key == "all":
         start = min(max(first or today - timedelta(days=29), earliest_queryable(today)), today)
         return SimpleNamespace(key=key, days=(today - start).days + 1, start=start,
