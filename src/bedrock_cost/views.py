@@ -12,6 +12,7 @@ from flask import Blueprint, flash, redirect, render_template, request, session,
 
 from . import (
     activity,
+    chart,
     cloudwatch_metrics,
     config,
     cost_estimate,
@@ -24,7 +25,8 @@ from . import (
 )
 from .auth import current_user, login_required
 from .dates import earliest_queryable
-from .excel_source import ExcelSourceError, load_accounts, load_customers, load_lifecycle
+from .excel_source import ExcelSourceError, load_accounts, load_customers, load_events, load_lifecycle
+from .filters import money0
 from .report import build_report
 
 bp = Blueprint("main", __name__)
@@ -120,6 +122,8 @@ def index():
             for cid in owners if any(card.customer == cid for card in cards)
         ]
         facts = welcome.facts_from(cards, report, len(owners))
+        # 每月账号和消费：新加按启用日期、停用按 EVENTS 表和操作日志，消费是累计那次查询按月留下的，加上停用账号存下来的账
+        months = dashboard.account_months(cards, load_accounts(include_disabled=True), load_events(), today)
         context = dict(
             customer_chips=customer_chips,
             stock_cards=sum(1 for card in cards if card.customer not in owners),
@@ -127,7 +131,8 @@ def index():
             state_counts=dashboard.state_counts(cards),
             lifecycle_colors={tag.name: tag.hex for tag in tags},
             life_rows=dashboard.lifecycle_rows(cards, tags),
-            top_spenders=dashboard.top_spenders(cards, slots),
+            months=months,
+            month_chart=chart.render_month_combo(months, fmt=money0, axis=dashboard.money_axis),
             trend=trend,
             spend=spend,
             spend_links=spend_links("main.index", spend.key),

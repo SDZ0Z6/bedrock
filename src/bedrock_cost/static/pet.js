@@ -14,6 +14,8 @@
  *     摔得重会在地上弹两下，落地说一句；
  *   · 眼睛跟着鼠标：鼠标在附近，两只眼睛往那边看（各挪一格）；在底下时鼠标冲过来又快又近，有时候吓一跳、跑开；
  *   · 右键（手机上长按）：「收起小家伙」，记在自己的资料里（POST /me/pet），哪个页面都不出来了；资料页上能再打开。
+ * 不用等人也偶尔说一句：隔半分钟到一分多钟自言自语一句，刚爬上墙、刚上到顶上时有时候也说；已经有对话框开着
+ * （它自己的、概览欢迎条上那几只的）、页面在后台时不说。
  *
  * 换页面它接着在原来的地方，正往哪儿走也接着走（sessionStorage，一个标签页一只）；一个标签页里第一次出来是从顶上掉下来的。
  * 系统设了「减少动态效果」：站在底下不走不爬，说话、拖动照样有（松手直接落在底下）。页面放到后台时 rAF 自己会停。 */
@@ -47,6 +49,7 @@
   const WOBBLE_MS = 650;              // 松手之前晃两下
   const LOOK_NEAR = 240;              // 鼠标离眼睛多近就看着它
   const DODGE_SPEED = 1500, DODGE_NEAR = 110, DODGE_GAP = 9000;   // 鼠标多快、多近吓它一跳；吓完多久不再吓
+  const CHAT_EVERY = [35000, 80000], CHAT_FOR = 3200;              // 多久自己说一句、说多久
 
   const LOOP = ['floor', 'right', 'ceiling', 'left'];                 // 逆时针一圈，dir = 1 往这个方向走
   const ALONG = { floor: 1, right: -1, ceiling: -1, left: 1 };       // dir = 1 时边上的坐标是变大还是变小
@@ -63,6 +66,7 @@
                mode: 'rest', until: 0, target: 0, pass: false, pace: 0, plan: '', turn: null,
                climbAt: 0, dodgeAt: 0, thrown: false, arriving: false };
   const speed = rand(WALK);
+  let chatAt = performance.now() + rand([12000, 25000]);          // 下一回自己说一句
   let hovered = false;                // 鼠标在它身上（或者键盘停在它身上、手机上刚点了它）：停下来说话
   let gone = false;                   // 收起来了
   let press = null;                   // 按下去了，还没拖开
@@ -187,10 +191,12 @@
       return go(st.s + st.dir * ALONG.floor * rand([60, 160]), speed, false, now);   // 下来了：接着往前走一段
     }
     if (st.edge === 'ceiling') {
+      if (Math.random() < 0.4) chat('ceiling');
       st.plan = 'hang';                // 倒挂着往前走一段，停下来歇一会儿
       return go(st.s + st.dir * ALONG.ceiling * rand([0.25, 0.7]) * span, CEIL, false, now);
     }
     if (from === 'floor') {
+      if (Math.random() < 0.3) chat('climb');
       st.plan = 'cling';               // 从底下爬上来：爬到一半上下，扒着歇一会儿
       return go(lo(st.edge) + rand([0.15, 0.6]) * span, CLIMB, false, now);
     }
@@ -311,7 +317,7 @@
     return from[Math.floor(Math.random() * from.length)];
   }
   function lineFor(kind) {
-    if (kind !== 'hover' && kind !== 'poke') return pick(talk[kind]);
+    if (kind !== 'hover' && kind !== 'poke' && kind !== 'chat') return pick(talk[kind]);
     if (kind === 'poke' && Math.random() < 0.55) return pick(talk.poked);
     if (st.edge === 'ceiling' && Math.random() < 0.5) return pick(talk.ceiling);
     if (!flat(st.edge) && Math.random() < 0.5) return pick(talk.climb);
@@ -337,6 +343,12 @@
     bubble.style.animation = '';
     placeBubble();
     if (ms) hideTimer = setTimeout(hideBubble, ms);
+  }
+  // 不用等人，自己说一句（kind 默认和鼠标放上去时一样挑）。有对话框开着、正被人理着、页面在后台时不说
+  function chat(kind) {
+    if (hovered || press || !menu.hidden || document.hidden || !bubble.hidden) return;
+    if (document.querySelector('.mascot-bubble:not([hidden])')) return;   // 欢迎条上那几只正在说
+    speak(kind || 'chat', CHAT_FOR);
   }
   function hideSoon(ms) {
     clearTimeout(hideTimer);
@@ -677,6 +689,10 @@
           decide(now);
         }
       }
+    }
+    if (now >= chatAt) {
+      chatAt = now + rand(CHAT_EVERY);
+      if (settled()) chat();
     }
     look(now);
     render();

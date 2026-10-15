@@ -316,18 +316,6 @@ class TestFilterCounts:
         ]
         assert [line.name for line in dashboard.lifecycle_rows(rows[:1], TAGS)] == ["正常", "结算", "风控"]
 
-    def test_top_spenders(self):
-        """概览「Top 账号」：查到了数的全部按累计消费排（页面上默认只亮前 5 个）；占比按全部，横条按第一名，颜色跟着色槽。"""
-        rows = [SimpleNamespace(label=name, has_numbers=ok, total_cost=cost)
-                for name, ok, cost in [("a", True, 300.0), ("b", True, 600.0), ("c", False, 900.0),
-                                       ("d", True, 0.0), ("e", True, 100.0)]]
-        top = dashboard.top_spenders(rows, {"b": 0})
-        assert [(t.row.label, round(t.share), round(t.width)) for t in top] == [
-            ("b", 60, 100), ("a", 30, 50), ("e", 10, 17), ("d", 0, 0)]               # c 查不到消费，不列
-        assert top[0].color == chart.color_for(0) and top[1].color == chart.color_for(-1)
-        assert dashboard.top_spenders([], {}) == []
-        assert [t.share for t in dashboard.top_spenders(rows[3:4], {})] == [0.0]      # 全是 0 也不除以 0
-
 
 def spender(label: str, cost: float, ok: bool = True) -> SimpleNamespace:
     return SimpleNamespace(label=label, total_cost=cost, has_numbers=ok)

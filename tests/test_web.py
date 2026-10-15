@@ -529,11 +529,11 @@ def spent_so_far(number: str) -> float:
 
 class TestOverviewPage:
     def test_four_cards_on_top(self, logged_in, book, fake_costs):
-        """额度使用（按用掉多少分档的横条）、消费构成的气泡、Top 账号，下面一整行是近 30 天每天的成本（按账号堆叠）。"""
+        """额度使用（按生命周期的横条）、消费构成的气泡、每月账号和消费，下面一整行是近 30 天每天的成本（按账号堆叠）。"""
         html = logged_in.get("/").get_data(as_text=True)
         bento = html[html.index('<section class="bento"') : html.index('<div class="overview-bar">')]
         assert [scrape(t) for t in re.findall(r'<h2 class="viz-title">(.*?)</h2>', bento)] == [
-            "额度使用", "消费构成", "Top 账号", "每日消费",
+            "额度使用", "消费构成", "每月账号和消费", "每日消费",
         ]
         assert '<article class="viz-card span-all" id="spend">' in bento and 'class="viz-chart wide-chart" id="trend-chart"' in bento
         assert 'class="chart-svg bar-chart"' in bento

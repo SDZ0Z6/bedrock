@@ -4,14 +4,15 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
-from . import chart, config, usage_explorer
-from .dates import earliest_queryable
+from . import chart, config, cost_history, usage_explorer
+from .dates import earliest_queryable, month_shift
 from .excel_source import Account, LifecycleTag
 from .filters import money
 
@@ -204,17 +205,123 @@ def lifecycle_rows(rows, tags: list[LifecycleTag]) -> list[SimpleNamespace]:
     return out
 
 
-def top_spenders(rows, slots: dict[str, int]) -> list[SimpleNamespace]:
-    """概览「Top 账号」：查到了数的账号按累计消费从多到少，全部列出来（页面上默认只亮前 5 个，点「全部」看剩下的）。
-    share 是占全部累计消费的百分比，width 是横条长短（第一名是满的），color 和「消费构成」「每日消费」里的
-    同一个账号一个颜色（其余是灰）。"""
-    ranked = sorted((row for row in rows if row.has_numbers), key=lambda row: -row.total_cost)
-    total = sum(max(row.total_cost, 0.0) for row in ranked)
-    first = max(ranked[0].total_cost, 0.0) if ranked else 0.0
-    return [SimpleNamespace(row=row, share=max(row.total_cost, 0.0) / total * 100 if total else 0.0,
-                            width=max(row.total_cost, 0.0) / first * 100 if first else 0.0,
-                            color=chart.color_for(slots.get(row.label, -1)))
-            for row in ranked]
+# ---------------------------------------------------------------- 每月账号和消费
+MONTHS_BACK = 12       # 概览「每月账号和消费」看近几个月（含这个月，到今天）
+MONTHS_MIN = 6         # 前面几个月什么都没有就不画，但至少留这么多个月
+_NUMBER = re.compile(r"(?<!\d)\d{12}(?!\d)")
+
+
+def _disabled_in_log(numbers: set[str]) -> dict[str, date]:
+    """操作日志里最近一回「停用账号 …（号码）」是哪天。EVENTS 表 2026-10-10 起才记停用，之前停的只有日志里这一行；
+    日志里也没有的（手改 Excel 停的、日志翻过去了）不在里面。"""
+    from .settings_pages import audit_lines      # 设置页读操作日志的那一段；在这里 import，免得两个模块互相引用
+
+    found: dict[str, date] = {}
+    for line in audit_lines():                     # 新的在前
+        if not line.note.startswith("停用账号"):
+            continue
+        try:
+            day = date.fromisoformat(line.when[:10])
+        except ValueError:
+            continue
+        for number in _NUMBER.findall(line.note):
+            if number in numbers and number not in found:
+                found[number] = day
+    return found
+
+
+def account_months(rows, accounts: list[Account], events, today: date, months: int = MONTHS_BACK) -> SimpleNamespace:
+    """概览「每月账号和消费」：近 months 个月（含这个月，到今天），每个月的账号分三段——
+      · 新加：启用日期在这个月。台账里没有「哪天加进来」，启用日期就是各页面说的账号的开始；
+      · 停用：这个月停的。EVENTS 表里记的「停用」（账号管理里停用、结算时一起停用，2026-10-10 起都记）；之前停的没记，
+        去操作日志里找最近一回「停用账号」；都找不到的（手改 Excel 停的）不知道哪天，不算。停了又恢复的，停的那个月算停用；
+      · 正常：这个月之前就在用、这个月也一直开着的（没停，或者是后来才停的）。
+    一个账号一个月只算一段：同一个月里新加又停了的算停用，一个月里停了两回算一个。同一个号码在台账里有几行的按一个算
+    （启用日期取最早的）。再加上每个月的消费，折算后（和概览一个口径）：在用的账号用累计消费那次查询按月留下的
+    （rows 是概览的卡片，ReportRow.monthly），停用的账号用客户页存下来的每天的账（cost_history）加起来——都不多查 AWS；
+    停用的账号没存过账的不算。
+    accounts 是台账里全部的账号（含停用的），events 是 EVENTS 表（load_events）。前面几个月什么都没有就不画
+    （至少留 MONTHS_MIN 个月）；没算进去的写成几句 notes，放在图下面。"""
+    first = month_shift(today, -(months - 1))
+    spans = [(month_shift(first, i), min(month_shift(first, i + 1) - timedelta(days=1), today)) for i in range(months)]
+    keys = [begin.strftime("%Y-%m") for begin, _ in spans]
+    index = {key: i for i, key in enumerate(keys)}
+
+    # 一个号码一份：启用日期取最早的，有一行开着就算开着
+    starts: dict[str, date | None] = {}
+    on: set[str] = set()
+    for account in accounts:
+        known = starts.get(account.account)
+        if account.account not in starts or (account.start_date and (known is None or account.start_date < known)):
+            starts[account.account] = account.start_date
+        if account.enabled:
+            on.add(account.account)
+    off = set(starts) - on
+
+    # 哪天停的：EVENTS 里的每一回；现在停着、EVENTS 里又没有的，看操作日志
+    stops: dict[str, list[date]] = {}
+    for event in events:
+        if event.deleted or event.type != "disable" or event.source != "manual" or event.account not in starts:
+            continue
+        stops.setdefault(event.account, []).append(event.date)
+    silent = off - set(stops)
+    from_log = _disabled_in_log(silent) if silent else {}
+    for number, day in from_log.items():
+        stops[number] = [day]
+    ended = {number: max(stops[number]) for number in off if number in stops}   # 现在停着的：最后一回停是哪天
+
+    added, normal, stopped = [0] * months, [0] * months, [0] * months
+    for i, (begin, end) in enumerate(spans):
+        for number, start in starts.items():
+            if any(begin <= day <= end for day in stops.get(number, ())):
+                stopped[i] += 1
+            elif start is None or start > end:
+                continue
+            elif start >= begin:
+                added[i] += 1
+            elif number in on or ended.get(number, date.min) > end:
+                normal[i] += 1
+
+    spend = [0.0] * months
+    for row in rows:
+        for key, value in (row.monthly or {}).items():
+            if key in index:
+                spend[index[key]] += value
+    saved = cost_history.recall_many(sorted(off))
+    for history in saved.values():
+        for offset, value in enumerate(history.marked):
+            key = (history.start + timedelta(days=offset)).strftime("%Y-%m")
+            if key in index:
+                spend[index[key]] += value
+
+    filled = [i for i in range(months) if added[i] or normal[i] or stopped[i] or spend[i] > 0]
+    begin_at = max(0, min(filled[0] if filled else months, months - MONTHS_MIN))
+    shown = range(begin_at, months)
+    labels, years, tips = [], [], []
+    for i in shown:
+        month = spans[i][0]
+        labels.append(f"{month.month}月")
+        years.append(str(month.year) if i == begin_at or month.month == 1 else "")
+        tips.append(f"{month.year} 年 {month.month} 月" + ("（到今天）" if i == months - 1 else ""))
+    notes = []
+    unknown = len(silent - set(from_log))
+    if unknown:
+        notes.append(f"{unknown} 个停用的账号不知道哪天停的，没算进去")
+    if off - set(saved):
+        notes.append(f"{len(off - set(saved))} 个停用的账号没存过每天的账，消费里没有它们")
+    failed = sum(1 for row in rows if row.error)
+    if failed:
+        notes.append(f"{failed} 个账号这次没查到 Cost Explorer，消费里少了它们")
+    no_start = sum(1 for start in starts.values() if start is None)
+    if no_start:
+        notes.append(f"{no_start} 个账号没填启用日期，没算进新加、正常")
+    return SimpleNamespace(
+        keys=[keys[i] for i in shown], labels=labels, years=years, tips=tips,
+        added=[added[i] for i in shown], normal=[normal[i] for i in shown], disabled=[stopped[i] for i in shown],
+        spend=[spend[i] for i in shown],
+        total_added=sum(added[i] for i in shown), total_disabled=sum(stopped[i] for i in shown),
+        total_spend=sum(spend[i] for i in shown), in_use=normal[-1] + added[-1], notes=notes,
+    )
 
 
 # ---------------------------------------------------------------- 按账号的颜色

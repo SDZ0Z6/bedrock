@@ -175,6 +175,12 @@ def test_小家伙的脚本和样式():
                   "bubble.textContent = said;"):                                   # 台词一律 textContent
         assert piece in js, piece
     assert "innerHTML" not in js
+    # 不用等人也偶尔说一句（刚上墙、刚上顶有时候也说）；欢迎条上那几只在说、它自己的对话框开着时不插嘴
+    for piece in ("const CHAT_EVERY = [35000, 80000], CHAT_FOR = 3200;", "if (now >= chatAt) {",
+                  "if (Math.random() < 0.4) chat('ceiling');", "if (Math.random() < 0.3) chat('climb');",
+                  "if (hovered || press || !menu.hidden || document.hidden || !bubble.hidden) return;",
+                  "if (document.querySelector('.mascot-bubble:not([hidden])')) return;"):
+        assert piece in js, piece
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     for rule in (".pet-layer { position: fixed; inset: 0; z-index: 25; overflow: hidden; pointer-events: none; }",
                  ".mascot-sprite .m-look { transform: translate(calc(var(--lx, 0) * 1px), calc(var(--ly, 0) * 1px)); }",

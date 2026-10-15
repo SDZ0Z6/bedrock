@@ -93,10 +93,7 @@ def remember_many(entries) -> None:
             _log.warning("客户页的消费历史没有存下来（%s: %s）", type(exc).__name__, exc)
 
 
-def recall(number: str) -> Saved | None:
-    """上一次存下来的那一段；没有、或者存坏了就是 None。"""
-    with _lock:
-        entry = _read().get(number)
+def _parse(entry) -> Saved | None:
     if not isinstance(entry, dict):
         return None
     try:
@@ -109,3 +106,22 @@ def recall(number: str) -> Saved | None:
     if len(raw) != len(marked):
         return None
     return Saved(start=start, raw=raw, marked=marked, as_of=as_of)
+
+
+def recall(number: str) -> Saved | None:
+    """上一次存下来的那一段；没有、或者存坏了就是 None。"""
+    with _lock:
+        entry = _read().get(number)
+    return _parse(entry)
+
+
+def recall_many(numbers) -> dict[str, Saved]:
+    """好几个账号一起要（概览「每月账号和消费」要全部停用的账号）：文件只读一遍。没存过、存坏了的不在里面。"""
+    with _lock:
+        data = _read()
+    found = {}
+    for number in numbers:
+        saved = _parse(data.get(number))
+        if saved is not None:
+            found[number] = saved
+    return found
