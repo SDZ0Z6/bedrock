@@ -1690,6 +1690,64 @@ a.fchip:hover { text-decoration: none; }
   .mascot-bubble { padding: 8px 13px; font-size: 13.5px; }
 }
 
+/* ======================================================= 每个页面底下那只像素小家伙（pet.py、static/pet.js、_mascot.html 的 pet()）
+ * 一层盖满整个窗口、不拦点击的图层，只有它自己和右键菜单能点；比页面内容高，比下拉框（30）、图表提示（40）、
+ * 加载遮罩（60）、右上角的弹窗（90）都低，<dialog>、popover 在顶层更不用说。
+ * 它在哪、转了多少度全由 pet.js 写在 transform 上（转轴是脚底中间：在墙上转 ±90 度，在顶上转 180 度）；
+ * 走路、跳舞、举手还是欢迎条那几只的 class，这里加的是它自己的：眼睛跟着鼠标、被拎起来、往下掉、落地 */
+.pet-layer { position: fixed; inset: 0; z-index: 25; overflow: hidden; pointer-events: none; }
+.pet-layer[hidden] { display: none; }
+.mascot.pet { --s: 5; top: 0; bottom: auto; z-index: auto; pointer-events: auto; touch-action: none; cursor: grab;
+              transform-origin: 50% 100%; -webkit-user-select: none; user-select: none; }
+.mascot.pet.is-dragging { cursor: grabbing; }
+.mascot.pet:not(.on-floor) .mascot-shadow { display: none; }    /* 影子只在地上有 */
+/* 眼睛跟着鼠标：两只一起挪一格（--lx、--ly 是 -1、0、1；SVG 里 1px 就是一格），看着鼠标的时候露正脸那一套 */
+.mascot-sprite .m-look { transform: translate(calc(var(--lx, 0) * 1px), calc(var(--ly, 0) * 1px)); }
+.mascot.pet.is-looking .m-eyes-front { opacity: 1; }
+.mascot.pet.is-looking .m-eyes-side { opacity: 0; }
+/* 被拎起来、往下掉：举着手，腿乱蹬 */
+.mascot.pet:is(.is-dragging, .is-falling) .m-arms-up { opacity: 1; }
+.mascot.pet:is(.is-dragging, .is-falling) .m-arms-down,
+.mascot.pet:is(.is-dragging, .is-falling) .m-legs-stand { opacity: 0; }
+.mascot.pet:is(.is-dragging, .is-falling) .m-legs-a { animation: mascot-frame .2s steps(1, end) infinite; }
+.mascot.pet:is(.is-dragging, .is-falling) .m-legs-b { animation: mascot-frame .2s steps(1, end) infinite; animation-delay: -.1s; }
+/* 点一下蹦一下（在墙上、顶上也是往屋子里蹦）；落地压扁一下；收起来的时候淡出去 */
+.mascot.pet.is-hop .mascot-sprite { animation: pet-hop .42s cubic-bezier(.3, .7, .4, 1); }
+.mascot.pet.is-land .mascot-sprite { animation: pet-land .34s ease-out; }
+.pet-layer.is-leaving .pet { opacity: 0; transition: opacity .45s ease; }
+@keyframes pet-hop { 0%, 100% { transform: translateY(0); } 40% { transform: translateY(calc(var(--px) * -3px)); } }
+@keyframes pet-land { 0% { transform: scale(1.14, .76); } 55% { transform: scale(.95, 1.06); } 100% { transform: none; } }
+/* 对话框：不放在小家伙身上（它转着的时候字不能跟着倒），pet.js 摆在它头朝的那一边——地上在头顶，顶上在下面，
+ * 墙上在屋子里那一侧（data-side 是对话框在它哪边）；--tail 是小尾巴离对话框的边多远，指着它 */
+.pet-bubble { position: absolute; left: 0; top: 0; margin: 0; padding: 7px 11px; border-radius: 10px;
+              background: var(--text); color: var(--bg); font-size: 12.5px; line-height: 1.4;
+              width: max-content; max-width: min(240px, 70vw); box-shadow: 0 6px 16px rgba(20, 20, 19, .18);
+              pointer-events: none; animation: pet-pop .16s ease-out; }
+.pet-bubble[hidden] { display: none; }
+.pet-bubble::after { content: ""; position: absolute; border: 5px solid transparent; }
+.pet-bubble[data-side="above"]::after { top: 100%; left: var(--tail, 50%); margin-left: -5px; border-top-color: var(--text); }
+.pet-bubble[data-side="below"]::after { bottom: 100%; left: var(--tail, 50%); margin-left: -5px; border-bottom-color: var(--text); }
+.pet-bubble[data-side="right"]::after { right: 100%; top: var(--tail, 50%); margin-top: -5px; border-right-color: var(--text); }
+.pet-bubble[data-side="left"]::after { left: 100%; top: var(--tail, 50%); margin-top: -5px; border-left-color: var(--text); }
+@keyframes pet-pop { from { opacity: 0; } }
+/* 右键菜单：「收起小家伙」 */
+.pet-menu { position: absolute; left: 0; top: 0; width: 200px; padding: 6px; border: 1px solid var(--line); border-radius: 12px;
+            background: var(--panel); color: var(--text); box-shadow: 0 12px 32px rgba(20, 20, 19, .16); pointer-events: auto; }
+.pet-menu[hidden] { display: none; }
+.pet-menu button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px; border: 0; border-radius: 8px;
+                   background: transparent; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.pet-menu button:hover, .pet-menu button:focus-visible { background: var(--hover-strong); outline: none; }
+.pet-menu svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.pet-menu-note { margin: 2px 8px 4px; font-size: 11.5px; color: var(--text-mute); }
+/* 一格画几个像素：电脑上 5（50 × 40），宽屏上 6，手机上 4 */
+@media (min-width: 1180px) { .mascot.pet { --s: 6; } }
+@media (max-width: 760px) { .mascot.pet { --s: 4; } }
+@media (prefers-reduced-motion: reduce) {
+  .pet-bubble { animation: none; }
+  .pet-layer.is-leaving .pet { transition: none; }
+}
+@media print { .pet-layer { display: none !important; } }
+
 /* ------------------------------------------------------- 窄屏：侧边栏变横条 */
 @media (max-width: 900px) {
   .shell { flex-direction: column; align-items: stretch; }
@@ -2883,6 +2941,9 @@ a.event-who:hover { color: var(--accent-dim); }
 /* ---- 详情：五张图。6 栏：第一排账号、余额（4 栏），第二排调用次数（4 栏）、预估，最后每日消费整行 */
 .detail-bento { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-auto-flow: row dense; gap: 16px; margin-bottom: 18px; }
 .detail-bento .col-2 { grid-column: span 2; }
+.detail-bento .col-3 { grid-column: span 3; }   /* 调用次数、预估：各占一半宽 */
+/* 切「看多久」只换这一张卡片（app.js）：新的取回来之前先压暗，标题那一排照常亮着，看得出点的是哪个 */
+.viz-card.is-loading > :not(.viz-head) { opacity: .45; transition: opacity .15s ease; }
 .detail-bento .col-4 { grid-column: span 4; }
 .detail-bento .col-6 { grid-column: 1 / -1; }
 /* 「账号」：按阶段的横条，长短按占全部账号的比例；名字后面是这一档的账号头像 */
@@ -2917,11 +2978,12 @@ a.event-who:hover { color: var(--accent-dim); }
 @media (max-width: 1200px) {
   .detail-bento { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .detail-bento .col-2 { grid-column: span 1; }
+  .detail-bento .col-3 { grid-column: 1 / -1; }   /* 窄了各占一半太挤：上下各一整行 */
   .detail-bento .col-4 { grid-column: 1 / -1; }
 }
 @media (max-width: 760px) {
   .detail-bento { grid-template-columns: minmax(0, 1fr); }
-  .detail-bento .col-2, .detail-bento .col-4 { grid-column: auto; }
+  .detail-bento .col-2, .detail-bento .col-3, .detail-bento .col-4 { grid-column: auto; }
 }
 .gauge-facts .state-dot { display: inline-block; margin-right: 6px; vertical-align: 1px; }
 .viz-big.tone-warn { color: var(--warn); }
@@ -2939,12 +3001,19 @@ a.event-who:hover { color: var(--accent-dim); }
 .bal-bar.tone-warn > i { background: var(--warn); }
 .bal-bar.tone-danger > i { background: var(--danger); }
 .bal-sub { margin-top: 5px; font-size: 12px; color: var(--text-mute); }
+/* 每一行点进那个账号的页面：整行都能点，悬浮时垫一层底色、邮箱变成链接色。负边距抵掉内边距，排版不动 */
+a.bal-row { display: block; margin: -6px -8px; padding: 6px 8px; border-radius: 10px; color: inherit; text-decoration: none; }
+a.bal-row:hover { background: var(--hover-strong); }
+a.bal-row:hover .bal-mail { color: var(--accent-dim); text-decoration: underline; text-underline-offset: 2px; }
+a.bal-row:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 0; }
 .bal-note { display: flex; flex-direction: column; gap: 4px; margin: auto 0 0; padding-top: 12px; border-top: 1px solid var(--line-soft);
             font-size: 12px; color: var(--text-mute); }
 /* 只管每一行（> span）：写成 .bal-note span 会连小头像（也是 span）一起变成 flex，字母就不居中了。
    一行字太长会折行，头像对着第一行 */
 .bal-note > span { display: flex; align-items: flex-start; gap: 6px; line-height: 18px; }
 .bal-note .mini-av { width: 14px; height: 14px; margin-top: 2px; font-size: 8px; }
+.bal-note a { color: var(--text-dim); }
+.bal-note a:hover { color: var(--accent-dim); text-decoration: underline; text-underline-offset: 2px; }
 
 /* ---- 详情：时间线（页面脚本按数据画：横向、可拖、可筛） */
 .tl-box { margin-bottom: 18px; }
@@ -3291,6 +3360,12 @@ a.event-who:hover { color: var(--accent-dim); }
 .profile-grid > .card { min-width: 0; }
 .profile-grid > .card.span-all { grid-column: 1 / -1; }
 .profile-grid > .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+/* 资料页的「像素小家伙」：图、说明、开关一行 */
+.pet-pref { display: flex; align-items: center; gap: 16px; }
+.pet-pref-art { flex: 0 0 auto; width: 40px; height: 32px; }
+.pet-pref-text { flex: 1 1 auto; min-width: 0; }
+.pet-pref-state { margin: 0 0 4px; font-weight: 500; }
+.pet-pref .form-hint { display: block; margin: 0; }
 .card-pad { margin: 0; padding: 4px 22px 20px; }
 .card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 16px; }
 .card-actions .card-note { margin-right: auto; }

@@ -1,0 +1,5 @@
+{# 客户页切「看多久」时只换的那一张卡片（app.js 取回来换上去）：和整页上的同一份宏（_customer_charts.html） #}
+{% from "_customer_charts.html" import calls_card, estimate_card, spend_card %}
+{% if part == "calls" %}{{ calls_card(calls, calls_links) }}
+{% elif part == "estimate" %}{{ estimate_card(estimate, estimate_links) }}
+{% else %}{{ spend_card(trend, spend_links) }}{% endif %}

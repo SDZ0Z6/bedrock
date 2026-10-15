@@ -4,7 +4,8 @@
 
 还有在线时间的报到（POST /presence）：侧边栏那一套页面每 30 秒报一次（app.js），见 presence。
 它不续登录有效期（create_app 里的 _Sessions），页面开着不动，到点照样要重新登录。
-概览欢迎条右上角换背景（POST /me/scene，mascots.js 用 fetch 发）也记在自己的资料里。
+概览欢迎条右上角换背景（POST /me/scene，mascots.js 用 fetch 发）也记在自己的资料里；每个页面底下那只小家伙
+出不出来也是（POST /me/pet：资料页上的开关是普通表单，右键点它「收起小家伙」是 pet.js 用 fetch 发的）。
 """
 
 from __future__ import annotations
@@ -12,10 +13,10 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from flask import Blueprint, jsonify, redirect, render_template, request, url_for
+from flask import Blueprint, flash, jsonify, redirect, render_template, request, url_for
 
 from . import avatars, login_log, presence, users, welcome
-from .auth import client_ip, csrf_ok, csrf_protect, current_user, login_required
+from .auth import client_ip, csrf_ok, csrf_protect, current_user, fetched, login_required
 from .views import flash_result, page_meta
 
 bp = Blueprint("profile", __name__)
@@ -70,7 +71,7 @@ def save():
     try:
         look = users.clean_look(request.form.get("display"), request.form.get("avatar_text"),
                                 request.form.get("avatar_color"))
-        person = users.save_look(me, replace(look, scene=me.look.scene))    # 挑过的背景不动
+        person = users.save_look(me, replace(look, scene=me.look.scene, pet=me.look.pet))    # 挑过的背景、小家伙不动
     except users.UserError as exc:
         flash_result("资料没保存", text=str(exc), tone="error")
         return redirect(url_for("profile.me"))
@@ -95,6 +96,39 @@ def scene():
         return jsonify(ok=False, message=str(exc)), 400
     kind = chosen or welcome.auto_scene(datetime.now())
     return jsonify(ok=True, scene=chosen, kind=kind, label=welcome.SCENES[kind])
+
+
+@bp.route("/me/pet", methods=["POST"], endpoint="pet")
+@login_required
+def pet():
+    """每个页面底下那只小家伙出来（pet=on）还是收起来（pet=off），记在自己的资料里。资料页上的开关是普通表单：
+    存好回资料页，弹一句；右键点它「收起小家伙」是 fetch 发的：回 JSON {ok, pet}，令牌不对只回 403。"""
+    if not csrf_ok():
+        if fetched():
+            return jsonify(ok=False), 403
+        flash("表单已过期（会话可能已重启），请刷新页面后重试。", "error")
+        return redirect(url_for("profile.me"))
+    wanted = (request.form.get("pet") or "").strip()
+    if wanted not in ("on", "off"):
+        if fetched():
+            return jsonify(ok=False, message="开还是关？页面可能已经过期，刷新后再试。"), 400
+        flash_result("没改成", text="页面可能已经过期，刷新后再试。", tone="error")
+        return redirect(url_for("profile.me"))
+    me = current_user()
+    try:
+        users.save_look(me, replace(me.look, pet="" if wanted == "on" else users.PET_OFF))
+    except users.UserError as exc:
+        if fetched():
+            return jsonify(ok=False, message=str(exc)), 400
+        flash_result("没改成", text=str(exc), tone="error")
+        return redirect(url_for("profile.me"))
+    if fetched():
+        return jsonify(ok=True, pet=wanted)
+    if wanted == "on":
+        flash_result("小家伙回来了", text="每个页面底下都有它：鼠标放上去它说话，点一下蹦一下，按住能拖着扔。")
+    else:
+        flash_result("小家伙收起来了", text="哪个页面都不出来了；想它了在这儿再打开。")
+    return redirect(url_for("profile.me"))
 
 
 @bp.route("/presence", methods=["POST"], endpoint="presence")

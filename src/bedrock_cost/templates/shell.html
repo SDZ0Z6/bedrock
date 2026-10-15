@@ -1,6 +1,7 @@
 {# 登录后所有页面的外壳：左侧导航 + 右侧内容区 #}
 {% extends "base.html" %}
 {% from "_macros.html" import avatar %}
+{% from "_mascot.html" import pet %}
 {% block body_class %}app{% endblock %}
 
 {# 点导航时盖在旧页面上的等待文案。写的是**目标页**在等什么——点的时候
@@ -334,6 +335,15 @@
 <script id="presence" type="application/json">{{ {'url': url_for('profile.presence'), 'csrf': csrf_token(), 'every': 30} | tojson }}</script>
 {% endif %}
 
+{# 每个页面底下那只像素小家伙（pet.py、static/pet.js）：沿着屏幕边爬，能说话、能拖着扔；
+   自己的资料里收起来了（users.Look.pet）就不画，脚本也不加载 #}
+{% set pet_on = me and me.look.pet_on %}
+{% if pet_on %}
+{{ pet() }}
+<script id="pet-conf" type="application/json">{{ pet_conf(me, active_page | default('')) | tojson }}</script>
+{% endif %}
+
 {# 弹窗、账号选择器、柱状图提示这些几个页面共用的交互 #}
 <script src="{{ url_for('static', filename='app.js') }}"></script>
+{% if pet_on %}<script src="{{ url_for('static', filename='pet.js') }}"></script>{% endif %}
 {% endblock %}

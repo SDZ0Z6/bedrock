@@ -8,14 +8,16 @@
 （avatars.person_avatar）。没设显示名就显示用户名；登录、登录记录、操作日志里用的一直是用户名。
 
 存在 users.json（USERS_PATH）：
-  {"admin": {"display", "avatar_text", "avatar_color", "scene"},            管理员的资料（不存密码）
-   "users": [{"name", "note", "hash", "stamp", "disabled", "created", "display", "avatar_text", "avatar_color", "scene"}]}
+  {"admin": {"display", "avatar_text", "avatar_color", "scene", "pet"},     管理员的资料（不存密码）
+   "users": [{"name", "note", "hash", "stamp", "disabled", "created", "display", "avatar_text", "avatar_color", "scene",
+              "pet"}]}
   name      用户名（登录用，不分大小写；不能和管理员重名；建了就不改）
   note      备注（是谁，管理员自己看的）
   hash      密码的哈希（werkzeug，和 AUTH_PASSWORD_HASH 同一种）。**明文密码哪儿都不存**
   stamp     一个随机串：重置密码、自己改密码、停用都换一个。登录时存进会话，之后每个请求对一遍（session_user），
             对不上就当没登录——重置密码、停用、删除以后，这个用户在别处登录着的马上失效
   created   什么时候建的（UTC）
+  scene     概览欢迎条的背景（空着是自动）；pet 是页面底下那只小家伙出不出来（"off" 是收起来了，空着是出来）
 
 密码：新建、重置的时候管理员可以自己填（至少 MIN_PASSWORD 位），不填就由系统生成（new_password：4 组 4 个字，
 约 80 位），都只在那一下显示一次；用户登录以后在自己的资料页里改。
@@ -44,6 +46,7 @@ from . import avatars, config
 
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{2,31}")
 SCENE_RE = re.compile(r"[a-z]{1,16}")    # 背景的 key 长这样；有哪些由 welcome.SCENES 说了算
+PET_OFF = "off"
 NAME_RULE = "用户名 3 到 32 个字符：英文字母、数字和 . _ - @，开头是字母或数字。"
 MAX_NOTE = 60
 MAX_DISPLAY = 20
@@ -68,11 +71,17 @@ class WrongPassword(UserError):
 
 @dataclass(frozen=True)
 class Look:
-    """一个人在页面上的样子：显示名、头像（一个字或表情、八组底色里的第几组）、概览欢迎条的背景。都可以空着。"""
+    """一个人在页面上的样子：显示名、头像（一个字或表情、八组底色里的第几组）、概览欢迎条的背景、页面底下那只小家伙。
+    都可以空着。"""
     display: str = ""
     avatar_text: str = ""
     avatar_color: int | None = None
     scene: str = ""         # 背景（welcome.SCENES 的 key），空着是按时间、季节自动挑
+    pet: str = ""           # 每个页面底下走来走去的小家伙（pet.py）：PET_OFF 是收起来了，空着是出来
+
+    @property
+    def pet_on(self) -> bool:
+        return self.pet != PET_OFF
 
 
 @dataclass(frozen=True)
@@ -158,12 +167,12 @@ def _look(raw) -> Look:
     scene = str(raw.get("scene") or "")
     return Look(display=str(raw.get("display") or ""), avatar_text=str(raw.get("avatar_text") or ""),
                 avatar_color=color if isinstance(color, int) and 0 <= color < avatars.TONES else None,
-                scene=scene if SCENE_RE.fullmatch(scene) else "")
+                scene=scene if SCENE_RE.fullmatch(scene) else "", pet=PET_OFF if raw.get("pet") == PET_OFF else "")
 
 
 def _look_json(look: Look) -> dict:
     return {"display": look.display, "avatar_text": look.avatar_text, "avatar_color": look.avatar_color,
-            "scene": look.scene}
+            "scene": look.scene, "pet": look.pet}
 
 
 def _read(path: Path, strict: bool = False) -> Book:

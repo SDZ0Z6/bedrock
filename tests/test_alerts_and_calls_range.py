@@ -76,8 +76,8 @@ def test_调用次数右上角选看多久_和每日消费那排互相带着(adm
     html = admin.get("/customers/C001?calls=7").get_data(as_text=True)
     assert [on for *_, on in range_links(calls_card(html))] == [False, True, False, False]
     spend = re.findall(r'<a class="seg-item( is-on)?" href="([^"]+)#spend"', html)
-    assert [href.replace("&amp;", "&") for _, href in spend] == [
-        "/customers/C001?calls=7&spend=7", "/customers/C001?calls=7", "/customers/C001?calls=7&spend=90",
+    assert [href.replace("&amp;", "&") for _, href in spend] == [                # 客户页的每日消费默认近 7 天：那一档不带
+        "/customers/C001?calls=7", "/customers/C001?calls=7&spend=30", "/customers/C001?calls=7&spend=90",
         "/customers/C001?calls=7&spend=all"]
     assert 'id="calls"' in html
 

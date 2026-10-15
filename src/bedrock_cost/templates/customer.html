@@ -1,6 +1,6 @@
 {% extends "shell.html" %}
 {% from "_customer_macros.html" import cicon, cust_avatar, status_pill, mini, customer_fields, timeline_box with context %}
-{% from "_macros.html" import range_switch, spend_switch %}
+{% from "_customer_charts.html" import calls_card, estimate_card, spend_card %}
 {% block title %}{{ customer.name }} · 客户 · Bedrock 成本监控{% endblock %}
 {% block page_header %}{% endblock %}
 {% block loading_label %}正在处理{% endblock %}
@@ -105,7 +105,8 @@
     </div>
   </article>
 
-  {# 余额：还剩多少、用了多少（原来「额度使用」那张仪表并到这里）。总条和下面每个账号的条一样画「还剩」 #}
+  {# 余额：还剩多少、用了多少（原来「额度使用」那张仪表并到这里）。总条和下面每个账号的条一样画「还剩」。
+     每个账号（连同下面不算进余额的那几个）点了进它的账号页 #}
   <article class="viz-card col-4" data-reveal>
     <div class="viz-head">
       <div>
@@ -132,11 +133,12 @@
       <div class="bal-rows">
         {% for h in view.in_use %}
           {% set left_pct = [[(h.remaining / h.account.budget * 100) if h.account.budget > 0 else 0, 0] | max, 100] | min %}
-          <div class="bal-row" style="--i: {{ loop.index0 }}">
+          <a class="bal-row" style="--i: {{ loop.index0 }}" href="{{ url_for('account.summary', number=h.account.account) }}"
+             data-loading="正在读这个账号" title="去 {{ h.account.email or h.number }} 的账号页">
             <div class="bal-label">{{ mini(h.account) }}<span class="bal-mail">{{ h.account.email or h.number }}</span><b>{{ h.remaining | money0 }}</b></div>
             <div class="bal-bar {% if left_pct <= 100 - 90 %}tone-danger{% elif left_pct <= 100 - 70 %}tone-warn{% endif %}" data-reveal aria-hidden="true"><i style="width: {{ left_pct | round(1) }}%"></i></div>
             <div class="bal-sub">已使用 {{ h.spent | money0 }} · 还剩 {{ left_pct | round | int }}% · 额度 {{ h.account.budget | money0 }}</div>
-          </div>
+          </a>
         {% endfor %}
       </div>
     {% else %}
@@ -146,106 +148,17 @@
     {% if aside %}
       <p class="bal-note">
         {% for h in aside %}
-          <span>{{ mini(h.account) }}{{ h.account.email or h.number }} {{ h.stage_label }}，没用完的 {{ [h.remaining, 0] | max | money0 }} 不算</span>
+          <span>{{ mini(h.account) }}<span><a href="{{ url_for('account.summary', number=h.account.account) }}" data-loading="正在读这个账号"
+            title="去这个账号的页面">{{ h.account.email or h.number }}</a> {{ h.stage_label }}，没用完的 {{ [h.remaining, 0] | max | money0 }} 不算</span></span>
         {% endfor %}
       </p>
     {% endif %}
   </article>
 
-  {# 账单要晚 1~2 天，这张看现在：CloudWatch 的调用次数，晚几分钟。折线图，一个账号一条线，线尾是它的头像，颜色和
-     「每日消费」一样；点下面的账号挑几个只看它们，纵轴跟着它们重新算（app.js）。右上角选看多久：近 24 小时每小时
-     一个点，其余每天一个点（UTC 日期） #}
-  <article class="viz-card col-4" id="calls" data-reveal>
-    <div class="viz-head">
-      <div>
-        <h2 class="viz-title">调用次数</h2>
-        {% if calls.start %}<p class="viz-sub">{{ calls.start }} ~ {{ calls.end }}{% if not calls.hourly %} · 按 UTC 日期{% endif %}</p>{% endif %}
-      </div>
-      {{ range_switch(calls_links, 'calls', '正在读调用次数') }}
-    </div>
-    {% if calls.watched %}
-      <div>
-        {# 左边是调用次数，右边是今天到现在的预估花费（用量 × 牌价，以账单为准） #}
-        <div class="calls-kpis">
-          <p class="viz-big"><span data-countup>{{ calls.total | compact }}</span> <small>次 · {{ calls.label }}</small></p>
-          <p class="viz-big" title="CloudWatch 的用量 × 牌价（UTC 日期），和账号页「预估」页签、旁边的「预估」一个算法，以账单为准">
-            <span data-countup>{{ calls.today_cost | money }}</span> <small>今日预估{% if calls.partial %}（有的没算上）{% endif %}</small></p>
-        </div>
-        <p class="viz-meta">
-          {%- if calls.hourly %}最近一小时 <strong>{{ calls.last | compact }}</strong>
-          {%- else %}日均 <strong>{{ calls.average | compact }}</strong>{% endif %}
-          {%- if calls.peak_label %} · 最多的{{ '一小时' if calls.hourly else '一天' }} <strong>{{ calls.peak_value | compact }}</strong>（{{ calls.peak_label }}）{% endif %}
-          · {{ calls.active }} / {{ calls.watched }} 个{{ '在用的' if calls.hourly else '' }}账号有调用</p>
-      </div>
-      <div class="chart-wrap chart-fluid calls-chart" id="cust-calls" data-line-src="cust-calls-data">{{ calls.chart.svg | safe }}</div>
-      {% if calls.chart.tooltip %}<script id="cust-calls-data" type="application/json">{{ calls.chart.tooltip | tojson }}</script>{% endif %}
-      {# 一条线一个签（和「每日消费」下面的一样，签上的 data-s 是线的序号）：挑几个只看它们 #}
-      {% if calls.legend %}
-        <div class="legend-toggles" data-legend-for="cust-calls" role="group" aria-label="挑几个账号只看它们">
-          {% for item in calls.legend %}
-            <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false" title="{{ item.tip }}">
-              <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
-          {% endfor %}
-        </div>
-      {% endif %}
-      {% if calls.silent %}
-        <p class="calls-silent">{{ '这段时间' if calls.key == 'all' else calls.label }}没有调用：
-          {%- for h in calls.silent %}<span class="calls-who">{{ mini(h.account) }}{{ h.account.email or h.number }}</span>{% endfor %}</p>
-      {% endif %}
-    {% else %}
-      <p class="viz-empty">{{ '没有在用的账号。' if calls.hourly else '这段时间没有在这个客户名下用过的账号。' }}</p>
-    {% endif %}
-  </article>
-
-  {# 预估（原来是「还能用几天」）：账单晚 1~2 天，被 credits 抵掉时甚至一直是 0；这张看 CloudWatch 的用量 × 牌价，
-     一天一根（UTC 日期，今天算到现在），按账号叠起来，颜色和「每日消费」一样，悬浮看每个账号；右上角选看多久
-     （近 7 天、近 30 天、全部）；点下面的账号挑几个只看它们（和每日消费一样，纵轴跟着它们重新算）。卡片窄：
-     看多久那一排和标题一行，说明挪到下面一整行 #}
-  <article class="viz-card col-2" id="estimate" data-reveal>
-    <div class="viz-head">
-      <h2 class="viz-title">预估</h2>
-      {{ range_switch(estimate_links, 'estimate', '正在读预估') }}
-    </div>
-    <div>
-      <p class="viz-sub">{{ estimate.start }} ~ {{ estimate.end }} · CloudWatch 用量 × 牌价，按 UTC 日期 · 以账单为准</p>
-      <p class="viz-big"><span data-countup>{{ estimate.total | money0 }}</span>
-        <small>{{ estimate.what }}{% if estimate.partial %}（有的没算上）{% endif %}</small></p>
-      <p class="viz-meta">今天到现在 <strong>{{ estimate.today | money }}</strong> · 昨天 <strong>{{ estimate.yesterday | money }}</strong></p>
-    </div>
-    <div class="viz-chart" id="cust-estimate" data-tip-src="cust-estimate-data">{{ estimate.chart.svg | safe }}</div>
-    {% if estimate.chart.legend %}
-      <div class="legend-toggles" data-legend-for="cust-estimate" role="group" aria-label="挑几个账号只看它们">
-        {% for item in estimate.chart.legend %}
-          <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
-                  title="{{ item.name }} 近 7 天预估 {{ item.total | money }}">
-            <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
-        {% endfor %}
-      </div>
-    {% endif %}
-    <script id="cust-estimate-data" type="application/json">{{ estimate.chart.tooltip | tojson }}</script>
-  </article>
-
-  {# 每日消费：竖虚线是每个账号的启用、风控、换下、用完、结算、恢复（停的那条写着从启用起用了多少，悬浮看全）。
-     右上角选看多久；点下面的账号挑几个只看它们，连同它们的竖线 #}
-  <article class="viz-card col-6" id="spend" data-reveal>
-    <div class="viz-head">
-      <div>
-        <h2 class="viz-title">每日消费</h2>
-        <p class="viz-sub">{{ trend.start }} ~ {{ trend.end }} · 按账号叠起来，只算在用的那几天 · 竖虚线是启用、风控这些事 · Cost Explorer 晚 1~2 天出数</p>
-      </div>
-      {{ spend_switch(spend_links) }}
-    </div>
-    <p class="viz-big"><span data-countup>{{ trend.total | money0 }}</span> <small>{{ trend.label }}</small></p>
-    <div class="viz-chart wide-chart" id="cust-spend" data-tip-src="cust-spend-data">{{ trend.chart.svg | safe }}</div>
-    <div class="legend-toggles" data-legend-for="cust-spend" role="group" aria-label="挑几个账号只看它们">
-      {% for item in trend.chart.legend %}
-        <button class="legend-toggle" type="button" data-s="{{ loop.index0 }}" aria-pressed="false"
-                title="{{ item.name }} {{ trend.label }} {{ item.total | money }}">
-          <i class="swatch" style="background: {{ item.color }}"></i>{{ item.name }}</button>
-      {% endfor %}
-    </div>
-    <script id="cust-spend-data" type="application/json">{{ trend.chart.tooltip | tojson }}</script>
-  </article>
+  {# 调用次数、预估各占一半宽，每日消费一整行。三张都在 _customer_charts.html：切「看多久」时 app.js 只取这一张换上 #}
+  {{ calls_card(calls, calls_links) }}
+  {{ estimate_card(estimate, estimate_links) }}
+  {{ spend_card(trend, spend_links) }}
 </section>
 
 <!-- ------------------------------------------------ 时间线 -->
