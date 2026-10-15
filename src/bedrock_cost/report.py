@@ -65,6 +65,8 @@ class ReportRow:
     # 这次查询失败（error 照留），行上的金额是上一次成功查到这一天为止的结果；
     # None = 金额是这次新查的。见 last_known
     stale_as_of: date | None = None
+    # 每个月的折算后消费（YYYY-MM -> 金额），累计那次查询顺手按月留下的；查询失败、拿旧数顶着的时候是空的
+    monthly: dict[str, float] = field(default_factory=dict)
 
     @property
     def has_numbers(self) -> bool:
@@ -231,6 +233,8 @@ def build_row(
     row.total_cost = row.tag_cost + row.untag_cost
     row.usage_pct = _usage_pct(row.total_cost, row.budget)
     row.balance = row.budget - row.total_cost
+    row.monthly = {month: tag * account.tag_ratio + untag * account.untag_ratio
+                   for month, (tag, untag) in split.monthly.items()}
     return row
 
 

@@ -4,6 +4,8 @@
  * 头上冒个对话框说一句；点一下蹦一下、换一句。说什么从 #mascot-talk 里挑：一多半说自己脾气那一类（data-mood），
  * 有时候说看场合的（叫名字、看几点、看概览上的数），有时候说跟着背景的（下雨、下雪……），有时候说大家都会说的；
  * 被点了多半是「哎哟」那一类。最近说过的十句先不说，免得几只轮着说同一句。
+ * 不用等人：隔半分钟上下挑一只自己说一句（停下来举手，说三秒）；已经有对话框开着（这里的、页面底下那只的）、
+ * 页面在后台、欢迎条滚出屏幕时这一回不说。
  *
  * 风景跟着它们动：
  *   · 视差：按几只小家伙站的地方算一个「镜头」（--cam，-0.5 ~ 0.5，慢慢追过去），天、远山、树三层各按自己的
@@ -37,7 +39,7 @@
   const crew = Array.prototype.map.call(stage.querySelectorAll('[data-mascot]'), function (el) {
     return { el: el, bubble: el.querySelector('[data-bubble]'), mood: el.dataset.mood, x: 0, target: 0, dir: 1,
              speed: rand(SPEED), mode: 'rest', until: 0, held: false, hideTimer: null, puffAt: 0,
-             sleeping: false, slipping: false };
+             sleeping: false, slipping: false, chatting: false };
   });
   if (!crew.length) return;
   // 夜里睡着的那只：卖萌的那只（没有就第一只）
@@ -177,6 +179,7 @@
   function hold(m) {
     if (m.held) return;
     m.held = true;
+    m.chatting = false;
     if (!m.sleeping) {          // 睡着的那只不举手，说梦话
       m.el.classList.remove('is-walking', 'is-dancing');
       m.el.classList.add('is-talking');
@@ -211,6 +214,33 @@
       }
     });
   }
+
+  // ---- 不用等人，自己说一句：隔 CHAT_EVERY 挑一只没人理的，停下来举手说 CHAT_FOR（睡着的那只说梦话，不举手）
+  const CHAT_EVERY = [22000, 45000];
+  const CHAT_FOR = 3200;
+  function chatter() {
+    window.setTimeout(chatter, rand(CHAT_EVERY));
+    if (document.hidden || document.querySelector('.mascot-bubble:not([hidden]), .pet-bubble:not([hidden])')) return;
+    const box = stage.getBoundingClientRect();
+    if (box.bottom < 0 || box.top > window.innerHeight) return;
+    const idle = crew.filter(function (m) { return !m.held; });
+    if (!idle.length) return;
+    const m = idle[Math.floor(Math.random() * idle.length)];
+    m.chatting = true;
+    if (!m.sleeping) {
+      m.el.classList.remove('is-walking', 'is-dancing');
+      m.el.classList.add('is-talking');
+    }
+    say(m, false);
+    m.hideTimer = window.setTimeout(function () {
+      m.chatting = false;
+      if (m.held) return;
+      m.el.classList.remove('is-talking');
+      m.bubble.hidden = true;
+      if (!m.sleeping) setMode(m, 'rest', performance.now());
+    }, CHAT_FOR);
+  }
+  window.setTimeout(chatter, rand([8000, 16000]));
 
   // ---- 天上掉下来的：按背景撒一把（多少跟着台子宽窄），各自随机位置、快慢、从半路开始
   const WEATHER = {
@@ -377,7 +407,7 @@
     last = now;
     const snowy = stage.dataset.kind === 'snow';
     for (const m of crew) {
-      if (m.held || m.sleeping) continue;
+      if (m.held || m.sleeping || m.chatting) continue;
       if (m.mode === 'walk') {
         if (snowy && !m.slipping && Math.random() < dt * SLIP_RATE) {
           m.slipping = true;

@@ -80,7 +80,7 @@
   <div class="alert alert-error"><div><strong>无法生成报表：</strong>{{ fatal }}</div></div>
 {% elif report %}
 
-  <!-- ------------------------------------------------ 图：额度使用、消费构成、Top 账号 / 每日消费（整行，右上角选看多久） -->
+  <!-- ------------------------------------------------ 图：额度使用、消费构成、每月账号和消费 / 每日消费（整行，右上角选看多久） -->
   <section class="bento" aria-label="全部账号的图表">
     <article class="viz-card">
       <div class="viz-head">
@@ -97,7 +97,7 @@
           {%- if report.missing_count %} · 查询失败 <strong>{{ report.missing_count }} 个</strong>{% endif %}</p>
       </div>
       {# 和客户页「账号」那张一个样子：按生命周期（风控、正常……）一档一根横条，长短按占全部账号的比例，颜色是标签的颜色；
-         后面是这一档的账号头像（最多 5 个，使用率高的在前），鼠标放上去写全名。和下面「生命周期」筛选签的数一样：
+         后面是这一档的账号头像（最多 5 个，使用率高的在前），鼠标放上去写全名和额度。和下面「生命周期」筛选签的数一样：
          打了两个标签的两档都算 #}
       <div class="stage-bars">
         {% for life in life_rows %}
@@ -106,7 +106,7 @@
               <span class="stage-name">{{ life.name }}</span>
               <span class="stage-faces">
                 {%- for row in life.rows[:5] %}<span class="mini-av {{ row.avatar.css }}" data-tip="{{ row.email or row.account }}"
-                  data-tip-sub="{{ row.account }}{% if row.has_numbers and row.usage_pct is not none %} · 使用率 {{ row.usage_pct | pct }}{% endif %}">{{ row.avatar.text }}</span>{% endfor -%}
+                  data-tip-sub="{{ row.account }} · {% if row.budget > 0 %}额度 {{ row.budget | money0 }}{% else %}没设额度{% endif %}">{{ row.avatar.text }}</span>{% endfor -%}
                 {%- if life.count > 5 %}<span class="stage-more">+{{ life.count - 5 }}</span>{% endif -%}
               </span>
               <b>{{ life.count }}</b>
@@ -135,39 +135,28 @@
       </div>
     </article>
 
-    {# 累计消费最多的账号：默认前 5 个，右上角点「全部」看剩下的（记在这个浏览器里）。横条长短按第一名，颜色和旁边两张图一样 #}
-    <article class="viz-card span-2" id="top-card">
+    {# 每月账号和消费（原来这里是 Top 账号）：一个月一根堆叠柱是这个月的账号（正常、新加、停用，左边的轴），一条折线是
+       这个月的消费（右边的轴），鼠标划到哪个月几样一起看（dashboard.account_months、chart.render_month_combo）。
+       没算进去的（不知道哪天停的、没存过账的……）写在图下面 #}
+    <article class="viz-card span-2" id="months">
       <div class="viz-head">
         <div>
-          <h2 class="viz-title">Top 账号</h2>
-          <p class="viz-sub">按累计消费 · 各自从启用日起 · 后面是占全部消费的比例</p>
+          <h2 class="viz-title">每月账号和消费</h2>
+          <p class="viz-sub">近 {{ months.labels | length }} 个月 · 柱子是账号（左边的轴），新加按启用日期 ·
+            线是消费（右边的轴），折算后，含后来停用的账号</p>
         </div>
-        {% if top_spenders | length > 5 %}
-          <div class="seg seg-sm" role="group" aria-label="列几个">
-            <button class="seg-item is-on" type="button" data-top="5" aria-pressed="true">Top 5</button>
-            <button class="seg-item" type="button" data-top="all" aria-pressed="false">全部 <span class="seg-val">{{ top_spenders | length }}</span></button>
-          </div>
-        {% endif %}
       </div>
-      {% if top_spenders %}
-        <ol class="top-list">
-          {% for item in top_spenders %}
-            {% set row = item.row %}
-            <li class="top-row"{% if loop.index > 5 %} data-more hidden{% endif %} style="--i: {{ loop.index0 }}">
-              <span class="top-rank">{{ loop.index }}</span>
-              <span class="mini-av {{ row.avatar.css }}" data-tip="{{ row.email or row.account }}"
-                    data-tip-sub="{{ row.account }} · 上游 {{ row.partner }}">{{ row.avatar.text }}</span>
-              <a class="top-name" href="{{ url_for('account.summary', number=row.account) }}" data-loading="正在读这个账号"
-                 title="{{ row.email or row.account }}">{{ row.email or row.account }}</a>
-              <span class="top-bar" data-reveal aria-hidden="true"><i style="width: {{ '%.1f' % item.width }}%; background: {{ item.color }}"></i></span>
-              <b class="top-amount">{{ row.total_cost | money0 }}</b>
-              <span class="top-share">{{ '%.0f' % item.share }}%</span>
-            </li>
-          {% endfor %}
-        </ol>
-      {% else %}
-        <p class="viz-empty">还没有查到消费。</p>
-      {% endif %}
+      <div>
+        <p class="viz-big"><span data-countup>{{ months.total_spend | money0 }}</span> <small>近 {{ months.labels | length }} 个月消费</small></p>
+        <p class="viz-meta">新加 <strong>{{ months.total_added }}</strong> 个账号 · 停用 <strong>{{ months.total_disabled }}</strong> 个
+          · 这个月在用 <strong>{{ months.in_use }}</strong> 个</p>
+      </div>
+      <div class="viz-chart" id="months-chart" data-tip-src="months-data">{{ month_chart.svg | safe }}</div>
+      <div class="combo-legend">
+        {% for item in month_chart.legend %}<span class="combo-key is-{{ item.kind }}"><i style="background: {{ item.color }}"></i>{{ item.name }}</span>{% endfor %}
+      </div>
+      {% if months.notes %}<p class="combo-note">{{ months.notes | join('；') }}。</p>{% endif %}
+      <script id="months-data" type="application/json">{{ month_chart.tooltip | tojson }}</script>
     </article>
 
     <article class="viz-card span-all" id="spend">
@@ -390,28 +379,6 @@
 {% if report and report.rows %}
 <script>
 (function () {
-  // ---- Top 账号：前 5 个 / 全部，记在这个浏览器里（读不到就是前 5 个）
-  const topCard = document.getElementById('top-card');
-  if (topCard) {
-    const showTop = function (which) {
-      for (const b of topCard.querySelectorAll('[data-top]')) {
-        const on = b.dataset.top === which;
-        b.classList.toggle('is-on', on);
-        b.setAttribute('aria-pressed', String(on));
-      }
-      for (const row of topCard.querySelectorAll('[data-more]')) row.hidden = which !== 'all';
-    };
-    let saved = '5';
-    try { saved = localStorage.getItem('overview-top') || '5'; } catch (e) { /* 无痕模式之类：就前 5 个 */ }
-    if (saved === 'all' && topCard.querySelector('[data-top]')) showTop('all');
-    topCard.addEventListener('click', function (event) {
-      const button = event.target.closest('[data-top]');
-      if (!button) return;
-      showTop(button.dataset.top);
-      try { localStorage.setItem('overview-top', button.dataset.top); } catch (e) { /* 存不了就算了 */ }
-    });
-  }
-
   const grid = document.getElementById('acct-grid');
   const empty = document.getElementById('acct-empty');
   if (!grid) return;

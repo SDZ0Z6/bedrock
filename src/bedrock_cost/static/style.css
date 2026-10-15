@@ -2469,23 +2469,12 @@ svg.is-zoomed.is-panning { cursor: grabbing; }
   .side-account { margin: 0; padding: 4px 8px; }
 }
 
-/* 概览「Top 账号」：名次、小头像、邮箱（点了去账号页）、横条（按第一名，颜色和「消费构成」一样）、累计消费、占比。
-   每行各是一个 grid，金额那一栏定宽，横条才上下对齐。第 6 名起默认藏着（hidden），右上角点「全部」才出来 */
-.top-list { display: flex; flex-direction: column; gap: 11px; margin: 0; padding: 0; list-style: none; }
-.top-row { display: grid; grid-template-columns: 18px 20px minmax(0, 1.4fr) minmax(60px, 1fr) 96px 38px; align-items: center;
-  gap: 10px; font-size: 13px; }
-.top-row[hidden] { display: none; }
-.top-rank { color: var(--text-mute); font-variant-numeric: tabular-nums; text-align: right; }
-.top-row .mini-av { width: 20px; height: 20px; font-size: 10px; }
-.top-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text); }
-.top-bar { height: 8px; border-radius: 999px; background: var(--panel-3); overflow: hidden; }
-.top-bar > i { display: block; height: 100%; border-radius: inherit; }
-.top-amount { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
-.top-share { color: var(--text-mute); font-variant-numeric: tabular-nums; text-align: right; }
-@media (max-width: 760px) {
-  .top-row { grid-template-columns: 18px 20px minmax(0, 1fr) 88px 34px; }
-  .top-bar { display: none; }
-}
+/* 概览「每月账号和消费」：图下面一排图例（柱子是小方块，线是一短横），再下面一行没算进去的几句 */
+.combo-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--text-dim); }
+.combo-key { display: inline-flex; align-items: center; gap: 6px; }
+.combo-key i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
+.combo-key.is-line i { width: 14px; height: 2px; border-radius: 1px; }
+.combo-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-mute); }
 /* 小头像上鼠标放上去弹全名（app.js 的 data-tip），不是能点的东西 */
 .mini-av[data-tip] { cursor: default; }
 
@@ -3271,7 +3260,6 @@ a.bal-row:focus-visible { outline: 2px solid var(--accent-strong); outline-offse
   /* 余额条：和进度条一样从左往右长出来 */
   .bal-bar > i { animation: meter-fill .9s cubic-bezier(.33, 1, .68, 1) backwards; animation-delay: calc(.2s + var(--i, 0) * 90ms); }
   .stage-bar > i { animation: meter-fill .9s cubic-bezier(.33, 1, .68, 1) backwards; animation-delay: calc(.2s + var(--i, 0) * 90ms); }
-  .top-bar > i { animation: meter-fill .9s cubic-bezier(.33, 1, .68, 1) backwards; animation-delay: calc(.2s + var(--i, 0) * 70ms); }
   /* 时间线：从最近的那件开始，一张张浮上来 */
   /* 时间线从以前流到现在：先淡出左边的虚线，实线从左往右画过去，事件跟着一件件从左边滑进来，
      最后亮出「今天」和后面的虚线；实线上一直有一道光从以前流向现在 */

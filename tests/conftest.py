@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import urllib.error
 import urllib.request
-from datetime import date
+from datetime import date, timedelta
 
 import openpyxl
 import pytest
@@ -60,6 +60,17 @@ def ledger_without(column: str) -> tuple[list, list]:
         for row in LEDGER_ROWS
     ]
     return header, rows
+
+
+def monthly_split(start: date, end: date) -> dict[str, tuple[float, float]]:
+    """fake_costs 的按月那一份：每天 DAILY_TAGGED_RAW / DAILY_UNTAGGED_RAW，按月加起来（和 CE 的 MONTHLY 一样）。"""
+    out: dict[str, tuple[float, float]] = {}
+    day = start
+    while day <= end:
+        tag, untag = out.get(day.strftime("%Y-%m"), (0.0, 0.0))
+        out[day.strftime("%Y-%m")] = (tag + DAILY_TAGGED_RAW, untag + DAILY_UNTAGGED_RAW)
+        day += timedelta(days=1)
+    return out
 
 
 def day_count(start: date, end: date) -> int:
@@ -253,7 +264,7 @@ def fake_costs(monkeypatch):
     """把两条 CE 通路都换成固定数值，互相对得上。"""
 
     def fake_fetch_all(account_list, ranges, refresh=False):
-        # 区间按账号给：概览页每个账号的起点可能不同
+        # 区间按账号给：概览页每个账号的起点可能不同。和真的一样按月给一份（monthly）
         splits = {}
         for account in account_list:
             start, end = ranges[account.key]
@@ -262,6 +273,7 @@ def fake_costs(monkeypatch):
                 tag_raw=DAILY_TAGGED_RAW * days,
                 untag_raw=DAILY_UNTAGGED_RAW * days,
                 currency="USD",
+                monthly=monthly_split(start, end),
             )
         return splits
 

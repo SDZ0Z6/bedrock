@@ -636,6 +636,17 @@ def test_风景跟着小家伙动_减少动态效果时都不动():
     assert "if (still.matches) return;" in js
 
 
+def test_小家伙不用等人也偶尔说一句():
+    """隔半分钟上下挑一只没人理的自己说一句（停下来举手，说三秒）；已经有对话框开着（欢迎条上的、页面底下那只的）、
+    页面在后台、欢迎条滚出屏幕时这一回不说。减少动态效果时也说：说话不算动。"""
+    js = (config.BASE_DIR / "src" / "bedrock_cost" / "static" / "mascots.js").read_text(encoding="utf-8")
+    assert "const CHAT_EVERY = [22000, 45000];" in js and "window.setTimeout(chatter, rand([8000, 16000]));" in js
+    assert "document.querySelector('.mascot-bubble:not([hidden]), .pet-bubble:not([hidden])')" in js
+    assert "if (document.hidden" in js and "if (box.bottom < 0 || box.top > window.innerHeight) return;" in js
+    assert "if (m.held || m.sleeping || m.chatting) continue;" in js                # 说话的时候停下来
+    assert js.index("window.setTimeout(chatter") < js.index("if (still.matches) return;")
+
+
 # ====================================================================== 只读用户：看得到什么
 def test_侧边栏_没有账号管理用户管理和设置_底下是自己(lily):
     html = lily.get("/").get_data(as_text=True)

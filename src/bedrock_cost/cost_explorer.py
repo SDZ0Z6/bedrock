@@ -21,7 +21,7 @@ import threading
 import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 import boto3
@@ -54,6 +54,9 @@ class CostSplit:
     # 失败原因的结构化版本（哪个账号、一句话原因、AWS 原话），给页面的报错弹窗用。
     # error 是它的一行字（problem.message），report / alerts / last_known 照旧只读 error
     problem: QueryError | None = None
+    # 每个月的 (TAG, UNTAG) 原价：查询本来就是按月的，加总之前顺手留一份，概览「每月账号和消费」用。
+    # 键是 YYYY-MM；last_known 顶上来的旧数没有这一份（空的）
+    monthly: dict[str, tuple[float, float]] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -130,6 +133,8 @@ def _query(account: Account, start: date, end: date) -> CostSplit:
         response = client.get_cost_and_usage(**request)
 
         for bucket in response.get("ResultsByTime", []):
+            month = str((bucket.get("TimePeriod") or {}).get("Start") or "")[:7]
+            tag_month, untag_month = split.monthly.get(month, (0.0, 0.0))
             for group in bucket.get("Groups", []):
                 metric = group.get("Metrics", {}).get(config.COST_METRIC, {})
                 amount = float(metric.get("Amount") or 0.0)
@@ -145,14 +150,19 @@ def _query(account: Account, start: date, end: date) -> CostSplit:
 
                 if is_tag:
                     split.tag_raw += amount
+                    tag_month += amount
                 else:
                     split.untag_raw += amount
+                    untag_month += amount
             # 某些区间 CE 不返回 Groups，只给 Total（例如完全没有消费）
             if not bucket.get("Groups"):
                 total = bucket.get("Total", {}).get(config.COST_METRIC, {})
                 if total.get("Unit"):
                     split.currency = total["Unit"]
                 split.untag_raw += float(total.get("Amount") or 0.0)
+                untag_month += float(total.get("Amount") or 0.0)
+            if month:
+                split.monthly[month] = (tag_month, untag_month)
 
         next_token = response.get("NextPageToken")
         if not next_token:

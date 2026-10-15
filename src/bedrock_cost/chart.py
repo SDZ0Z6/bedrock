@@ -1215,6 +1215,130 @@ def render_bars(
     return Chart(svg="".join(parts), width=width, height=height, tooltip=tooltip, legend=legend)
 
 
+# 概览「每月账号和消费」的颜色按意思取，不用分类色板：分类色在旁边几张图上是一个个账号的颜色，用在这里会被看成账号。
+#   正常：和「额度使用」里「正常」那根横条同一个绿；新加：陶土色（品牌色，最显眼）；停用：深灰（关掉了）；
+#   消费：墨色的线，和三种柱子都不撞。validate_palette 对白底跑过（叠起来相邻的两两）：色觉障碍 ΔE ≥ 8.4、
+#   正常视力 ΔE ≥ 23、对比度都过；绿的色度差一点点到下限、深灰本来就是中性的，都是有意的
+MONTH_COLORS = {"normal": TONE_COLORS["ok"], "added": "#d97757", "disabled": "#5e5d59", "spend": LABEL_TEXT}
+# 柱子从下往上叠：正常在底下，上面是新加，最上面是停用
+MONTH_STACK = (("normal", "正常"), ("added", "新加"), ("disabled", "停用"))
+
+
+def render_month_combo(months, width: int = 500, fmt=None, axis=None) -> Chart:
+    """概览「每月账号和消费」：一个月一根堆叠柱，是这个月的账号——正常、新加、停用三段（左边的纵轴，个数）；一条折线是
+    这个月的消费（右边的纵轴，金额）。右边的刻度和左边落在同一排网格线上，一根线看两边。鼠标划到哪个月，几样一起列在
+    提示里：用的是柱状图那一套（.bar-col、.chart-hit、data-tip-src，app.js），提示的 head 是空的——单位不同，没有「合计」。
+    还没过完的这个月（最后一格）折线上那一点是空心的。线压在柱子上，底下垫一道底色的边，和柱子分得开。
+    months 是 dashboard.account_months 的结果；fmt 把金额写成提示里的样子，axis 是右边纵轴的写法。
+    画 500 宽：卡片占半行，差不多就是这么宽，字不会被缩小。"""
+    fmt = fmt or (lambda value: f"${value:,.0f}")
+    axis = axis or short_money
+    count = len(months.labels)
+    pad_l, pad_r, pad_t, pad_b = 40.0, 50.0, 30.0, 36.0
+    height = 330.0
+    plot_h = height - pad_t - pad_b
+    bottom_y = pad_t + plot_h
+    if not count:
+        svg = (f'<svg class="chart-svg" viewBox="0 0 {width} {height:.0f}" width="{width}" height="{height:.0f}" '
+               f'role="img" aria-label="没有数据"><text x="{width / 2:.0f}" y="{height / 2:.0f}" text-anchor="middle" '
+               f'fill="{TICK_TEXT}" font-size="13">还没有数据</text></svg>')
+        return Chart(svg=svg, width=width, height=round(height), empty=True)
+    band = (width - pad_l - pad_r) / count
+
+    def centre(i: int) -> float:
+        return pad_l + band * i + band / 2
+
+    values = {key: getattr(months, key) for key, _ in MONTH_STACK}
+    totals = [sum(values[key][i] for key, _ in MONTH_STACK) for i in range(count)]
+    # 左边（个数）取整数刻度，至少两格；右边（金额）用同样几格，刻度落在同一排网格线上
+    top_count = max(totals) or 1
+    count_step = max(1.0, float(math.ceil(_nice_step(top_count, 4))))
+    ticks = max(2, math.ceil(top_count / count_step - 1e-9))
+    count_scale = plot_h / (count_step * ticks)
+    top_spend = max(months.spend) or 1.0
+    spend_step = _nice_step(top_spend, ticks)
+    spend_scale = plot_h / (spend_step * ticks)
+
+    parts = [
+        f'<svg class="chart-svg bar-chart month-combo" viewBox="0 0 {width} {height:.0f}" width="{width}" '
+        f'height="{height:.0f}" role="img" aria-label="每月账号和消费，{count} 个月">',
+        '<g class="chart-grid">',
+        f'<text x="4" y="{pad_t - 14:.0f}" fill="{TICK_TEXT}" font-size="10.5">账号（个）</text>',
+        f'<text x="{width - 4:.0f}" y="{pad_t - 14:.0f}" text-anchor="end" fill="{TICK_TEXT}" font-size="10.5">消费</text>',
+    ]
+    for tick in range(ticks + 1):
+        y = bottom_y - plot_h * tick / ticks
+        parts.append(
+            f'<line x1="{pad_l:.0f}" y1="{y:.2f}" x2="{width - pad_r:.0f}" y2="{y:.2f}" '
+            f'stroke="{BASELINE if tick == 0 else GRID}" stroke-width="1"></line>'
+            f'<text x="{pad_l - 8:.0f}" y="{y + 4:.2f}" text-anchor="end" fill="{TICK_TEXT}" font-size="10.5" '
+            f'style="font-variant-numeric:tabular-nums">{count_step * tick:.0f}</text>'
+            f'<text x="{width - pad_r + 8:.0f}" y="{y + 4:.2f}" fill="{TICK_TEXT}" font-size="10.5" '
+            f'style="font-variant-numeric:tabular-nums">{html.escape(axis(spend_step * tick))}</text>'
+        )
+    parts.append('</g><g class="chart-bars">')
+    bar_w = min(BAR_MAX_W, band * 0.56)
+    for i in range(count):
+        x = centre(i) - bar_w / 2
+        stack = [(k, MONTH_COLORS[key], values[key][i]) for k, (key, _) in enumerate(MONTH_STACK) if values[key][i] > 0]
+        bottom = bottom_y
+        parts.append(f'<g class="bar-col" data-idx="{i}" style="--i:{i}">')
+        for n, (k, colour, value) in enumerate(stack):
+            top = bottom - value * count_scale
+            if n == len(stack) - 1:
+                parts.append(f'<path data-s="{k}" d="{_round_top(x, top, bar_w, bottom, BAR_RADIUS)}" fill="{colour}"></path>')
+            else:
+                seg_top = min(bottom, top + BAR_GAP)   # 上面还有一段：顶端让出一道底色的缝
+                parts.append(f'<rect data-s="{k}" x="{x:.2f}" y="{seg_top:.2f}" width="{bar_w:.2f}" '
+                             f'height="{bottom - seg_top:.2f}" fill="{colour}"></rect>')
+            bottom = top
+        parts.append("</g>")
+    colour = MONTH_COLORS["spend"]
+    points = [(centre(i), bottom_y - months.spend[i] * spend_scale) for i in range(count)]
+    path = " L".join(f"{x:.2f},{y:.2f}" for x, y in points)
+    parts.append(
+        '</g><g class="chart-line">'
+        f'<path d="M{path}" fill="none" stroke="{SURFACE}" stroke-width="5" stroke-linejoin="round" '
+        'stroke-linecap="round"></path>'
+        f'<path d="M{path}" fill="none" stroke="{colour}" stroke-width="2" stroke-linejoin="round" '
+        'stroke-linecap="round"></path>'
+    )
+    for i, (x, y) in enumerate(points):
+        if i == count - 1:      # 这个月还没过完：空心
+            parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="4" fill="{SURFACE}" stroke="{colour}" stroke-width="2"></circle>')
+        else:                   # 实心，外面一圈 2px 底色，和线、柱子分开
+            parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="4" fill="{colour}" stroke="{SURFACE}" stroke-width="2"></circle>')
+    parts.append('</g><g class="chart-xaxis">')
+    for i in range(count):
+        parts.append(f'<text x="{centre(i):.2f}" y="{bottom_y + 17:.0f}" text-anchor="middle" fill="{TICK_TEXT}" '
+                     f'font-size="10.5" data-i="{i}">{html.escape(months.labels[i])}</text>')
+        if months.years[i]:
+            parts.append(f'<text x="{centre(i):.2f}" y="{bottom_y + 30:.0f}" text-anchor="middle" fill="{TICK_TEXT}" '
+                         f'font-size="9.5">{html.escape(months.years[i])}</text>')
+    parts.append('</g><g class="chart-hits">')
+    for i in range(count):
+        said = (f"{months.tips[i]}：消费 {fmt(months.spend[i])}，新加 {months.added[i]} 个，正常 {months.normal[i]} 个，"
+                f"停用 {months.disabled[i]} 个")
+        parts.append(f'<rect class="chart-hit" data-idx="{i}" x="{pad_l + band * i:.2f}" y="{pad_t:.0f}" '
+                     f'width="{band:.2f}" height="{plot_h:.0f}" tabindex="0" role="button" '
+                     f'aria-label="{html.escape(said)}"></rect>')
+    parts.append("</g></svg>")
+    tooltip = [
+        {"label": months.tips[i], "head": "", "rows": [
+            {"name": "消费", "color": MONTH_COLORS["spend"], "value": fmt(months.spend[i])},
+            {"name": "新加", "color": MONTH_COLORS["added"], "value": f"{months.added[i]} 个"},
+            {"name": "正常", "color": MONTH_COLORS["normal"], "value": f"{months.normal[i]} 个"},
+            {"name": "停用", "color": MONTH_COLORS["disabled"], "value": f"{months.disabled[i]} 个"},
+        ]}
+        for i in range(count)
+    ]
+    legend = [{"name": "新加", "color": MONTH_COLORS["added"], "kind": "bar"},
+              {"name": "正常", "color": MONTH_COLORS["normal"], "kind": "bar"},
+              {"name": "停用", "color": MONTH_COLORS["disabled"], "kind": "bar"},
+              {"name": "消费", "color": MONTH_COLORS["spend"], "kind": "line"}]
+    return Chart(svg="".join(parts), width=width, height=round(height), tooltip=tooltip, legend=legend)
+
+
 def render_spark(values: list[float], accent: str = "#d97757", width: int = 112, height: int = 28) -> str:
     """卡片里的迷你柱图：前面几天用退后一步的灰，最后一天（今天）用强调色。进场时一根根长出来（CSS）。"""
     count = len(values)

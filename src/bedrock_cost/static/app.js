@@ -781,12 +781,16 @@
         if (!item) return;
         svg.classList.add('is-hovering');
         columns.forEach(function (col, i) { col.classList.toggle('is-hover', i === index); });
-        // 挑了几项的时候只列这几项，合计也只加这几项；只剩一行就不写合计（图上已经只剩它了）
+        // 挑了几项的时候只列这几项，合计也只加这几项；只剩一行就不写合计（图上已经只剩它了）。
+        // 数据里自带 head 的照它写（概览「每月账号和消费」：几样单位不同，没有合计，head 是空的）
         const rows = picked.size ? item.rows.filter(function (r) { return picked.has(r.s); }) : item.rows;
         const sum = rows.length > 1 ? writeLike(item.total, rows.reduce(function (t, r) { return t + (r.v || 0); }, 0)) : '';
-        const head = !picked.size ? '合计 ' + item.total : sum ? '合计 ' + sum : rows.length ? '' : '这天没有';
+        const head = typeof item.head === 'string' ? item.head
+          : !picked.size ? '合计 ' + item.total : sum ? '合计 ' + sum : rows.length ? '' : '这天没有';
         fillTip(item.label, head, rows);
-        placeTip((columns[index] || hit).getBoundingClientRect());
+        // 贴着这一根柱子摆；这一格没有柱子（量是 0）就贴着这一格
+        const column = columns[index] ? columns[index].getBoundingClientRect() : null;
+        placeTip(column && column.width ? column : hit.getBoundingClientRect());
       };
       hit.addEventListener('mouseenter', show);
       hit.addEventListener('focus', show);

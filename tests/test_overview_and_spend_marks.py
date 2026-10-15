@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import date, timedelta
 from pathlib import Path
@@ -66,12 +67,12 @@ def test_额度使用是按生命周期的横条(logged_in, book, fake_costs):
         ("正常", False), ("结算", True), ("风控", False)]
     bars = re.findall(r'<div class="stage-bar" data-reveal aria-hidden="true"><i style="width: ([\d.]+)%; background: ([^"]+)"', box)
     assert bars == [("50.0", "#2c7652"), ("0.0", "#87867f"), ("50.0", "#bc3b2e")]   # 颜色是标签的颜色
-    # 头像上是全名，下面一行是号码和使用率
+    # 头像上是全名，下面一行是号码和额度（不写使用率）
     faces = [re.findall(r'<span class="mini-av av-\d+" data-tip="([^"]+)"\s+data-tip-sub="([^"]+)">', body)
              for _, body in rows]
     assert [[(email, sub.split(" · ")[0]) for email, sub in row] for row in faces] == [
         [("alpha@example.com", "111111111111")], [], [("beta@example.com", "222222222222")]]
-    assert faces[0][0][1].split(" · ")[1].startswith("使用率 ")
+    assert re.fullmatch(r"额度 \$[\d,]+", faces[0][0][1].split(" · ")[1]) and "使用率" not in box[box.index("stage-bars"):]
     assert 'title="' not in rows[0][1]
 
 
@@ -80,30 +81,127 @@ def test_悬浮提示_鼠标放上去立刻弹出():
     assert "closest('[data-tip]')" in js and "el.dataset.tipSub" in js and "el.dataset.tipFoot" in js
 
 
-# ====================================================================== 2. Top 账号
-def test_Top账号按累计消费排(logged_in, book, fake_costs):
+# ====================================================================== 2. 每月账号和消费（原来的 Top 账号）
+def _acct(number: str, start: date | None, enabled: bool = True):
+    return SimpleNamespace(account=number, start_date=start, enabled=enabled)
+
+
+def _event(number: str, day: date, kind: str = "disable", deleted: bool = False):
+    return SimpleNamespace(account=number, date=day, type=kind, deleted=deleted, source="manual")
+
+
+def test_每月账号和消费_新加正常停用_消费含停用账号存下来的账(tmp_path, monkeypatch):
+    """一个月一个账号只算一段：启用日期在这个月是新加；这个月停的是停用（EVENTS 里记的，没记的看操作日志）；
+    之前就在用、这个月也一直开着的是正常。"""
+    from bedrock_cost import cost_history, excel_source
+
+    today = date(2026, 10, 15)
+    accounts = [
+        _acct("100000000001", date(2026, 3, 5)),               # 3 月新加，在用
+        _acct("100000000002", date(2026, 8, 1)),               # 8 月新加，在用
+        _acct("100000000003", date(2026, 8, 20), False),       # 8 月新加，9 月停用（EVENTS 里记了）
+        _acct("100000000004", date(2025, 6, 1), False),        # 一年多以前加的，一直正常；操作日志里 7 月停用
+        _acct("100000000005", None, False),                    # 没填启用日期，也不知道哪天停的
+    ]
+    events = [
+        _event("100000000003", date(2026, 9, 2)),
+        _event("100000000003", date(2026, 9, 20)),             # 一个月里停了两回：算一个
+        _event("100000000002", date(2026, 9, 9), deleted=True),  # 删掉的不算
+        _event("100000000001", date(2026, 9, 9), kind="note"),
+        _event("999999999999", date(2026, 9, 9)),              # 台账里已经没有的号码不算
+    ]
+    # 2026-10-10 之前停的没进 EVENTS：去操作日志里找最近一回「停用账号」（老写法、新写法都认号码）
+    monkeypatch.setattr(config, "EXCEL_PATH", tmp_path / "cred.xlsx")
+    (tmp_path / excel_source.AUDIT_NAME).write_text(
+        "2026-05-01 09:00:00\tadmin\t停用账号 100000000004（Jeff）\n"
+        "2026-06-01 09:00:00\tadmin\t恢复账号 old@example.com（100000000004）\n"
+        "2026-07-03 10:00:00\tadmin\t停用账号 old@example.com（100000000004）\t127.0.0.1\n", encoding="utf-8")
+    # 停用的账号：客户页存下来的每天的账（8-20 起每天 10 块，到 9-10）
+    days = [date(2026, 8, 20) + timedelta(days=i) for i in range(22)]
+    cost_history.remember("100000000003", [d.isoformat() for d in days], [8.0] * 22, [10.0] * 22)
+    rows = [SimpleNamespace(monthly={"2026-09": 100.0, "2026-10": 50.0, "2025-01": 999.0}, error=None),
+            SimpleNamespace(monthly={}, error="查不到")]
+
+    months = dashboard.account_months(rows, accounts, events, today)
+    # 004 去年 6 月就在用，近 12 个月每个月都有账号：一个月都不省
+    assert months.keys == [f"2025-{m:02d}" for m in (11, 12)] + [f"2026-{m:02d}" for m in range(1, 11)]
+    assert months.labels == ["11月", "12月"] + [f"{m}月" for m in range(1, 11)]
+    assert months.years == ["2025", "", "2026"] + [""] * 9
+    assert months.tips[-1] == "2026 年 10 月（到今天）"
+    #                        11 12  1  2  3  4  5  6  7  8  9 10
+    assert months.added ==    [0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0]
+    assert months.normal ==   [1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 2, 2]     # 004 停之前、001 新加之后、002 新加之后
+    assert months.disabled == [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0]     # 004 七月（操作日志）、003 九月（停了两回算一个）
+    assert months.spend == [0.0] * 9 + [120.0, 200.0, 50.0]          # 8 月 12 天 × 10；9 月 100 + 10 天 × 10
+    assert (months.total_added, months.total_disabled, months.total_spend, months.in_use) == (3, 2, 370.0, 2)
+    assert months.notes == ["1 个停用的账号不知道哪天停的，没算进去", "2 个停用的账号没存过每天的账，消费里没有它们",
+                            "1 个账号这次没查到 Cost Explorer，消费里少了它们", "1 个账号没填启用日期，没算进新加、正常"]
+
+
+def test_每月账号和消费_同一个月新加又停了算停用():
+    accounts = [_acct("100000000001", date(2026, 9, 3), False), _acct("100000000001", date(2026, 9, 1), False)]
+    months = dashboard.account_months([], accounts, [_event("100000000001", date(2026, 9, 25))], date(2026, 10, 15))
+    assert (months.added[-2], months.normal[-2], months.disabled[-2]) == (0, 0, 1)   # 同一个号码两行：按一个算
+    assert (months.added[-1], months.normal[-1], months.disabled[-1]) == (0, 0, 0)
+
+
+def test_每月账号和消费_至少六个月_跨年写年份():
+    months = dashboard.account_months([], [_acct("100000000001", date(2026, 12, 3))], [], date(2027, 2, 10))
+    assert months.labels == ["9月", "10月", "11月", "12月", "1月", "2月"]
+    assert months.years == ["2026", "", "", "", "2027", ""]
+    assert months.added == [0, 0, 0, 1, 0, 0] and months.normal == [0, 0, 0, 0, 1, 1] and months.notes == []
+
+
+def test_每月账号和消费的图_柱子看左边_线看右边():
+    months = SimpleNamespace(labels=["8月", "9月", "10月"], years=["2026", "", ""],
+                             tips=["2026 年 8 月", "2026 年 9 月", "2026 年 10 月（到今天）"],
+                             added=[2, 0, 1], normal=[3, 0, 5], disabled=[1, 0, 0], spend=[1200.0, 900.0, 300.0])
+    drawn = chart.render_month_combo(months)
+    svg = drawn.svg
+    assert 'class="chart-svg bar-chart month-combo"' in svg and ">账号（个）<" in svg and ">消费<" in svg
+    assert svg.count('<g class="bar-col"') == 3                                  # 没有柱子的那个月也占一格（悬浮对得上）
+    # 8 月三段（正常在底下、新加、停用在最上面，顶上那段是圆头的 path），10 月两段
+    col = svg[svg.index('<g class="bar-col" data-idx="0"'):svg.index('<g class="bar-col" data-idx="1"')]
+    assert re.findall(r'<(rect|path) data-s="(\d)"', col) == [("rect", "0"), ("rect", "1"), ("path", "2")]
+    assert chart.MONTH_STACK[0][1] == "正常" and chart.MONTH_COLORS["normal"] == chart.TONE_COLORS["ok"]   # 和额度使用里的「正常」一个绿
+    # 左右两根纵轴，刻度落在同一排网格线上：左边是整数个数，右边是金额
+    left = re.findall(r'<text x="32" y="([\d.]+)" text-anchor="end"[^>]*>(\d+)</text>', svg)
+    right = re.findall(r'<text x="458" y="([\d.]+)" fill=[^>]*>([^<]+)</text>', svg)
+    assert [y for y, _ in left] == [y for y, _ in right] and len(left) >= 3
+    assert [int(n) for _, n in left] == [0, 2, 4, 6] and right[0][1] == "$0" and right[-1][1].startswith("$")
+    # 线压在柱子上：底下垫一道 5px 底色的边；没过完的这个月空心
+    assert f'stroke="{chart.SURFACE}" stroke-width="5"' in svg
+    circles = re.findall(r'<circle [^>]*fill="([^"]+)" stroke="([^"]+)"', svg)
+    assert [fill for fill, _ in circles] == [chart.MONTH_COLORS["spend"]] * 2 + [chart.SURFACE]
+    assert drawn.tooltip[0] == {"label": "2026 年 8 月", "head": "", "rows": [
+        {"name": "消费", "color": chart.MONTH_COLORS["spend"], "value": "$1,200"},
+        {"name": "新加", "color": chart.MONTH_COLORS["added"], "value": "2 个"},
+        {"name": "正常", "color": chart.MONTH_COLORS["normal"], "value": "3 个"},
+        {"name": "停用", "color": chart.MONTH_COLORS["disabled"], "value": "1 个"}]}
+    assert [item["name"] for item in drawn.legend] == ["新加", "正常", "停用", "消费"]
+    assert chart.render_month_combo(SimpleNamespace(labels=[], years=[], tips=[], added=[], normal=[], disabled=[],
+                                                    spend=[])).empty
+
+
+def test_概览_Top账号换成每月账号和消费(logged_in, book, fake_costs):
     html = overview(logged_in)
-    box = card(html, "Top 账号")
-    names = re.findall(r'<a class="top-name" href="/account/(\d+)/"[^>]*>([^<]+)</a>', box)
-    assert names == [("222222222222", "beta@example.com"), ("111111111111", "alpha@example.com")]
-    amounts = [scrape(a) for a in re.findall(r'<b class="top-amount">(.*?)</b>', box)]
-    shares = [int(s.rstrip("%")) for s in re.findall(r'<span class="top-share">(\d+%)</span>', box)]
-    assert len(amounts) == 2 and sum(shares) == 100
-    assert re.findall(r'<span class="top-bar" data-reveal aria-hidden="true"><i style="width: ([\d.]+)%', box)[0] == "100.0"
-    assert "data-top=" not in box and "data-more" not in box                    # 才两个：不用「全部」
-    # 卡片的顺序：额度使用、消费构成、Top 账号，每日消费（近 30 天）一整行
-    assert html.index(">消费构成<") < html.index(">Top 账号<") < html.index(">每日消费<")
-
-
-def test_Top账号_默认前5个_点全部看剩下的(logged_in, book, fake_costs, monkeypatch):
-    real = dashboard.top_spenders
-    monkeypatch.setattr(dashboard, "top_spenders", lambda rows, slots: real(rows * 4, slots))
-    box = card(overview(logged_in), "Top 账号")
-    buttons = re.findall(r'<button class="seg-item( is-on)?" type="button" data-top="(\w+)"[^>]*>(.*?)</button>', box, re.S)
-    assert [(on, key, scrape(label)) for on, key, label in buttons] == [(" is-on", "5", "Top 5"), ("", "all", "全部 8")]
-    rows = re.findall(r'<li class="top-row"( data-more hidden)?', box)
-    assert [bool(more) for more in rows] == [False] * 5 + [True] * 3             # 第 6 名起藏着
-    assert [int(n) for n in re.findall(r'<span class="top-rank">(\d+)</span>', box)] == list(range(1, 9))
+    assert "Top 账号" not in html and 'id="top-card"' not in html
+    assert html.index(">消费构成<") < html.index(">每月账号和消费<") < html.index(">每日消费<")
+    box = card(html, "每月账号和消费")
+    assert 'class="viz-card span-2" id="months"' in box and 'data-tip-src="months-data"' in box
+    tips = json.loads(re.search(r'<script id="months-data" type="application/json">(.*?)</script>', box, re.S).group(1))
+    assert len(tips) >= 6 and all(item["head"] == "" for item in tips)
+    assert [row["name"] for row in tips[-1]["rows"]] == ["消费", "新加", "正常", "停用"]
+    # 这个月到今天：alpha（每天 100 + 50 × 1.05）、beta（100 + 50 × 1.1）在用；gamma 停用了、没存过账，不算
+    today = date.today()
+    assert tips[-1]["label"] == f"{today.year} 年 {today.month} 月（到今天）"
+    assert tips[-1]["rows"][0]["value"] == f"${today.day * 307.5:,.0f}"
+    # gamma 停用了，不知道哪天停的（EVENTS、操作日志里都没有），也没存过每天的账：写在图下面
+    note = scrape(box[box.index('<p class="combo-note">'):])
+    assert "1 个停用的账号不知道哪天停的" in note and "1 个停用的账号没存过每天的账" in note
+    assert [scrape(key) for key in re.findall(r'<span class="combo-key is-\w+">(.*?)</span>', box)] == ["新加", "正常", "停用", "消费"]
+    # 这个月在用：alpha、beta 正常（gamma 停用了）
+    assert "这个月在用 2 个" in scrape(box)
 
 
 # ====================================================================== 3. 余额加上已使用
@@ -366,7 +464,10 @@ def test_柱状图写着绘图区上下边_图例能挑几项_纵轴跟着重新
     assert "if (svg.zoomReshape) svg.zoomReshape(seg.el, d); else seg.el.setAttribute('d', d);" in js
     assert "svg.zoomReshape = function (el, d) {" in js
     # 没挑：全部的合计；挑了一项：不写合计；两项以上：只加挑中的
-    assert "const head = !picked.size ? '合计 ' + item.total : sum ? '合计 ' + sum : rows.length ? '' : '这天没有';" in js
+    assert ("const head = typeof item.head === 'string' ? item.head\n"
+            "          : !picked.size ? '合计 ' + item.total : sum ? '合计 ' + sum : rows.length ? '' : '这天没有';") in js
+    # 数据里自带 head 的（每月账号和消费）照它写；这一格没有柱子就贴着这一格摆提示
+    assert "placeTip(column && column.width ? column : hit.getBoundingClientRect());" in js
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     assert ".bar-chart[data-focus] .chart-bars [data-s]:not(.is-focus) { opacity: 0; }" in css
     assert "--drop" not in css + js and "is-rising" not in css + js           # 以前靠平移往下落，现在改的是段子的上下边
