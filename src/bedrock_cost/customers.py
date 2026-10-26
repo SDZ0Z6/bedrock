@@ -810,9 +810,12 @@ class CustomerView:
 
     def daily(self, days: int = 30) -> tuple[list[date], dict[str, list[float]]]:
         """近 days 天每天的消费，按账号（号码）分开。每个账号只算它算这个客户的那几天（见 Holding.active_daily）。"""
-        start = self.today - timedelta(days=days - 1)
-        stamps = [start + timedelta(days=i) for i in range(days)]
-        return stamps, {h.number: h.active_daily(start, self.today) for h in self.holdings}
+        return self.daily_span(self.today - timedelta(days=days - 1), self.today)
+
+    def daily_span(self, start: date, end: date) -> tuple[list[date], dict[str, list[float]]]:
+        """start 到 end（两头都算）每天的消费，按账号（号码）分开，规矩和 daily 一样。客户页自定义的时间用它。"""
+        stamps = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+        return stamps, {h.number: h.active_daily(start, end) for h in self.holdings}
 
     @property
     def avg7(self) -> float:

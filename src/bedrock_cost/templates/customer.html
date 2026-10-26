@@ -1,6 +1,6 @@
 {% extends "shell.html" %}
 {% from "_customer_macros.html" import cicon, cust_avatar, status_pill, mini, customer_fields, timeline_box with context %}
-{% from "_customer_charts.html" import calls_card, estimate_card, spend_card %}
+{% from "_customer_charts.html" import range_bar, calls_card, estimate_card, spend_card %}
 {% block title %}{{ customer.name }} · 客户 · Bedrock 成本监控{% endblock %}
 {% block page_header %}{% endblock %}
 {% block loading_label %}正在处理{% endblock %}
@@ -155,10 +155,12 @@
     {% endif %}
   </article>
 
-  {# 调用次数、预估各占一半宽，每日消费一整行。三张都在 _customer_charts.html：切「看多久」时 app.js 只取这一张换上 #}
-  {{ calls_card(calls, calls_links) }}
-  {{ estimate_card(estimate, estimate_links) }}
-  {{ spend_card(trend, spend_links) }}
+  {# 调用次数、预估各占一半宽，每日消费一整行，三张共用上面那一排时间。都在 _customer_charts.html：
+     换时间时 app.js 只取这一排和三张卡片换上 #}
+  {{ range_bar(chart_range) }}
+  {{ calls_card(calls) }}
+  {{ estimate_card(estimate) }}
+  {{ spend_card(trend) }}
 </section>
 
 <!-- ------------------------------------------------ 时间线 -->

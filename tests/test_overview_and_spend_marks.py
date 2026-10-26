@@ -244,20 +244,18 @@ def bars(html: str) -> int:
     return len(re.findall(r'<g class="bar-col"', spend_card(html)))
 
 
-def test_每日消费_不写日均_能选看多久(admin, fake_costs):
-    """客户页默认近 7 天（概览、客户列表、账号页是近 30 天）：默认那一档网址上不带。"""
+def test_每日消费_不写日均_看多久跟着上面那一排(admin, fake_costs):
+    """客户页的每日消费没有自己的那一排了，跟着三张图共用的时间走（默认近 7 天，见 test_customer_range）。"""
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA])
     html = detail(admin)
     box = spend_card(html)
-    assert "日均" not in box and 'id="spend"' in box
-    assert switch(box) == [("近 7 天", "/customers/C001", True), ("近 30 天", "/customers/C001?spend=30", False),
-                           ("近 90 天", "/customers/C001?spend=90", False), ("全部", "/customers/C001?spend=all", False)]
+    assert "日均" not in box and 'id="spend"' in box and 'class="seg' not in box
     assert bars(html) == 7 and "近 7 天" in scrape(box)
-    for key, count in (("30", 30), ("90", 90), ("nonsense", 7)):
-        assert bars(admin.get(f"/customers/C001?spend={key}").get_data(as_text=True)) == count
+    for key, count in (("30", 30), ("90", 90), ("nonsense", 7), ("24h", 2)):
+        assert bars(admin.get(f"/customers/C001?range={key}").get_data(as_text=True)) == count
     # 全部：从最早分过来的那个账号算起（ALPHA 的启用日期 08-01）
-    everything = admin.get("/customers/C001?spend=all").get_data(as_text=True)
+    everything = admin.get("/customers/C001?range=all").get_data(as_text=True)
     assert bars(everything) == (date.today() - RANGE_START).days + 1
     assert f"{RANGE_START.strftime('%m-%d')} 起全部" in scrape(spend_card(everything))
 
@@ -336,7 +334,7 @@ def test_竖虚线_启用到风控用了多少(admin, fake_costs):
     risk_day = date.today() - timedelta(days=5)
     post(admin, "/customers/C001/risk", key=ALPHA, action="mark", date=risk_day.isoformat())
     used = ALPHA_DAILY * (risk_day - RANGE_START).days                       # 08-01 启用，到风控前一天
-    html = admin.get("/customers/C001?spend=all").get_data(as_text=True)
+    html = admin.get("/customers/C001?range=all").get_data(as_text=True)
     index = legend_index(html)
     marks = marks_of(html)
     assert [(who, sub, foot, label) for _, who, sub, foot, label in marks] == [
@@ -363,7 +361,7 @@ def test_竖虚线_同一个账号同一天的并成一条(admin, fake_costs):
     used = ALPHA_DAILY * (swap_day - RANGE_START).days
     swapped = ("acct-one@example.com", f"风控、换下 · {swap_day.isoformat()}", f"风控、换下 {customers.short_money(used)}")
     assert [(who, sub, label) for _, who, sub, _, label in marks_of(detail(admin))] == [swapped]
-    everything = admin.get("/customers/C001?spend=all").get_data(as_text=True)
+    everything = admin.get("/customers/C001?range=all").get_data(as_text=True)
     assert [(who, sub, label) for _, who, sub, _, label in marks_of(everything)] == [   # 按日子从左到右
         ("acct-one@example.com", f"启用 · {RANGE_START.isoformat()}", "启用"),
         ("acct-two@example.com", f"启用 · {RANGE_START.isoformat()} · 换下 acct-one", "启用"),

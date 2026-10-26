@@ -1,7 +1,7 @@
 """客户页「调用次数」（原来叫「近 24 小时调用」）：账单晚 1~2 天，这张看现在——CloudWatch 的调用次数（四区合计）。
 折线图，一个账号一条线，线尾是这个账号的头像；颜色和「每日消费」一样。下面一条线一个签，点了挑几个只看它们
-（纵轴跟着它们重新算，app.js）。右上角选看多久：近 24 小时（默认）每小时一个点、只查还在用的账号；近 7 天、
-近 30 天、全部每天一个点（UTC 日期），查这段时间在这个客户名下用过的账号，每个账号只算它在用的那几天。客户页的「账号」卡片是按阶段的横条（长短按占全部账号的比例，后面是这一档的账号头像）。
+（纵轴跟着它们重新算，app.js）。看多久跟着图上面那一排时间（三张图共用，在 test_customer_range 里）：近 24 小时每小时
+一个点、只查还在用的账号；别的每天一个点（UTC 日期），查这段时间在这个客户名下用过的账号，每个账号只算它在用的那几天。客户页的「账号」卡片是按阶段的横条（长短按占全部账号的比例，后面是这一档的账号头像）。
 
 账号页摘要页签的「近 24 小时调用」（按模型的折线图，没改）下面补一行「今天预估花费」（用量 × 牌价，和「预估」页签一个算法）。
 
@@ -29,6 +29,11 @@ from .test_customer_pages import ALPHA, BETA, detail, make
 from .test_web import book, page_env, scrape, usage_states  # noqa: F401  (book 是 fixture；后两个 autouse)
 
 ALPHA_NO, BETA_NO = str(LEDGER_ROWS[0][1]), str(LEDGER_ROWS[1][1])
+
+
+def hourly(admin) -> str:
+    """看近 24 小时（调用次数按小时）的客户页。默认是近 7 天，按天。"""
+    return admin.get("/customers/C001?range=24h").get_data(as_text=True)
 
 
 @pytest.fixture
@@ -71,10 +76,10 @@ def quiet_except(monkeypatch, busy: dict[str, float]):
 
 
 # ====================================================================== 客户页
-def test_默认近24小时_一个账号一条线_线尾是头像_下面的签能挑(admin, fake_costs, real_calls):
+def test_近24小时_一个账号一条线_线尾是头像_下面的签能挑(admin, fake_costs, real_calls):
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
-    html = detail(admin)
+    html = hourly(admin)
     text = scrape(card(html))
     assert "3.6K 次 · 近 24 小时" in text                     # 2 个账号 × 4 个区 × 19 次 × 24 小时
     assert "最近一小时 152" in text and "2 / 2 个在用的账号有调用" in text
@@ -135,7 +140,7 @@ def test_只查还在用的账号(admin, fake_costs, monkeypatch):
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
     post(admin, "/customers/C001/settle", key=ALPHA)          # 结算了的不会再有调用
-    html = detail(admin)
+    html = hourly(admin)
     assert asked[-1] == [BETA_NO]
     assert "0 / 1 个在用的账号有调用" in scrape(card(html))
 
@@ -158,7 +163,7 @@ def test_一直没调用的不画线_在图下面点名(admin, fake_costs, monke
     quiet_except(monkeypatch, {ALPHA_NO: 30.0})
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
-    html = detail(admin)
+    html = hourly(admin)
     assert [s["name"] for s in lines(html)["series"]] == ["acct-one"] == list(legend(html, "cust-calls"))
     assert "近 24 小时没有调用： A acct-two@example.com" in scrape(card(html))     # A 是邮箱的头一个字母
     assert "1 / 2 个在用的账号有调用" in scrape(card(html))
@@ -166,7 +171,8 @@ def test_一直没调用的不画线_在图下面点名(admin, fake_costs, monke
 
 def test_没有账号的客户(admin, fake_costs):
     make(admin)
-    assert "没有在用的账号" in scrape(card(detail(admin)))
+    assert "没有在用的账号" in scrape(card(hourly(admin)))
+    assert "这段时间没有在这个客户名下用过的账号" in scrape(card(detail(admin)))       # 按天看的
 
 
 # ====================================================================== 按账号汇总
@@ -259,14 +265,14 @@ def test_账号卡片是按阶段的横条(admin, fake_costs):
 
 # ====================================================================== 今日预估
 def estimates(monkeypatch, daily: dict[str, list[float]], partial: bool = False) -> list:
-    """「预估」那一次查询换成假的：按号码给近 7 天每天的钱（最后一个是今天），没写的账号每天 0。返回问过的
-    [(号码们, 起, 止)]。"""
+    """「预估」那一次查询换成假的：按号码给每天的钱（最后一个是今天，窗口多长取最后那几天，不够的前面补 0），
+    没写的账号每天 0。返回问过的 [(号码们, 起, 止)]。"""
     asked = []
 
     def fake(accounts, start, end, refresh=False):
         asked.append((sorted(a.account for a in accounts), start, end))
         width = (end - start).days + 1
-        return {a.key: list(daily.get(a.account, [0.0] * width)) for a in accounts}, partial
+        return {a.key: ([0.0] * width + list(daily.get(a.account, [])))[-width:] for a in accounts}, partial
 
     monkeypatch.setattr(customer_pages, "_estimate_days", fake)
     return asked
@@ -276,15 +282,18 @@ def test_标题下面只写时间_旁边是今日预估(admin, fake_costs, real_
     asked = estimates(monkeypatch, {ALPHA_NO: [0.0] * 6 + [12.5], BETA_NO: [0.0] * 6 + [7.5]})
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
-    box = card(detail(admin))
+    box = card(hourly(admin))
     sub = scrape(re.search(r'<p class="viz-sub">(.*?)</p>', box, re.S).group(1))
     assert re.fullmatch(r"\d\d-\d\d \d\d:00 ~ \d\d-\d\d \d\d:00", sub)       # 那句说明拿掉了
     assert "$20.00 今日预估" in scrape(box) and "有的没算上" not in box
     tips = re.findall(r'<button class="legend-toggle"[^>]*title="([^"]+)"', box)
     assert "acct-one@example.com · 近 24 小时 1,824 次 · 今日 $12.50" in tips
-    # 和「预估」那张一起查一次：近 7 天，按 UTC 日期
+    # 和「预估」那张一起查一次，按 UTC 日期：近 24 小时跨了两个日期，预估看昨天和今天
     utc_today = datetime.now(timezone.utc).date()
-    assert asked == [(sorted([ALPHA_NO, BETA_NO]), utc_today - timedelta(days=6), utc_today)]
+    assert asked == [(sorted([ALPHA_NO, BETA_NO]), utc_today - timedelta(days=1), utc_today)]
+    # 默认近 7 天：调用次数按天，今日预估照样是今天的
+    box = card(detail(admin))
+    assert "$20.00 今日预估" in scrape(box) and asked[-1][1:] == (utc_today - timedelta(days=6), utc_today)
 
 
 def test_今日预估就是预估那张的今天(admin, fake_costs, monkeypatch):
@@ -398,88 +407,3 @@ def test_预估_没有账号的客户(admin, fake_costs):
     text = scrape(estimate_card(html))
     assert "$0 近 7 天预估" in text and "今天到现在 $0.00 · 昨天 $0.00" in text and "这段时间没有数据" in text
     assert 'data-legend-for="cust-estimate"' not in html                 # 没有账号就没有签
-
-
-def switch_links(box: str) -> dict[str, str]:
-    """卡片右上角「看多久」那一排：{名字: 网址}。"""
-    return {scrape(label): href for href, label in
-            re.findall(r'<a class="seg-item[^"]*" href="([^"]+)"[^>]*>(.*?)</a>', box, re.S)}
-
-
-def test_预估_右上角选看多久_近7天近30天全部(admin, fake_costs, monkeypatch):
-    """一天一根，没有按小时的；网址上是 ?estimate=30 / all，近 7 天是默认、不带。"""
-    asked = []
-
-    def fake(accounts, start, end, refresh=False):              # 每个账号每天 $1，问多少天给多少天
-        asked.append((sorted(a.account for a in accounts), start, end))
-        return {a.key: [1.0] * ((end - start).days + 1) for a in accounts}, False
-
-    monkeypatch.setattr(customer_pages, "_estimate_days", fake)
-    make(admin)
-    post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
-    utc_today = datetime.now(timezone.utc).date()
-    box = estimate_card(detail(admin))
-    links = switch_links(box)
-    assert list(links) == ["近 7 天", "近 30 天", "全部"]
-    assert links["近 7 天"].endswith("/customers/C001#estimate") and "estimate=30" in links["近 30 天"]
-    assert re.search(r'<a class="seg-item is-on"[^>]*>近 7 天</a>', box)
-    assert asked[-1][1:] == (utc_today - timedelta(days=6), utc_today)
-
-    box = estimate_card(admin.get("/customers/C001?estimate=30").get_data(as_text=True))
-    assert asked[-1][1:] == (utc_today - timedelta(days=29), utc_today)
-    assert "近 30 天预估" in scrape(box) and len(bars(admin.get("/customers/C001?estimate=30").get_data(as_text=True))) == 30
-
-    # 全部：从最早分过来的那个账号算起（分过来的日期晚于启用日期的按启用日期算：LEDGER_ROWS 的启用日期）
-    html = admin.get("/customers/C001?estimate=all").get_data(as_text=True)
-    first = LEDGER_ROWS[0][8]
-    assert asked[-1][1:] == (first, utc_today)
-    assert f"{first:%m-%d} 起累计预估" in scrape(estimate_card(html))
-
-    admin.get("/customers/C001?estimate=24h")                         # 认不出的按默认的近 7 天
-    assert asked[-1][1:] == (utc_today - timedelta(days=6), utc_today)
-
-
-def test_预估_切看多久时别的两排照旧(admin, fake_costs):
-    """三排「看多久」互相带着：切每日消费、调用次数，预估选的不变；切预估，另外两排选的也不变。"""
-    make(admin)
-    html = admin.get("/customers/C001?estimate=30&calls=7&spend=90").get_data(as_text=True)
-    estimate_links = switch_links(estimate_card(html))
-    assert all("calls=7" in href and "spend=90" in href for href in estimate_links.values())
-    calls_links = switch_links(card(html))
-    assert all("estimate=30" in href and "spend=90" in href for href in calls_links.values())
-
-
-# ====================================================================== 切「看多久」只换那一张卡片
-@pytest.mark.parametrize("part, title", [("calls", "调用次数"), ("estimate", "预估"), ("spend", "每日消费")])
-def test_切看多久只取回那一张卡片(admin, fake_costs, part, title):
-    """?part=calls / estimate / spend：只给这一张卡片（和整页上的同一份宏），不画整页；链接带着另外两排选的。"""
-    make(admin)
-    post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
-    html = admin.get(f"/customers/C001?part={part}&calls=7&estimate=30&spend=90").get_data(as_text=True)
-    assert "<html" not in html and "<nav" not in html
-    assert html.strip().startswith(f'<article class="viz-card col-') and f'id="{part}" data-reveal data-part="{part}"' in html
-    assert f'<h2 class="viz-title">{title}</h2>' in html
-    links = switch_links(html)
-    assert all("part=" not in href for href in links.values())                 # 链接是整页的网址（没开 JS 照样能用）
-    others = {"calls": "calls=7", "estimate": "estimate=30", "spend": "spend=90"}
-    assert all(all(value in href for name, value in others.items() if name != part) for href in links.values())
-
-
-def test_整页上三张卡片都能只换(admin, fake_costs):
-    make(admin)
-    html = detail(admin)
-    assert [part for part in re.findall(r'data-part="(\w+)"', html)] == ["calls", "estimate", "spend"]
-    assert "<html" in admin.get("/customers/C001?part=timeline").get_data(as_text=True)     # 别的名字照常给整页
-
-
-def test_切看多久不刷新整页_脚本():
-    """app.js：点卡片右上角那一排，把选的写进现在的网址，带上 ?part= 取回那一张换上，地址栏跟着改，新卡片的图重新挂上
-    交互；挂在 window 的捕获阶段，比整页的「正在加载」先拦下；取不回来就整页跳过去。"""
-    from bedrock_cost import config as cfg
-
-    js = (cfg.BASE_DIR / "src" / "bedrock_cost" / "static" / "app.js").read_text(encoding="utf-8")
-    for piece in ("function initCharts(root) {", "initCharts(document);", "closest('[data-part] .seg-item[href]')",
-                  "part.searchParams.set('part', name);", "card.replaceWith(fresh);",
-                  "history.replaceState(history.state, '', page.pathname + page.search + page.hash);",
-                  "initCharts(fresh);", ".catch(function () { location.href = link.href; });", "}, true);"):
-        assert piece in js, piece
