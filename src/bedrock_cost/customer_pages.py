@@ -17,10 +17,10 @@ from flask import Blueprint, Response, flash, redirect, render_template, request
 
 from . import chart, cloudwatch_metrics, config, cost_estimate, customers, dashboard, excel_source, usage_explorer
 from .auth import csrf_protect, login_required
-from .dates import parse_date
+from .dates import earliest_queryable, parse_date, resolve_range
 from .excel_source import Account, ExcelSourceError
 from .filters import money, money0
-from .views import flash_result, page_meta, range_links, spend_links
+from .views import flash_result, page_meta, spend_links
 from .windows import PERIODS, MetricWindow, resolve_window
 
 bp = Blueprint("customers", __name__, url_prefix="/customers")
@@ -259,31 +259,86 @@ def daily_estimates(accounts: list[Account], start: date, end: date,
 # 客户页的预估（「预估」那张、「调用次数」上的今日预估）走这个名字：测试里默认换成不查的（见 tests/conftest.py）
 _estimate_days = daily_estimates
 
-# 「预估」右上角选看多久，网址上是 ?estimate=（近 7 天是默认，不带）。一天一根，没有按小时的
-ESTIMATE_RANGES = (("7", "近 7 天"), ("30", "近 30 天"), ("all", "全部"))
+# ---------------------------------------------------------------- 三张图的时间
+# 客户页「调用次数」「预估」「每日消费」共用一个时间（图上面那一排，_customer_charts.html 的 range_bar）：
+# 网址上是 ?range=24h / 30 / 90 / all（近 7 天是默认，不带），自定义是 ?start=YYYY-MM-DD&end=YYYY-MM-DD（两头都算）
+CHART_RANGES = (("24h", "近 24 小时"), ("7", "近 7 天"), ("30", "近 30 天"), ("90", "近 90 天"), ("all", "全部"))
+CHART_DEFAULT = "7"
 
 
-def _estimate_window(view: customers.CustomerView, key: str) -> SimpleNamespace:
-    """「预估」看哪几天：按 UTC 日期（CloudWatch 的日桶就是在 UTC 零点切的），今天算到现在。全部从最早分过来的那个
-    账号算起，不早于 CloudWatch 按天能查的最早一天（455 天），和「调用次数」的全部一样。"""
-    key = key if key in dict(ESTIMATE_RANGES) else "7"
+def _span_label(start: date, end: date, today: date) -> str:
+    """自定义那一段写成 10-01 ~ 10-15；不是今年的带上年份；一天的只写那一天。"""
+    shape = "%m-%d" if start.year == end.year == today.year else "%Y-%m-%d"
+    return start.strftime(shape) if start == end else f"{start.strftime(shape)} ~ {end.strftime(shape)}"
+
+
+def _chart_range(args, today: date) -> SimpleNamespace:
+    """三张图看哪一段：key 是 CHART_RANGES 里的一个，或者 custom（start、end 是两头的日期，最晚到今天，最早到
+    Cost Explorer 能查的那天，和账号页的自定义一个规矩：dates.resolve_range）；label 写在大数字旁边、那一排上；
+    notes 是自定义的日子不对、改过的时候说的话。自定义的正好是近 7 / 30 / 90 天的，当那一档。
+    老网址上各张图自己的 ?calls= / ?estimate= / ?spend= 也认（取第一个认得的），收藏夹里的照样能打开。"""
+    named = dict(CHART_RANGES)
+    if (args.get("start") or "").strip() or (args.get("end") or "").strip():
+        start, end, notes = resolve_range({"start": args.get("start") or "", "end": args.get("end") or ""}, today)
+        for key in ("7", "30", "90"):
+            if end == today and start == today - timedelta(days=int(key) - 1):
+                return SimpleNamespace(key=key, label=named[key], start=None, end=None, notes=notes)
+        return SimpleNamespace(key="custom", label=_span_label(start, end, today), start=start, end=end, notes=notes)
+    picked = next((args.get(name) for name in ("range", "calls", "estimate", "spend") if args.get(name) in named),
+                  CHART_DEFAULT)
+    return SimpleNamespace(key=picked, label=named[picked], start=None, end=None, notes=[])
+
+
+def _utc_span(view: customers.CustomerView, rng: SimpleNamespace) -> tuple[date, date]:
+    """「调用次数」（按天看的时候）、「预估」看哪几天：按 UTC 日期（CloudWatch 的日桶就是在 UTC 零点切的），今天算到
+    现在。近 24 小时跨了两个日期，按天的就看昨天和今天；全部从最早分过来的那个账号算起，不早于 CloudWatch 按天能查的
+    最早一天（455 天）；自定义的最晚到 UTC 的今天。"""
     today = datetime.now(timezone.utc).date()
-    if key == "all":
+    if rng.key == "custom":
+        end = min(rng.end, today)
+        return min(rng.start, end), end
+    if rng.key == "24h":
+        return today - timedelta(days=1), today
+    if rng.key == "all":
         first = min((h.joined for h in view.holdings if h.joined), default=today - timedelta(days=6))
-        start = max(min(first, today), today - timedelta(days=PERIODS["1d"][2] - 1))
+        return max(min(first, today), today - timedelta(days=PERIODS["1d"][2] - 1)), today
+    return today - timedelta(days=int(rng.key) - 1), today
+
+
+def _spend_span(view: customers.CustomerView, rng: SimpleNamespace) -> tuple[date, date, str]:
+    """「每日消费」看哪几天（本地日期，Cost Explorer 的账按天）和写在大数字旁边的话。近 24 小时看昨天和今天；全部从最早
+    分过来的那个账号算起，不早于 Cost Explorer 能查的最早一天（dashboard.spend_range）。"""
+    today = view.today
+    if rng.key == "custom":
+        return rng.start, rng.end, rng.label
+    if rng.key == "24h":
+        return today - timedelta(days=1), today, "昨天和今天"
+    spend = dashboard.spend_range(rng.key, today, min((h.joined for h in view.holdings if h.joined), default=None),
+                                  default=CHART_DEFAULT)
+    return spend.start, today, spend.label
+
+
+def _estimate_window(view: customers.CustomerView, rng: SimpleNamespace) -> SimpleNamespace:
+    """「预估」看哪几天（_utc_span）和大数字旁边写的话。"""
+    start, end = _utc_span(view, rng)
+    if rng.key == "all":
         what = f"{start:%m-%d} 起累计预估"
+    elif rng.key == "24h":
+        what = "昨天和今天预估"
+    elif rng.key == "custom":
+        what = f"{rng.label} 预估"
     else:
-        start = today - timedelta(days=int(key) - 1)
-        what = f"{dict(ESTIMATE_RANGES)[key]}预估"
-    return SimpleNamespace(key=key, start=start, end=today, what=what)
+        what = f"{rng.label}预估"
+    return SimpleNamespace(key=rng.key, start=start, end=end, what=what)
 
 
 def _estimate_card(view: customers.CustomerView, names: dict[str, str], slots: dict[str, int],
                    costs: dict[str, list[float]], partial: bool, window: SimpleNamespace):
-    """「预估」（原来是「还能用几天」）：每天的预估花费（右上角选近 7 天、近 30 天、全部），按账号叠起来，颜色和
+    """「预估」（原来是「还能用几天」）：每天的预估花费（看哪几天跟着图上面那一排），按账号叠起来，颜色和
     「每日消费」一样。账单晚 1~2 天、被 credits 抵成 0 的时候，这张照样看得到实际用了多少。和「调用次数」按天看的一个
     规矩：每个账号只算它算这个客户的那几天（分过来那天起，到风控、换下、用完、结算的前一天）。costs 是
-    daily_estimates 查好的 {account.key: 每天的钱}，window 是 _estimate_window。
+    daily_estimates 查好的 {account.key: 每天的钱}，window 是 _estimate_window。看到今天的（live）大数字下面写今天
+    到现在、昨天各多少；自定义的一段过去的日子没有「今天」，写日均和最多的一天。
     """
     start, end = window.start, window.end
     stamps = [start + timedelta(days=i) for i in range((end - start).days + 1)]
@@ -300,40 +355,38 @@ def _estimate_card(view: customers.CustomerView, names: dict[str, str], slots: d
         if begin <= end < stop:
             today_by_key[h.key] = mine[-1]
     totals = [sum(column) for column in zip(*per_account.values())] if per_account else [0.0] * width
-    labels = [day.strftime("%m-%d") for day in stamps[:-1]] + ["今天"]
+    live = end >= datetime.now(timezone.utc).date()
+    labels = [day.strftime("%m-%d") for day in stamps]
+    if live:
+        labels[-1] = "今天"
     # 和左边「调用次数」一排、各占一半宽：两张图一样宽、一样高（600 × 334，和调用次数的折线图一个比例）
     bars = chart.render_bars(labels, _stacked_rows(per_account, names, width, slots), width=600, height=334,
                              fmt=money, axis=customers.short_money)
+    peak = max(range(width), key=lambda i: totals[i]) if any(totals) else None
     return SimpleNamespace(chart=bars, total=sum(totals), today=totals[-1], yesterday=totals[-2] if width > 1 else 0.0,
+                           live=live, average=sum(totals) / width if width else 0.0,
+                           peak_label=labels[peak] if peak is not None else "",
+                           peak_value=totals[peak] if peak is not None else 0.0,
                            partial=partial, start=stamps[0].strftime("%m-%d"), end=stamps[-1].strftime("%m-%d"),
-                           today_by_key=today_by_key, key=window.key, what=window.what)
+                           today_by_key=today_by_key if live else {}, key=window.key, what=window.what)
 
 
-# 「调用次数」右上角选看多久，网址上是 ?calls=（近 24 小时是默认，不带）
-CALLS_RANGES = (("24h", "近 24 小时"), ("7", "近 7 天"), ("30", "近 30 天"), ("all", "全部"))
-
-
-def _calls_window(view: customers.CustomerView, key: str) -> MetricWindow:
-    """近 24 小时每小时一根，最后一根是上一个整点那一小时（没过完的这一小时不画）。近 7 天、近 30 天、全部每天一根，
-    按 UTC 日期——和 Cost Explorer 的账、「每日消费」一个分法——今天算到现在。全部从最早分过来的那个账号算起，
-    不早于 CloudWatch 按天能查的最早一天（455 天）。"""
-    if key not in dict(CALLS_RANGES) or key == "24h":
+def _calls_window(view: customers.CustomerView, rng: SimpleNamespace) -> MetricWindow:
+    """近 24 小时每小时一根，最后一根是上一个整点那一小时（没过完的这一小时不画）。别的每天一根，按 UTC 日期
+    （_utc_span）——和 Cost Explorer 的账、「每日消费」一个分法——今天算到现在。"""
+    if rng.key == "24h":
         return resolve_window({"win": "24h", "period": "1h"})[0]
-    today = datetime.now(timezone.utc).date()
-    if key == "all":
-        first = min((h.joined for h in view.holdings if h.joined), default=today - timedelta(days=29))
-        start = max(min(first, today), today - timedelta(days=PERIODS["1d"][2] - 1))
-    else:
-        start = today - timedelta(days=int(key) - 1)
+    start, end = _utc_span(view, rng)
 
     def midnight(day: date) -> datetime:
         return datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
 
-    return MetricWindow(start=midnight(start), end=midnight(today + timedelta(days=1)), period_key="1d", window_key=key)
+    return MetricWindow(start=midnight(start), end=midnight(end + timedelta(days=1)), period_key="1d", window_key=rng.key)
 
 
-def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dict[str, int], key: str = "24h",
-                 refresh: bool = False, today_costs: dict[str, float] | None = None, partial: bool = False):
+def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dict[str, int], rng: SimpleNamespace,
+                 refresh: bool = False, today_costs: dict[str, float] | None = None, partial: bool = False,
+                 span_cost: float | None = None):
     """调用次数：CloudWatch 的调用次数（四区合计），晚几分钟出数，比账单快得多。折线图，一个账号一条线，线尾是这个
     账号的头像；颜色和「每日消费」一样。点下面的账号挑几个只看它们，纵轴跟着它们重新算（app.js）。
 
@@ -341,9 +394,10 @@ def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dic
     账号（停用的不查），每个账号只算它算这个客户的那几天（Holding.active_daily 一样的规矩：分过来那天起，到风控、
     换下、用完、结算的前一天）。一直没调用的不画线，在图下面点名；账号多过 8 个时，调用少的并成「其他」一条。
     today_costs 是「预估」那张算好的今天还算这个客户的账号今天的预估（{account.key: 金额}，UTC 日期），加起来就是
-    今日预估，和「预估」那张的「今天到现在」是同一个数；partial 是有没有没算上的。
+    今日预估，和「预估」那张的「今天到现在」是同一个数；partial 是有没有没算上的。看的是一段过去的日子（自定义的，
+    不到今天）时没有「今天」：span_cost 是「预估」那张这一段的合计，写成「这段时间预估」。
     """
-    window = _calls_window(view, key)
+    window = _calls_window(view, rng)
     hourly = window.period_key != "1d"
     if hourly:
         watched = [h for h in view.holdings if h.stage != "settled" and h.account.enabled]
@@ -378,7 +432,7 @@ def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dic
     totals = [sum(values[i] for values in series.values()) for i in range(width)]
     peak = max(range(width), key=lambda i: totals[i]) if any(totals) else None
     costs = today_costs or {}
-    label = dict(CALLS_RANGES).get(key, "近 24 小时")
+    label = rng.label
     # 图下面的签：一条线一个，和线同一个顺序（签上的 data-s 就是线的序号），悬浮看这个账号这段时间多少次、今天预估花了多少
     legend = []
     for number in keep:
@@ -396,10 +450,11 @@ def _calls_chart(view: customers.CustomerView, names: dict[str, str], slots: dic
     else:
         start, end = (labels[0], labels[-1]) if width else ("", "")
     return SimpleNamespace(
-        key=key if key in dict(CALLS_RANGES) else "24h", label=label, hourly=hourly,
+        key=rng.key, label=label, hourly=hourly,
         chart=drawn, legend=legend, total=sum(totals), last=totals[-1] if totals else 0.0,
         average=sum(totals) / width if width else 0.0,
-        today_cost=sum(costs.values()), partial=partial,
+        today_cost=sum(costs.values()) if span_cost is None else span_cost,
+        cost_label="今日预估" if span_cost is None else "这段时间预估", partial=partial,
         silent=[h for h in watched if not any(series[h.number])],
         peak_label=labels[peak] if peak is not None else "", peak_value=totals[peak] if peak is not None else 0.0,
         active=sum(1 for values in series.values() if any(values)), watched=len(watched),
@@ -447,15 +502,18 @@ def _spend_marks(view: customers.CustomerView, stamps: list[date], names: dict[s
 
 
 # ---------------------------------------------------------------- 客户详情
-# 客户页三排「看多久」各自的默认值：网址上不带。「每日消费」默认近 7 天（概览、客户列表、账号页是近 30 天）
-_RANGE_DEFAULTS = {"spend": "7", "calls": "24h", "estimate": "7"}
-# 切「看多久」时能只取回来的那几张卡片（?part=…，见 customer_part.html）
-CHART_PARTS = ("calls", "estimate", "spend")
-
-
-def _ranges(**picked: str) -> dict[str, str | None]:
-    """别的几排选了什么，写进这一排的链接：选的是默认值就不带（None）。"""
-    return {name: None if key == _RANGE_DEFAULTS[name] else key for name, key in picked.items()}
+def _range_bar(cid: str, rng: SimpleNamespace, view: customers.CustomerView) -> SimpleNamespace:
+    """图上面那一排：几个现成的（链接，默认那一档网址上不带），后面「自定义」点开填起止（GET 表单，点「应用」提交）。
+    没选自定义时，起止框里先填好现在看的那几天（本地日期），改一头就行。"""
+    start, end, _ = _spend_span(view, rng)
+    today = view.today
+    presets = [(label, url_for("customers.detail", cid=cid, range=None if key == CHART_DEFAULT else key) + "#charts",
+                key == rng.key) for key, label in CHART_RANGES]
+    return SimpleNamespace(presets=presets, custom=rng.key == "custom", label=rng.label, notes=rng.notes,
+                           custom_label=rng.label if rng.key == "custom" else "自定义",
+                           start=start.isoformat(), end=end.isoformat(),
+                           min=earliest_queryable(today).isoformat(), max=today.isoformat(),
+                           action=url_for("customers.detail", cid=cid) + "#charts")
 
 
 def _detail_context(cid: str, refresh: bool = False):
@@ -494,43 +552,33 @@ def detail(cid: str, **extra):
     ]
     stamps, per_account = view.daily(30)
     names = {h.number: h.account.label for h in view.holdings}
-    # 「每日消费」的颜色照旧（按近 30 天有消费的账号分色槽，换成近 90 天、全部也不变）；「近 24 小时调用」用同一套，
+    # 「每日消费」的颜色照旧（按近 30 天有消费的账号分色槽，换成别的时间也不变）；「调用次数」「预估」用同一套，
     # 一个账号一个颜色。只在别的时间、别的图上有的账号（30 天没消费）拿剩下的色槽
     spenders = sorted((number for number in per_account if sum(per_account[number]) > 0),
                       key=lambda number: -sum(per_account[number]))
     slots = _stable_slots([names[number] for number in spenders], names.values())
-    # 右上角选看多久（默认近 7 天），「全部」从最早分过来的那个账号算起
-    spend = dashboard.spend_range(request.args.get("spend"), today,
-                                  min((h.joined for h in view.holdings if h.joined), default=None),
-                                  default=_RANGE_DEFAULTS["spend"])
-    if spend.days != 30:
-        stamps, per_account = view.daily(spend.days)
+    # 三张图共用一个时间（图上面那一排：近 24 小时、近 7 天（默认）、近 30 天、近 90 天、全部、自定义）
+    rng = _chart_range(request.args, today)
+    span_start, span_end, span_label = _spend_span(view, rng)
+    stamps, per_account = view.daily_span(span_start, span_end)
     trend = _spend_chart(per_account, stamps, names, height=230, width=1100, slots=slots,
                          marks=_spend_marks(view, stamps, names, slots))
-    trend.label = spend.label
-    # 「预估」和「调用次数」上的今日预估一起查一次（右上角选的那几天，UTC 日期，今天算到现在）：这几天在这个客户
-    # 名下用过的账号，停用的不查
-    window = _estimate_window(view, request.args.get("estimate") or "7")
+    trend.label = span_label
+    # 「预估」和「调用次数」上的今日预估一起查一次（那几天，UTC 日期，今天算到现在）：这几天在这个客户名下用过的账号，
+    # 停用的不查
+    window = _estimate_window(view, rng)
     estimated = [h.account for h in view.holdings if h.account.enabled
                  and (h.joined or date.min) <= window.end and (h.left or date.max) > window.start]
     costs, partial = _estimate_days(estimated, window.start, window.end, refresh=refresh)
     estimate = _estimate_card(view, names, slots, costs, partial, window)
-    # 「调用次数」右上角也选看多久：近 24 小时（默认）按小时，其余按天
-    calls = _calls_chart(view, names, slots, request.args.get("calls") or "24h", refresh=refresh,
-                         today_costs=estimate.today_by_key, partial=partial)
-    # 三排「看多久」互相带着别的两排选的，切一排另外两排不变
-    links = {
-        "spend_links": spend_links("customers.detail", spend.key, _RANGE_DEFAULTS["spend"], cid=customer.id,
-                                   **_ranges(calls=calls.key, estimate=estimate.key)),
-        "calls_links": range_links("customers.detail", "calls", CALLS_RANGES, calls.key, "24h", cid=customer.id,
-                                   **_ranges(spend=spend.key, estimate=estimate.key)),
-        "estimate_links": range_links("customers.detail", "estimate", ESTIMATE_RANGES, estimate.key, "7",
-                                      cid=customer.id, **_ranges(spend=spend.key, calls=calls.key)),
-    }
-    # 切「看多久」时 app.js 只要那一张卡片（?part=calls / estimate / spend）：同一套算法、同一份宏，不画整页
-    part = request.args.get("part")
-    if part in CHART_PARTS:
-        return render_template("customer_part.html", part=part, trend=trend, calls=calls, estimate=estimate, **links)
+    # 「调用次数」：近 24 小时按小时，其余按天
+    calls = _calls_chart(view, names, slots, rng, refresh=refresh, today_costs=estimate.today_by_key, partial=partial,
+                         span_cost=None if estimate.live else estimate.total)
+    chart_range = _range_bar(customer.id, rng, view)
+    # 换时间时 app.js 只要那一排和三张卡片（?part=charts）：同一套算法、同一份宏，不画整页
+    if request.args.get("part") == "charts":
+        return render_template("customer_part.html", trend=trend, calls=calls, estimate=estimate,
+                               chart_range=chart_range)
 
     by_number = {a.account: a for a in accounts}
     timeline = _timeline_payload(view, by_number)
@@ -562,10 +610,9 @@ def detail(cid: str, **extra):
         hero_av=avatar_info(customer),
         stage_rows=stage_rows,
         trend=trend,
-        spend=spend,
         calls=calls,
         estimate=estimate,
-        **links,
+        chart_range=chart_range,
         timeline=timeline,
         timeline_fallback=_timeline_fallback(view, by_number),
         categories=customers.CATEGORIES,

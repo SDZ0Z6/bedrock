@@ -1153,28 +1153,24 @@
   }
   initCharts(document);
 
-  // ------------------------------------------------------------ 客户页切「看多久」：只换那一张卡片
-  // 卡片（[data-part]）右上角那一排是普通链接：没开 JS 照样整页跳过去。开了 JS：把这一排选的写进现在的网址，带上
-  // ?part=这张卡片 取回来换上去，地址栏跟着改（刷新、复制网址还是这一档；另外两排选的也还在网址上），新卡片上的图
-  // 照样能悬浮、挑项、放大。挂在 window 的捕获阶段：比整页的「正在加载」先拦下这一下，那层遮罩就不出来了。
+  // ------------------------------------------------------------ 客户页换时间：只换那一排和三张卡片
+  // 调用次数、预估、每日消费共用图上面那一排时间（[data-part="range"]）：现成的几档是普通链接，「自定义」是普通的 GET
+  // 表单（点「应用」）——没开 JS 照样整页跳过去。开了 JS：带上 ?part=charts 取回那一排和三张卡片，按 data-part 一张张
+  // 换上去，地址栏跟着改（刷新、复制网址还是这一段），新卡片上的图照样能悬浮、挑项、放大。链接挂在 window 的捕获阶段、
+  // 表单挂在 document 的捕获阶段：都比整页的「正在加载」先拦下，那层遮罩就不出来了。
   // 取不回来（断网、登录过期被转去登录页）就照旧整页跳过去
-  window.addEventListener('click', function (event) {
-    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    const link = event.target instanceof Element ? event.target.closest('[data-part] .seg-item[href]') : null;
-    if (!link) return;
-    const card = link.closest('[data-part]');
-    event.preventDefault();
-    if (link.classList.contains('is-on') || card.classList.contains('is-loading')) return;
-    const name = card.dataset.part;
-    const picked = new URL(link.href, location.href).searchParams.get(name);
-    const page = new URL(location.href);
-    if (picked === null) page.searchParams.delete(name); else page.searchParams.set(name, picked);
+  function swapCharts(target) {
+    const bar = document.querySelector('[data-part="range"]');
+    if (!bar || bar.classList.contains('is-loading')) return;
+    const page = new URL(target, location.href);
     const part = new URL(page.href);
     part.hash = '';
-    part.searchParams.set('part', name);
-    for (const item of card.querySelectorAll('.seg-item')) item.classList.toggle('is-on', item === link);
-    card.classList.add('is-loading');
-    card.setAttribute('aria-busy', 'true');
+    part.searchParams.set('part', 'charts');
+    const olds = [...document.querySelectorAll('[data-part]')];
+    for (const old of olds) {
+      old.classList.add('is-loading');
+      old.setAttribute('aria-busy', 'true');
+    }
     fetch(part.href, { credentials: 'same-origin', headers: { Accept: 'text/html' } })
       .then(function (response) {
         if (!response.ok || response.redirected) throw new Error(String(response.status));
@@ -1183,14 +1179,37 @@
       .then(function (html) {
         const holder = document.createElement('template');
         holder.innerHTML = html.trim();
-        const fresh = holder.content.querySelector('[data-part="' + name + '"]');
-        if (!fresh) throw new Error('没有这张卡片');
+        const pairs = olds.map(function (old) {
+          return [old, holder.content.querySelector('[data-part="' + old.dataset.part + '"]')];
+        });
+        if (pairs.some(function (pair) { return !pair[1]; })) throw new Error('少了一张');
         hideTip();
-        card.replaceWith(fresh);
-        history.replaceState(history.state, '', page.pathname + page.search + page.hash);
-        initCharts(fresh);
+        for (const pair of pairs) {
+          pair[0].replaceWith(pair[1]);
+          initCharts(pair[1]);
+        }
+        history.replaceState(history.state, '', page.pathname + page.search + location.hash);
       })
-      .catch(function () { location.href = link.href; });
+      .catch(function () { location.href = page.href; });
+  }
+  window.addEventListener('click', function (event) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target instanceof Element ? event.target.closest('[data-part="range"] a[href]') : null;
+    if (!link) return;
+    event.preventDefault();
+    if (link.classList.contains('is-on')) return;
+    for (const item of link.closest('[data-part]').querySelectorAll('.seg-item')) item.classList.toggle('is-on', item === link);
+    swapCharts(link.href);
+  }, true);
+  document.addEventListener('submit', function (event) {
+    const form = event.target instanceof Element ? event.target.closest('form[data-part="range"]') : null;
+    if (!form) return;
+    event.preventDefault();
+    const target = new URL(form.action, location.href);
+    for (const [name, value] of new FormData(form)) if (value) target.searchParams.set(name, value);
+    const picker = form.querySelector('details[open]');
+    if (picker) picker.open = false;
+    swapCharts(target.href);
   }, true);
 
   // ---- 气泡：悬浮的那个放大、其余变淡，提示里写名字、数和占比；

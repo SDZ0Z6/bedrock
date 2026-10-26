@@ -1,8 +1,9 @@
 """这一轮：
 
 1. 账号页摘要的「告警」卡片里加告警流：这个账号发出去的 TG 告警、收到的 AWS 邮件（和客户页的告警流一个样子）；
-2. 客户页「近 24 小时调用」改成「调用次数」：右上角选看多久（近 24 小时按小时，近 7 天、近 30 天、全部按天），
-   还是折线图、线尾是头像，下面一条线一个签，点了挑几个只看它们、纵轴跟着它们重新算（基本的在 test_customer_calls 里）；
+2. 客户页「近 24 小时调用」改成「调用次数」：看多久（后来三张图共用一排，见 test_customer_range）近 24 小时按小时，
+   别的按天，还是折线图、线尾是头像，下面一条线一个签，点了挑几个只看它们、纵轴跟着它们重新算（基本的在
+   test_customer_calls 里）；
 3. 账号页的时间线也有告警：一条一张卡、写几点几分，「用量开始 / 中断」同一天的并成一张，筛选多一个「告警」；
 4. 客户页时间线「按账号筛选」的下拉右边写着生命周期（在 test_customer_polish 里）。
 """
@@ -60,35 +61,14 @@ def test_没发过告警的账号(pages):
     assert "还没有发过告警" in scrape(box) and '<ul class="feed"' not in box
 
 
-# ====================================================================== 2. 调用次数：选看多久
-def range_links(box: str) -> list[tuple[str, str, bool]]:
-    return [(scrape(label), href.replace("&amp;", "&"), bool(on)) for on, href, label in re.findall(
-        r'<a class="seg-item( is-on)?" href="([^"]+)#calls" data-loading="正在读调用次数"[^>]*>(.*?)</a>', box, re.S)]
-
-
-def test_调用次数右上角选看多久_和每日消费那排互相带着(admin, fake_costs):
-    make(admin)
-    post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
-    html = admin.get("/customers/C001?spend=90").get_data(as_text=True)
-    assert range_links(calls_card(html)) == [
-        ("近 24 小时", "/customers/C001?spend=90", True), ("近 7 天", "/customers/C001?spend=90&calls=7", False),
-        ("近 30 天", "/customers/C001?spend=90&calls=30", False), ("全部", "/customers/C001?spend=90&calls=all", False)]
-    html = admin.get("/customers/C001?calls=7").get_data(as_text=True)
-    assert [on for *_, on in range_links(calls_card(html))] == [False, True, False, False]
-    spend = re.findall(r'<a class="seg-item( is-on)?" href="([^"]+)#spend"', html)
-    assert [href.replace("&amp;", "&") for _, href in spend] == [                # 客户页的每日消费默认近 7 天：那一档不带
-        "/customers/C001?calls=7", "/customers/C001?calls=7&spend=30", "/customers/C001?calls=7&spend=90",
-        "/customers/C001?calls=7&spend=all"]
-    assert 'id="calls"' in html
-
-
+# ====================================================================== 2. 调用次数：按天看
 def test_按天看_UTC日期_每个账号只算它在用的那几天(admin, fake_costs, real_calls):
     """风控了的账号，风控那天起的调用不算这个客户的（和「每日消费」一样）；没风控的一直算。每天 4 区 × 19 = 76 次。"""
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
     risk_day = date.today() - timedelta(days=2)
     post(admin, "/customers/C001/risk", key=ALPHA, action="mark", date=risk_day.isoformat())
-    html = admin.get("/customers/C001?calls=7").get_data(as_text=True)
+    html = admin.get("/customers/C001?range=7").get_data(as_text=True)
     utc_today = datetime.now(timezone.utc).date()
     days = [utc_today - timedelta(days=6 - i) for i in range(7)]
     assert lines(html)["labels"] == [day.strftime("%m-%d") for day in days]
@@ -101,7 +81,7 @@ def test_按天看_UTC日期_每个账号只算它在用的那几天(admin, fake
 def test_全部_从最早分过来的那个账号算起(admin, fake_costs, real_calls):
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA])
-    html = admin.get("/customers/C001?calls=all").get_data(as_text=True)
+    html = admin.get("/customers/C001?range=all").get_data(as_text=True)
     utc_today = datetime.now(timezone.utc).date()
     assert len(lines(html)["labels"]) == (utc_today - RANGE_START).days + 1    # 分过来的账号按启用日期（08-01）算起
     assert lines(html)["labels"][0] == RANGE_START.strftime("%m-%d")
@@ -121,8 +101,8 @@ def test_按天看_查这段时间里用过的_停用的不查(admin, fake_costs
     make(admin)
     post(admin, "/customers/C001/assign", account=[ALPHA, BETA])
     post(admin, "/customers/C001/settle", key=ALPHA)          # 结算了：近 24 小时不查，按天看的还在这段时间里
-    admin.get("/customers/C001?calls=30")
-    admin.get("/customers/C001")
+    admin.get("/customers/C001?range=30")
+    admin.get("/customers/C001?range=24h")
     alpha, beta = ALPHA.split("#")[0], BETA.split("#")[0]
     assert asked == [("1d", [alpha, beta]), ("1h", [beta])]
 
