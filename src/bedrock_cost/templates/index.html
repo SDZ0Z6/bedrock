@@ -26,7 +26,8 @@
 {% block page_actions %}{% if not report %}{{ refresh_button() }}{% endif %}{% endblock %}
 
 {# 最上面一条欢迎：欢迎回来、今天在线多久（app.js 报到回来跟着变），右边一小片像素风景，几只小家伙在上面走来走去、
-   跳舞，鼠标移上去说一句、点一下蹦一下（welcome.py 的话，static/mascots.js 安排；风景跟着它们动）。在「概览」标题上面 #}
+   跳舞，鼠标移上去说一句、点一下蹦一下（welcome.py 的话，static/mascots.js 安排；风景跟着它们动）。在「概览」标题上面。
+   开着小城的人（资料页上的开关）整条是一座小城，见下面 #}
 {% block page_header %}
   {% set w = welcome %}
   <section class="welcome" aria-label="欢迎">
@@ -43,6 +44,27 @@
       {% for spec in w.mascots %}{{ mascot(spec) }}{% endfor %}
       {{ scene_picker(w.scene) }}
     </div>
+    {# 开着小城的人：整条欢迎条是一座小城（city.py 摆好，static/city.js 用 three.js 画），欢迎语叠在左上角。
+       city.js 确定画得出来才露出来、把上面的像素风景收起来；画不出来（没有 WebGL2……）照样是像素风景 #}
+    {% if city %}
+      <div class="city" data-city hidden>
+        <canvas class="city-canvas" role="img" aria-label="小城：每个客户一个院子，两边的仓库是名下的账号，门口的牌子写余额"></canvas>
+        <div class="city-tools" role="group" aria-label="小城的视角">
+          <button class="city-tool" type="button" data-city-zoom="in" title="放大" aria-label="放大">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg></button>
+          <button class="city-tool" type="button" data-city-zoom="out" title="缩小" aria-label="缩小">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9"/></svg></button>
+          <button class="city-tool" type="button" data-city-zoom="reset" title="回到原位" aria-label="回到原位">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5"/><path d="M4.4 2.2v2.6H7"/></svg></button>
+        </div>
+        <p class="city-hint" aria-hidden="true">点一下看特写 · 左键拖着转 · 右键拖着移 · 滚轮放大缩小</p>
+        {# 点开特写：别的地方淡下去（挖洞的位置 city.js 跟着算），右边一张卡片（city.js 填） #}
+        <div class="city-veil" data-city-veil hidden></div>
+        <aside class="city-card" data-city-card hidden aria-live="polite"></aside>
+      </div>
+      <script id="city-data" type="application/json">{{ city | tojson }}</script>
+      <script type="module" src="{{ url_for('static', filename='city.js') }}"></script>
+    {% endif %}
     <script id="mascot-talk" type="application/json">{{ w.talk | tojson }}</script>
     <script id="scene-conf" type="application/json">{{ {'url': url_for('profile.scene'), 'csrf': csrf_token(),
       'labels': dict(w.scene.options)} | tojson }}</script>

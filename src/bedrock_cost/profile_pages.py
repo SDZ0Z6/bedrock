@@ -5,7 +5,8 @@
 还有在线时间的报到（POST /presence）：侧边栏那一套页面每 30 秒报一次（app.js），见 presence。
 它不续登录有效期（create_app 里的 _Sessions），页面开着不动，到点照样要重新登录。
 概览欢迎条右上角换背景（POST /me/scene，mascots.js 用 fetch 发）也记在自己的资料里；每个页面底下那只小家伙
-出不出来也是（POST /me/pet：资料页上的开关是普通表单，右键点它「收起小家伙」是 pet.js 用 fetch 发的）。
+出不出来也是（POST /me/pet：资料页上的开关是普通表单，右键点它「收起小家伙」是 pet.js 用 fetch 发的）；概览顶上的
+小城开不开也是（POST /me/city，资料页上的开关，普通表单）。
 """
 
 from __future__ import annotations
@@ -71,7 +72,8 @@ def save():
     try:
         look = users.clean_look(request.form.get("display"), request.form.get("avatar_text"),
                                 request.form.get("avatar_color"))
-        person = users.save_look(me, replace(look, scene=me.look.scene, pet=me.look.pet))    # 挑过的背景、小家伙不动
+        # 挑过的背景、小家伙、小城不动
+        person = users.save_look(me, replace(look, scene=me.look.scene, pet=me.look.pet, city=me.look.city))
     except users.UserError as exc:
         flash_result("资料没保存", text=str(exc), tone="error")
         return redirect(url_for("profile.me"))
@@ -96,6 +98,29 @@ def scene():
         return jsonify(ok=False, message=str(exc)), 400
     kind = chosen or welcome.auto_scene(datetime.now())
     return jsonify(ok=True, scene=chosen, kind=kind, label=welcome.SCENES[kind])
+
+
+@bp.route("/me/city", methods=["POST"], endpoint="city")
+@login_required
+@csrf_protect
+def city():
+    """概览顶上的小城开着（city=on）还是关了（city=off，换回原来的像素风景），记在自己的资料里。资料页上的开关是
+    普通表单：存好回资料页，弹一句。"""
+    wanted = (request.form.get("city") or "").strip()
+    if wanted not in ("on", "off"):
+        flash_result("没改成", text="页面可能已经过期，刷新后再试。", tone="error")
+        return redirect(url_for("profile.me"))
+    me = current_user()
+    try:
+        users.save_look(me, replace(me.look, city="" if wanted == "on" else users.CITY_OFF))
+    except users.UserError as exc:
+        flash_result("没改成", text=str(exc), tone="error")
+        return redirect(url_for("profile.me"))
+    if wanted == "on":
+        flash_result("小城开回来了", text="概览最上面是每个客户的院子，有调用的仓库，小家伙在往公司楼搬箱子。")
+    else:
+        flash_result("小城关了", text="概览最上面换回原来的像素风景；想看了在这儿再打开。")
+    return redirect(url_for("profile.me"))
 
 
 @bp.route("/me/pet", methods=["POST"], endpoint="pet")

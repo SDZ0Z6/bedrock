@@ -181,6 +181,30 @@
       </form>
     </div>
   </section>
+
+  {# 概览顶上的小城（city.py、static/city.js）：关了换回原来那条像素风景。开关是普通表单，点了就存、回到这一页 #}
+  {% set city_on = person.look.city_on %}
+  <section class="card" aria-labelledby="city-title">
+    <div class="card-head">
+      <div class="card-title">
+        <h2 id="city-title">概览上的小城</h2>
+        <span class="card-note">概览最上面那一条</span>
+      </div>
+    </div>
+    <div class="card-pad pet-pref">
+      <img class="pet-pref-art" src="{{ url_for('static', filename='mascot.svg') }}" alt="" width="40" height="32" decoding="async">
+      <div class="pet-pref-text">
+        <p class="pet-pref-state">{{ '开着' if city_on else '关了，是原来的像素风景' }}</p>
+        <p class="form-hint">每个客户一个院子：北头是公司楼，两边的仓库是名下的账号，门口的牌子写余额；最近一小时有调用的仓库，小家伙在往公司楼搬箱子。拖动能转，鼠标放上去看详情，点一下进它的页面。</p>
+      </div>
+      <form class="inline-form" method="post" action="{{ url_for('profile.city') }}" data-loading="正在保存">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="city" value="{{ 'off' if city_on else 'on' }}">
+        <button class="switch" type="submit" role="switch" aria-checked="{{ 'true' if city_on else 'false' }}"
+                aria-label="概览顶上的小城" title="{{ '关掉' if city_on else '打开' }}"></button>
+      </form>
+    </div>
+  </section>
   {% endif %}
 </div>
 
