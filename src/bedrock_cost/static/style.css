@@ -1626,7 +1626,8 @@ a.fchip:hover { text-decoration: none; }
 /* ---- 换背景：右上角一个小按钮，点开一排选项 */
 .scene-pick { position: absolute; top: 8px; right: 8px; z-index: 4; display: inline-flex; align-items: center; gap: 5px; height: 26px;
               padding: 0 10px 0 8px; border: 1px solid rgba(20, 20, 19, .08); border-radius: 999px; background: rgba(255, 255, 255, .84);
-              color: var(--text-dim); font: inherit; font-size: 12px; cursor: pointer; -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
+              color: var(--text-dim); font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer;
+              -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
 .scene-pick:hover { background: #ffffff; color: var(--text); }
 .scene-pick:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 1px; }
 .scene-pick svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
@@ -1688,6 +1689,121 @@ a.fchip:hover { text-decoration: none; }
   .welcome-sub { margin-top: 6px; font-size: 14.5px; }
   .mascot-stage { --pan: 76; min-height: 172px; }
   .mascot-bubble { padding: 8px 13px; font-size: 13.5px; }
+}
+
+/* ======================================================= 概览顶上的小城（city.py、static/city.js、index.html）
+ * 开着小城的人：整条欢迎条是一座小城（three.js 画在 canvas 上），欢迎语叠在左上角一块半透明的牌子上，原来那条像素风景
+ * 收起来。city.js 确定画得出来才给欢迎条加 is-city；画不出来去掉，还是原来的样子。右下角放大、缩小、回到原位；
+ * 小家伙说话的对话框和原来那几只一个样子，位置由 city.js 跟着它算。正方形的城斜着看是个菱形，欢迎条比原来高。
+ * 点开特写：别的地方盖一层半透明的白（.city-veil，正中挖个洞，洞在哪 city.js 写在 --vx、--vy 上），右边一张卡片 */
+.welcome.is-city { display: block; height: 440px; padding: 0; background: #eef1ea; }
+/* 像素风景收着，只留右上角换背景的按钮：小城跟着背景换天色、天气（点开特写时收起来，那儿是卡片；手机上在左下角） */
+.welcome.is-city .mascot-stage { position: absolute; inset: 0; min-width: 0; min-height: 0; pointer-events: none; }
+.welcome.is-city .mascot-stage > :not(.scene-pick):not(.scene-menu) { display: none; }
+.welcome.is-city .scene-pick { top: 14px; right: 14px; pointer-events: auto; }
+.welcome.is-city .scene-menu { pointer-events: auto; }
+.welcome.is-city.has-city-card .scene-pick { display: none; }
+.welcome.is-city .welcome-who { position: absolute; top: 14px; left: 14px; z-index: 2; max-width: calc(100% - 28px);
+                                padding: 10px 18px 10px 10px; border: 1px solid var(--line); border-radius: 14px;
+                                background: rgba(255, 255, 255, .86); backdrop-filter: blur(6px); pointer-events: none; }
+.city { position: absolute; inset: 0; overflow: hidden; border-radius: inherit;
+        background: linear-gradient(180deg, #e3edf0 0%, #eef2ec 55%, #f4efe3 100%); }
+.city[hidden] { display: none; }
+.city-canvas { position: relative; display: block; width: 100%; height: 100%; touch-action: pan-y; }
+/* 天的颜色跟着背景（city.js 把欢迎条上的 data-kind 抄到 .city 上），画布是透明的，透出来；
+   夜里深蓝、有星星和月亮，下雨灰灰的，雨后天上一道彩虹（::before 垫在画布底下） */
+.city::before { content: ""; position: absolute; inset: 0; pointer-events: none; }
+.city[data-kind="dusk"] { background: linear-gradient(180deg, #f3c7a4 0%, #f6dcc4 50%, #f1e4d2 100%); }
+.city:is([data-kind="night"], [data-kind="fireflies"]) { background: linear-gradient(180deg, #1d2542 0%, #2a3456 55%, #3a4262 100%); }
+.city[data-kind="rain"] { background: linear-gradient(180deg, #c3cad2 0%, #d2d7dc 55%, #dcdedd 100%); }
+.city[data-kind="rainbow"] { background: linear-gradient(180deg, #d6e9f3 0%, #e8f1ef 55%, #f3efe4 100%); }
+.city[data-kind="snow"] { background: linear-gradient(180deg, #e3e9f0 0%, #edf1f5 55%, #f5f5f3 100%); }
+.city[data-kind="sakura"] { background: linear-gradient(180deg, #f1e2ea 0%, #f3ece9 55%, #f4efe3 100%); }
+.city[data-kind="autumn"] { background: linear-gradient(180deg, #f0e3cf 0%, #f3ead9 55%, #f4ecdc 100%); }
+.city:is([data-kind="night"], [data-kind="fireflies"])::before {
+  background: radial-gradient(circle at 88% 14%, #fbf3d5 0 15px, rgba(251, 243, 213, .16) 16px 32px, transparent 33px),
+              radial-gradient(1.6px 1.6px at 8% 12%, #ffffff 50%, transparent), radial-gradient(1.4px 1.4px at 19% 30%, #ffffff 50%, transparent),
+              radial-gradient(1.8px 1.8px at 31% 9%, #ffffff 50%, transparent), radial-gradient(1.3px 1.3px at 44% 22%, #ffffff 50%, transparent),
+              radial-gradient(1.6px 1.6px at 57% 7%, #ffffff 50%, transparent), radial-gradient(1.4px 1.4px at 68% 26%, #ffffff 50%, transparent),
+              radial-gradient(1.7px 1.7px at 77% 6%, #ffffff 50%, transparent), radial-gradient(1.3px 1.3px at 95% 32%, #ffffff 50%, transparent),
+              radial-gradient(1.5px 1.5px at 4% 44%, #ffffff 50%, transparent), radial-gradient(1.4px 1.4px at 92% 52%, #ffffff 50%, transparent);
+}
+.city[data-kind="rainbow"]::before {
+  background: radial-gradient(circle at 86% 92%, transparent 0 28%, rgba(234, 107, 94, .4) 28% 29.6%, rgba(240, 168, 82, .4) 29.6% 31.2%,
+                              rgba(238, 214, 96, .4) 31.2% 32.8%, rgba(126, 190, 120, .4) 32.8% 34.4%, rgba(98, 156, 214, .4) 34.4% 36%,
+                              rgba(150, 120, 200, .4) 36% 37.6%, transparent 37.6%);
+}
+.city-tools { position: absolute; right: 12px; bottom: 12px; z-index: 2; display: flex; gap: 6px; }
+.city-tool { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 1px solid var(--line);
+             border-radius: 9px; background: rgba(255, 255, 255, .88); color: var(--text-dim); cursor: pointer; }
+.city-tool:hover { color: var(--text); border-color: var(--line-strong); }
+.city-tool:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+.city-tool svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round;
+                 stroke-linejoin: round; }
+.city-hint { position: absolute; left: 14px; bottom: 12px; z-index: 2; margin: 0; padding: 4px 10px; border-radius: 999px;
+             background: rgba(255, 255, 255, .78); color: var(--text-mute); font-size: 12px; pointer-events: none; }
+@media (hover: none) { .city-hint { display: none; } }
+.city-bubble { bottom: auto; transform: translate(-50%, calc(-100% - 6px)); animation: city-pop .16s ease-out; }
+@keyframes city-pop { from { opacity: 0; transform: translate(-50%, calc(-100% - 2px)) scale(.96); } }
+.city-veil { position: absolute; inset: 0; z-index: 1; pointer-events: none; animation: city-fade .5s ease-out;
+             background: radial-gradient(circle at var(--vx, 50%) var(--vy, 50%), rgba(248, 246, 240, 0) 0,
+                                         rgba(248, 246, 240, 0) var(--vr, 110px), rgba(248, 246, 240, .62) calc(var(--vr, 110px) * 2.2)); }
+.city-veil[hidden], .city-card[hidden] { display: none; }
+.city:is([data-kind="night"], [data-kind="fireflies"]) .city-veil {
+  background: radial-gradient(circle at var(--vx, 50%) var(--vy, 50%), rgba(18, 22, 40, 0) 0, rgba(18, 22, 40, 0) var(--vr, 110px),
+                              rgba(18, 22, 40, .55) calc(var(--vr, 110px) * 2.2));
+}
+.is-focused .city-hint { display: none; }
+@keyframes city-fade { from { opacity: 0; } }
+.city-card { position: absolute; top: 14px; right: 14px; z-index: 3; width: 290px; max-height: calc(100% - 64px); overflow: auto;
+             padding: 16px 18px 16px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255, 255, 255, .96);
+             box-shadow: 0 12px 32px rgba(20, 20, 19, .14); animation: city-card-in .32s cubic-bezier(.2, .8, .3, 1); }
+@keyframes city-card-in { from { opacity: 0; transform: translateX(14px); } }
+.city-card-close { position: absolute; top: 10px; right: 10px; width: 26px; height: 26px; padding: 0; border: 0;
+                   border-radius: 8px; background: none; color: var(--text-mute); font-size: 13px; cursor: pointer; }
+.city-card-close:hover { background: var(--line); color: var(--text); }
+.city-card-title { margin: 0 26px 0 0; font-family: var(--font-display); font-size: 17px; font-weight: 500;
+                   line-height: 1.35; color: var(--text); overflow-wrap: anywhere; }
+.city-card-sub { margin: 2px 0 0; font-size: 12.5px; color: var(--text-mute); }
+.city-card-big { margin: 12px 0 0; font-size: 24px; font-weight: 600; line-height: 1.2; color: var(--text);
+                 font-variant-numeric: tabular-nums; }
+.city-card-big small { font-size: 12.5px; font-weight: 400; color: var(--text-mute); }
+.city-card-meter { margin-top: 8px; }
+.city-card-facts { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; margin: 12px 0 0; font-size: 13px; }
+.city-card-facts dt { color: var(--text-mute); }
+.city-card-facts dd { margin: 0; color: var(--text); text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.city-card-spark { display: flex; align-items: flex-end; gap: 3px; height: 38px; margin-top: 14px; }
+.city-card-spark i { flex: 1 1 0; min-height: 2px; border-radius: 2px 2px 0 0; background: #e3b49d; }
+.city-card-spark i:last-child { background: #d97757; }
+.city-card-note { margin: 5px 0 0; font-size: 11.5px; color: var(--text-mute); }
+.city-card-go { display: inline-flex; margin-top: 14px; }
+@media (max-width: 900px) {
+  .welcome.is-city { height: 360px; }
+  .welcome.is-city .welcome-who { top: 10px; left: 10px; padding: 8px 14px 8px 8px; }
+}
+@media (max-width: 560px) {
+  .welcome.is-city { height: 300px; }
+  .welcome.is-city .scene-pick { top: auto; right: auto; bottom: 12px; left: 12px; }      /* 欢迎语占了顶上一整条 */
+  .city-hint { display: none; }
+  /* 手机上点开：卡片接在城的下面，欢迎条跟着长高，城还是整整 300 高、看得全 */
+  .welcome.is-city.has-city-card { height: auto; }
+  .welcome.is-city.has-city-card .welcome-who { display: none; }      /* 欢迎语在手机上占了城的一整条：点开时先收起来 */
+  .has-city-card .city { position: relative; inset: auto; }
+  .has-city-card .city-canvas { height: 300px; }
+  .has-city-card .city-veil { bottom: auto; height: 300px; }
+  .has-city-card .city-tools { top: 258px; bottom: auto; }
+  .city-card { position: relative; top: auto; right: auto; width: auto; max-height: none; border-width: 1px 0 0;
+               border-radius: 0; box-shadow: none; animation: city-fade .25s ease-out; }
+}
+/* 叠在小城上的欢迎语小一号：少挡一点城 */
+.welcome.is-city .avatar-lg { width: 52px; height: 52px; }
+.welcome.is-city .avatar-lg > span { width: 42px; height: 42px; font-size: 19px; }
+.welcome.is-city .avatar-lg.avatar-emoji > span { font-size: 22px; }
+.welcome.is-city .welcome-hi { font-size: 22px; }
+.welcome.is-city .welcome-sub { margin-top: 2px; font-size: 13px; }
+@media (min-width: 1180px) {
+  .welcome.is-city { height: 520px; }
+  .welcome.is-city .welcome-hi { font-size: 24px; }
 }
 
 /* ======================================================= 每个页面底下那只像素小家伙（pet.py、static/pet.js、_mascot.html 的 pet()）

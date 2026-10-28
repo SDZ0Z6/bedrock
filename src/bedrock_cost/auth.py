@@ -46,7 +46,8 @@ ADMIN, VIEWER = "admin", "viewer"
 ADMIN_BLUEPRINTS = frozenset({"accounts", "people", "settings"})
 ADMIN_ENDPOINTS = frozenset({"main.clear_cache"})
 # 只读用户也能提交的：改自己的密码、改自己的资料（显示名、头像、概览的背景、页面底下的小家伙）、在线时间的报到
-VIEWER_POSTS = frozenset({"auth.password", "profile.save", "profile.scene", "profile.pet", "profile.presence"})
+VIEWER_POSTS = frozenset({"auth.password", "profile.save", "profile.scene", "profile.pet", "profile.city",
+                          "profile.presence"})
 READ_ONLY = "只读用户不能改东西"
 
 # ip -> [失败次数, 首次失败时间]

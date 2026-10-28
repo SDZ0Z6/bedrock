@@ -13,6 +13,7 @@ from flask import Blueprint, flash, redirect, render_template, request, session,
 from . import (
     activity,
     chart,
+    city,
     cloudwatch_metrics,
     config,
     cost_estimate,
@@ -97,6 +98,7 @@ def index():
 
     context: dict = {}
     facts = None      # 概览上的几个数，顶上的小家伙拿来说事（welcome.facts_from）
+    town = None       # 欢迎条上的小城（city.py）：关了小城的人、出不了报表时没有，是原来的像素风景
     if report:
         accounts = load_accounts()
         tags = load_lifecycle()
@@ -123,7 +125,14 @@ def index():
         ]
         facts = welcome.facts_from(cards, report, len(owners))
         # 每月账号和消费：新加按启用日期、停用按 EVENTS 表和操作日志，消费是累计那次查询按月留下的，加上停用账号存下来的账
-        months = dashboard.account_months(cards, load_accounts(include_disabled=True), load_events(), today)
+        everyone = load_accounts(include_disabled=True)
+        months = dashboard.account_months(cards, everyone, load_events(), today)
+        if current_user().look.city_on:
+            # 每个客户一个院子、账号是仓库：用的就是上面这些卡片和停用账号存下来的账，不多查 AWS
+            town = city.build(cards, everyone, list(owners.values()),
+                              lambda number: url_for("account.summary", number=number),
+                              lambda cid: url_for("customers.detail", cid=cid),
+                              lambda path: url_for("static", filename=path))
         context = dict(
             customer_chips=customer_chips,
             stock_cards=sum(1 for card in cards if card.customer not in owners),
@@ -156,8 +165,9 @@ def index():
     return render_template(
         "index.html",
         active_page="overview",
-        # 顶上的欢迎条：欢迎回来、今天在线多久、走来走去的小家伙（welcome.py）
+        # 顶上的欢迎条：欢迎回来、今天在线多久、走来走去的小家伙（welcome.py），开着小城的人是一座小城（city.py）
         welcome=welcome.context(current_user(), facts=facts),
+        city=town,
         report=report,
         fatal=fatal,
         notes=notes,

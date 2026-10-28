@@ -20,12 +20,23 @@
  * 挑的记在自己的资料里（POST /me/scene，#scene-conf 里有网址和令牌）。
  *
  * 系统设了「减少动态效果」：都站着不动，风景也不动，不撒雨雪（CSS 也把动画关了）；对话框、换背景照样有。
- * 页面放到后台时 rAF 自己会停。 */
-(function () {
+ * 页面放到后台时 rAF 自己会停。
+ *
+ * 开着小城（static/city.js）的时候欢迎条上是小城（.welcome.is-city），这一条风景收着，这里先不动；city.js 画不出来
+ * 发 city:off，那时候再从头来一遍。换背景的按钮开着小城也有：换了在欢迎条上发 scene:change，风景、小城各自跟着换。 */
+(function mascots() {
   'use strict';
   const stage = document.querySelector('[data-mascot-stage]');
   const source = document.getElementById('mascot-talk');
   if (!stage || !source) return;
+  if (!mascots.picking) {
+    mascots.picking = true;
+    picker();
+  }
+  if (stage.closest('.welcome.is-city') && !mascots.late) {
+    document.addEventListener('city:off', function () { mascots.late = true; mascots(); }, { once: true });
+    return;
+  }
   const talk = JSON.parse(source.textContent);
   const still = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
   const SPEED = [24, 46];        // 每秒走多少像素（每只随机一个）
@@ -293,18 +304,27 @@
     }
   }
   applyKind(stage.dataset.kind || 'day');
+  stage.addEventListener('scene:change', function (event) { applyKind(event.detail); });
 
-  // 右上角的按钮：点开一排选项（原生 popover），选了马上换、记在自己的资料里；选「自动」就换成 data-auto 那个
-  const confBox = document.getElementById('scene-conf');
-  const menu = document.getElementById('scene-menu');
-  const opener = stage.querySelector('[data-scene-open]');
-  const label = stage.querySelector('[data-scene-label]');
-  if (confBox && menu && opener) {
+  // 右上角的按钮：点开一排选项（原生 popover），选了马上换、记在自己的资料里；选「自动」就换成 data-auto 那个。
+  // 开着小城时也是它（手机上在左下角，菜单就靠左对齐）
+  function picker() {
+    const confBox = document.getElementById('scene-conf');
+    const menu = document.getElementById('scene-menu');
+    const opener = stage.querySelector('[data-scene-open]');
+    const label = stage.querySelector('[data-scene-label]');
+    if (!confBox || !menu || !opener) return;
     const conf = JSON.parse(confBox.textContent);
     const place = function () {
-      const box = opener.getBoundingClientRect();
+      const box = opener.getBoundingClientRect(), width = document.documentElement.clientWidth;
       menu.style.top = Math.round(box.bottom + 6) + 'px';
-      menu.style.right = Math.round(Math.max(8, document.documentElement.clientWidth - box.right)) + 'px';
+      if (box.left + box.width / 2 < width / 2) {
+        menu.style.left = Math.round(Math.max(8, box.left)) + 'px';
+        menu.style.right = 'auto';
+      } else {
+        menu.style.right = Math.round(Math.max(8, width - box.right)) + 'px';
+        menu.style.left = 'auto';
+      }
     };
     opener.addEventListener('click', place);
     menu.addEventListener('beforetoggle', function (event) { if (event.newState === 'open') place(); });
@@ -313,7 +333,8 @@
       if (!button) return;
       const chosen = button.dataset.scenePick;
       const kind = chosen || stage.dataset.auto || 'day';
-      applyKind(kind);
+      stage.dataset.kind = kind;
+      stage.dispatchEvent(new CustomEvent('scene:change', { detail: kind }));
       if (label) label.textContent = (conf.labels[kind] || kind) + (chosen ? '' : ' · 自动');
       for (const item of menu.querySelectorAll('[data-scene-pick]')) {
         item.setAttribute('aria-pressed', String(item.dataset.scenePick === chosen));
