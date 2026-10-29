@@ -13,6 +13,10 @@
 
 一个账号一次 GetCostAndUsage 就能同时拿到两部分，CE 按请求计费
 （约 0.01 USD/次），因此结果按「账号 + 日期区间 + 指标」缓存。
+
+GroupBy 是 [SERVICE, TAG]：还是一次请求，顺手把每个月、每个服务、每个标签值的原价留在
+CostSplit.lines 里，跟着累计一起存进 last_known——AK 失效（被删、被收权限）以后，账号页的
+成本页签拿它显示存下来的账单（按月、按服务），不至于一片 0。
 """
 
 from __future__ import annotations
@@ -57,6 +61,9 @@ class CostSplit:
     # 每个月的 (TAG, UNTAG) 原价：查询本来就是按月的，加总之前顺手留一份，概览「每月账号和消费」用。
     # 键是 YYYY-MM；last_known 顶上来的旧数没有这一份（空的）
     monthly: dict[str, tuple[float, float]] = field(default_factory=dict)
+    # 账单明细：(YYYY-MM, 服务, 标签值, 原价)，一个月一个服务一个标签值一行，按这个顺序排；标签值空 = 没打标签。
+    # 存进 last_known，AK 失效以后成本页签拿它显示（usage_explorer.saved_report）
+    lines: tuple[tuple[str, str, str, float], ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -118,7 +125,8 @@ def _query(account: Account, start: date, end: date) -> CostSplit:
         },
         "Granularity": "MONTHLY",
         "Metrics": [config.COST_METRIC],
-        "GroupBy": [{"Type": "TAG", "Key": tag_key}],
+        # 按服务再按标签拆：加总和只按标签拆一样，多出来的是账单明细（lines）
+        "GroupBy": [{"Type": "DIMENSION", "Key": "SERVICE"}, {"Type": "TAG", "Key": tag_key}],
     }
     cost_filter = build_filter()
     if cost_filter:
@@ -126,6 +134,7 @@ def _query(account: Account, start: date, end: date) -> CostSplit:
 
     split = CostSplit(fetched_at=time.time())
     seen: dict[str, float] = {}
+    lines: dict[tuple[str, str, str], float] = {}
     next_token: str | None = None
     while True:
         if next_token:
@@ -139,9 +148,13 @@ def _query(account: Account, start: date, end: date) -> CostSplit:
                 metric = group.get("Metrics", {}).get(config.COST_METRIC, {})
                 amount = float(metric.get("Amount") or 0.0)
                 split.currency = metric.get("Unit") or split.currency
-                tag_value = split_group_key((group.get("Keys") or [""])[0])
+                keys = group.get("Keys") or [""]
+                tag_value = split_group_key(keys[-1])
+                service = keys[0] if len(keys) > 1 else ""
                 if tag_value:
                     seen[tag_value] = seen.get(tag_value, 0.0) + amount
+                if month and amount:
+                    lines[(month, service, tag_value)] = lines.get((month, service, tag_value), 0.0) + amount
 
                 if expected is None:
                     is_tag = bool(tag_value)  # 任意非空值
@@ -161,6 +174,8 @@ def _query(account: Account, start: date, end: date) -> CostSplit:
                     split.currency = total["Unit"]
                 split.untag_raw += float(total.get("Amount") or 0.0)
                 untag_month += float(total.get("Amount") or 0.0)
+                if month and float(total.get("Amount") or 0.0):
+                    lines[(month, "", "")] = lines.get((month, "", ""), 0.0) + float(total.get("Amount") or 0.0)
             if month:
                 split.monthly[month] = (tag_month, untag_month)
 
@@ -169,6 +184,7 @@ def _query(account: Account, start: date, end: date) -> CostSplit:
             break
 
     split.seen_values = tuple(sorted(seen, key=lambda v: -seen[v]))
+    split.lines = tuple((month, service, tag, round(amount, 6)) for (month, service, tag), amount in sorted(lines.items()))
 
     # 台账里写死了标签值，但该区间内一分钱都没匹配上 —— 大概率是值写错了，
     # 这种情况下全部消费会被按 UNTAG_RATIO 加价，必须让用户看见。

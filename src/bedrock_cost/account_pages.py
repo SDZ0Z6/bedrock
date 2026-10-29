@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import io
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
 
@@ -317,6 +318,21 @@ def cost(number: str):
         fatal = f"{type(exc).__name__}: {exc}"
     toasts = dashboard.region_toasts(report.errors, account, "查不到 Cost Explorer")
 
+    # 查不了 Cost Explorer（AK 失效、被收权限……）：拿概览上一次查成功时存下来的账单顶上，按月、按服务
+    saved = None
+    found = usage_explorer.saved_report(account, start, end, dimension, today)         if report.errors and not report.series and not fatal else None
+    if found:
+        errors, (report, saved) = report.errors, found
+        report.errors = errors
+        granularity = "monthly"
+        toasts = [replace(toast, text=toast.text + "，下面是存下来的账单") for toast in toasts]
+        if saved.lump:
+            notes.append(f"Cost Explorer 这次查不了，下面是 {saved.as_of.isoformat()} 查成功时存下来的累计"
+                         "（从启用算到那天）。那时候还没按服务、按月存，只能拆出 TAG / UNTAG。")
+        else:
+            notes.append(f"Cost Explorer 这次查不了，下面是 {saved.as_of.isoformat()} 查成功时存下来的账单："
+                         "按月、按服务，折算后按台账现在的比率算。显示和所选时间有重叠的整月，按日的明细没存。")
+
     active = detect_preset(start, end, today)
     context = _frame(
         account, accounts, "cost", refresh=refresh, report=report, fatal=fatal, notes=notes, toasts=toasts,
@@ -326,7 +342,7 @@ def cost(number: str):
         bucket_average=report.total_marked / (len(report.dates) or 1),
         range_label=_date_label(start, end, active),
         range_presets=_date_presets("account.cost", account, today, active, dim=dimension, granularity=granularity),
-        date_min=_date_min(account, today),
+        date_min=_date_min(account, today), saved=saved,
     )
     return render_template("account_cost.html", **context)
 
@@ -338,6 +354,7 @@ def cost_csv(number: str):
     算 TAG 还是 UNTAG、乘的比率、AWS 原价、折算后都在。页面上选的维度、粒度不管：导出的总是最细的那一层。
     Excel 直接打开（带 BOM）。
 
+    查不了 Cost Explorer（AK 失效……）时导出存下来的账单：每个月、每个服务、每个标签值一行，第一列是月份。
     出了错回一句纯文本、不跳页面：按钮是 app.js 用 fetch 取的，拿到报错就在右上角弹出来。
     """
     try:
@@ -350,16 +367,21 @@ def cost_csv(number: str):
     start, end, notes = resolve_range(request.args, today)
     start, end = _clamp_dates(account, start, end, today, notes)
     lines, currency, error = usage_explorer.export_lines(account, start, end)
+    first, saved = "日期", None
     if error:
-        return _export_error(f"查不到 Cost Explorer：{error.message}", 502)
+        found = usage_explorer.saved_lines(account, start, end, today)
+        if found is None:
+            return _export_error(f"查不到 Cost Explorer：{error.message}", 502)
+        lines, currency, saved = found
+        first = f"{'起止' if saved.lump else '月份'}（存下来的账单，截至 {saved.as_of.isoformat()}）"
     out = io.StringIO()
     writer = csv.writer(out)
-    writer.writerow(["日期", "服务", f"标签值（{account.tag_key}）", "算作", "比率",
+    writer.writerow([first, "服务", f"标签值（{account.tag_key}）", "算作", "比率",
                      f"AWS 原价（{currency}）", f"折算后（{currency}）"])
     for line in lines:
         writer.writerow([line.day, line.service, line.tag_value, "TAG" if line.tagged else "UNTAG",
                          _plain(line.ratio), _plain(line.raw), _plain(line.marked)])
-    filename = f"{account.account}-cost-{start.isoformat()}_{end.isoformat()}.csv"
+    filename = f"{account.account}-cost-{start.isoformat()}_{end.isoformat()}.csv" if saved is None         else f"{account.account}-cost-saved-{saved.as_of.isoformat()}.csv"
     return Response("\ufeff" + out.getvalue(), mimetype="text/csv",       # Flask 自己补上 charset=utf-8
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 

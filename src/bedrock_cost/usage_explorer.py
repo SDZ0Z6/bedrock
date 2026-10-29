@@ -10,6 +10,9 @@
 为了拿到逐格的比率归属，「服务」维度用两级 GroupBy：[SERVICE, TAG]。
 Cost Explorer 最多支持两级，刚好够用，一个账号仍然只发一次请求。
 账号页的「导出 CSV」也是这个请求，只是标签值不并掉（内部维度 LINE，见 export_lines）。
+
+查不了的时候（AK 失效、被收权限……）成本页签和导出用存下来的账单：概览上一次查成功时顺手存的
+每个月、每个服务、每个标签值的原价（last_known），见 saved_report / saved_lines。
 """
 
 from __future__ import annotations
@@ -23,9 +26,10 @@ from datetime import date, timedelta
 import boto3
 from botocore.config import Config as BotoConfig
 
-from . import config
+from . import config, last_known
 from .aws_errors import QueryError, as_query_error, describe, missing_credentials
 from .cost_explorer import build_filter, split_group_key
+from .dates import cumulative_range
 from .excel_source import Account
 
 # 维度 -> (页面显示名, CE 的 GroupBy 维度键或 None)
@@ -45,6 +49,7 @@ LINE = "line"
 
 UNTAGGED_LABEL = "未打标签"
 OTHER_LABEL = "其他"
+UNKNOWN_SERVICE = "(未知服务)"
 
 # 图表最多用 8 个分类色槽，超出的折叠进「其他」（用中性灰，不占分类槽）
 MAX_SERIES = 8
@@ -310,11 +315,11 @@ def _query_account(
                 marked = amount * ratio_for(account, tag_value)
 
                 if dimension == "service":
-                    name = keys[0] if keys else "(未知服务)"
+                    name = keys[0] if keys else UNKNOWN_SERVICE
                 elif dimension == "tag":
                     name = tag_value or UNTAGGED_LABEL
                 elif dimension == LINE:
-                    name = (keys[0] if keys else "(未知服务)", tag_value)
+                    name = (keys[0] if keys else UNKNOWN_SERVICE, tag_value)
                 else:
                     name = account_label
 
@@ -416,6 +421,14 @@ def build_usage(
                 target[position][0] += raw
                 target[position][1] += marked
 
+    _assemble(report, combined)
+    return report
+
+
+def _assemble(report: UsageReport, combined: dict[str, list[list[float]]]) -> None:
+    """{序列名: [[原价, 折算后], ...]} 排好放进 report：按折算后总额排，超出 8 条的并进「其他」，
+    details 逐项列全。"""
+    width = len(report.dates)
     # 按加价后总额排序，超出 8 条折叠进「其他」
     ranked = sorted(
         combined.items(), key=lambda kv: -sum(cell[1] for cell in kv[1])
@@ -450,7 +463,92 @@ def build_usage(
             Series(name=OTHER_LABEL, raw=raw_total, marked=marked_total, slot=-1)
         )
 
-    return report
+
+# --------------------------------------------------------------- 查不了的时候：存下来的账单
+@dataclass
+class Saved:
+    """顶上来的是哪天存的，是不是只有累计（这一项加上之前存的老记录没有明细）。"""
+
+    as_of: date
+    lump: bool
+
+
+def _known(account: Account, today: date):
+    """概览上一次查成功时存下来的那份（同一口径、从启用算起）和起算日；没有就是 None。"""
+    begin, _, _ = cumulative_range(account.start_date, today)
+    try:
+        return begin, last_known.recall(account, begin, today)
+    except OSError:
+        return begin, None
+
+
+def saved_report(
+    account: Account, start: date, end: date, dimension: str, today: date,
+) -> tuple[UsageReport, Saved] | None:
+    """查不了 Cost Explorer（AK 失效、被收权限……）时成本页签显示什么：概览上一次查成功时存下来的账单。
+
+    存的是每个月、每个服务、每个标签值的原价；折算后照台账现在的比率现乘，和查成功时一个口径。按月显示
+    和所选时间有重叠的那几个整月——按日的明细没存。老记录只有累计：就一格「启用 ~ 那天」，按服务拆不开
+    （一项「合计」），按标签拆成 TAG / UNTAG。没存过、口径变了（改过启用日期、TAG）：None，照旧显示查询失败。
+    """
+    if dimension not in DIMENSIONS:
+        dimension = "service"
+    begin, known = _known(account, today)
+    if known is None:
+        return None
+    report = UsageReport(start=start, end=end, dimension=dimension, granularity="monthly", currency=known.currency)
+    combined: dict[str, list[list[float]]] = {}
+    if known.lines:
+        first, last = max(start, begin), min(end, known.as_of)
+        if first <= last:
+            report.dates, report.labels = build_buckets(first, last, "monthly")
+        index = {iso[:7]: position for position, iso in enumerate(report.dates)}
+        for month, service, tag_value, raw in known.lines:
+            position = index.get(month)
+            if position is None:
+                continue
+            name = (service or UNKNOWN_SERVICE) if dimension == "service" else (tag_value or UNTAGGED_LABEL)
+            cells = combined.setdefault(name, [[0.0, 0.0] for _ in report.dates])
+            cells[position][0] += float(raw)
+            cells[position][1] += float(raw) * ratio_for(account, tag_value)
+    else:
+        report.dates = [begin.isoformat()]
+        report.labels = [f"{begin:%m-%d} ~ {known.as_of:%m-%d}"]
+        if dimension == "service":
+            parts = [("合计", known.tag_raw + known.untag_raw,
+                      known.tag_raw * account.tag_ratio + known.untag_raw * account.untag_ratio)]
+        else:
+            parts = [("TAG", known.tag_raw, known.tag_raw * account.tag_ratio),
+                     ("UNTAG", known.untag_raw, known.untag_raw * account.untag_ratio)]
+        for name, raw, marked in parts:
+            if round(raw, 6):
+                combined[name] = [[raw, marked]]
+    _assemble(report, combined)
+    return report, Saved(as_of=known.as_of, lump=not known.lines)
+
+
+def saved_lines(account: Account, start: date, end: date, today: date) -> tuple[list, str, Saved] | None:
+    """导出 CSV 查不了 Cost Explorer 时：存下来的账单，每个月、每个服务、每个标签值一行（Line.day 是 YYYY-MM），
+    和所选时间有重叠的整月。老记录只有累计：TAG、UNTAG 各一行，day 写「启用 ~ 那天」。没存过：None。"""
+    begin, known = _known(account, today)
+    if known is None:
+        return None
+    if known.lines:
+        first, last = max(start, begin).strftime("%Y-%m"), min(end, known.as_of).strftime("%Y-%m")
+        lines = [
+            Line(month, service or UNKNOWN_SERVICE, tag_value, is_tagged(account, tag_value),
+                 ratio_for(account, tag_value), float(raw), float(raw) * ratio_for(account, tag_value))
+            for month, service, tag_value, raw in known.lines if first <= month <= last
+        ]
+    else:
+        span = f"{begin.isoformat()} ~ {known.as_of.isoformat()}"
+        lines = [line for line in (
+            Line(span, "合计", account.tag_value or "(有标签值)", True, account.tag_ratio,
+                 known.tag_raw, known.tag_raw * account.tag_ratio),
+            Line(span, "合计", "", False, account.untag_ratio, known.untag_raw, known.untag_raw * account.untag_ratio),
+        ) if round(line.raw, 6)]
+    lines.sort(key=lambda line: (line.day, line.service, line.tag_value))
+    return lines, known.currency, Saved(as_of=known.as_of, lump=not known.lines)
 
 
 # --------------------------------------------------------------- 导出
