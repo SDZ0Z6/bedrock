@@ -1,5 +1,6 @@
 {# 账号页的「成本」页签（原来的成本和使用情况页）：这个账号在一段时间里按服务或标签
-   拆开的消费，金额是按台账比率折算后的。 #}
+   拆开的消费，金额是按台账比率折算后的。查不了 Cost Explorer（AK 失效……）时是存下来的账单
+   （saved：按月、按服务，截至上一次查成功的那天；老记录只有累计），上面的提示说清楚 #}
 {% extends "account_base.html" %}
 {% from "_macros.html" import range_picker, refresh_link %}
 {% from "_customer_macros.html" import cicon %}
@@ -56,19 +57,32 @@
       <span class="tile-value">{{ report.total_raw | money }}</span>
       <span class="tile-sub">Cost Explorer 原样返回，和 AWS 控制台一致</span>
     </div>
-    <div class="tile">
-      <span class="tile-label">{{ '月均' if granularity == 'monthly' else '日均' }}（折算后）</span>
-      <span class="tile-value">{{ bucket_average | money }}</span>
-      <span class="tile-sub">{{ report.dates | length }}{{ ' 个月' if granularity == 'monthly' else ' 天' }}</span>
-    </div>
+    {% if saved %}
+      <div class="tile">
+        <span class="tile-label">存到哪天</span>
+        <span class="tile-value">{{ saved.as_of.isoformat() }}</span>
+        <span class="tile-sub">上一次查成功的那天，这之后的消费没有</span>
+      </div>
+    {% else %}
+      <div class="tile">
+        <span class="tile-label">{{ '月均' if granularity == 'monthly' else '日均' }}（折算后）</span>
+        <span class="tile-value">{{ bucket_average | money }}</span>
+        <span class="tile-sub">{{ report.dates | length }}{{ ' 个月' if granularity == 'monthly' else ' 天' }}</span>
+      </div>
+    {% endif %}
   </section>
 
   <section class="viz-card chart-card">
     <div class="viz-head">
       <div>
         <h2 class="viz-title">按{{ report.dimension_label }}的成本</h2>
-        <p class="viz-sub">{{ start.isoformat() }} ~ {{ end.isoformat() }} · {{ granularities[granularity] }} · 折算后
-          {%- if report.any_cached %} · 部分数据来自缓存{% endif %}</p>
+        {% if saved %}
+          <p class="viz-sub">存下来的{{ '累计' if saved.lump else '账单' }} · 截至 {{ saved.as_of.isoformat() }}
+            {%- if not saved.lump %} · 按月{% endif %} · 折算后</p>
+        {% else %}
+          <p class="viz-sub">{{ start.isoformat() }} ~ {{ end.isoformat() }} · {{ granularities[granularity] }} · 折算后
+            {%- if report.any_cached %} · 部分数据来自缓存{% endif %}</p>
+        {% endif %}
       </div>
     </div>
     {% if report.series | length >= 2 %}
@@ -98,7 +112,7 @@
          app.js 用 fetch 取（data-export）：等的时候写「正在导出」，出错在右上角说；没开 JS 就是普通下载 #}
       <div class="page-actions">
         <a class="btn btn-sm" href="{{ url_for('account.cost_csv', number=account.account, start=start.isoformat(), end=end.isoformat()) }}"
-           download data-export title="{{ start.isoformat() }} ~ {{ end.isoformat() }} 每天、每个服务、每个标签值一行：算 TAG 还是 UNTAG、比率、AWS 原价、折算后">
+           download data-export title="{% if saved %}存下来的账单（截至 {{ saved.as_of.isoformat() }}）：每个月、每个服务、每个标签值一行{% else %}{{ start.isoformat() }} ~ {{ end.isoformat() }} 每天、每个服务、每个标签值一行{% endif %}：算 TAG 还是 UNTAG、比率、AWS 原价、折算后">
           {{- cicon('download') }}<span data-export-label>导出 CSV</span></a>
       </div>
     </div>

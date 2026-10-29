@@ -14,6 +14,10 @@ CE 查询失败的时候（凭证被收了权限、限流、网络断了），�
 同一个口径下只留终点最晚的那一次：额度告警查的是「截至前天」，不能盖掉概览页刚存的
 「截至今天」。
 
+除了累计，还存着账单明细（lines：每个月、每个服务、每个标签值的原价，cost_explorer 查询时
+顺手拆的）。AK 失效以后再也查不了，账号页的成本页签就拿它显示存下来的账单。这一项是后来加的，
+之前存的没有（空的），那时候只能显示累计。
+
 写文件用临时文件 + 原子替换，进程内加锁。两个进程恰好在同一瞬间各写一个账号时，后写的
 会盖掉先写的那一条——下一次查询成功又会补回来，不值得为它上跨进程的文件锁。
 """
@@ -42,6 +46,8 @@ class Known:
     untag_raw: float
     currency: str
     saved_at: str       # 什么时候存的（UTC，ISO）
+    # 账单明细：[YYYY-MM, 服务, 标签值, 原价] 一行一条（文件里是列表）；后来加的，老的记录里没有
+    lines: tuple = ()
 
     @property
     def as_of(self) -> date:
@@ -78,6 +84,7 @@ def remember(account, start: date, end: date, split) -> None:
         untag_raw=split.untag_raw,
         currency=split.currency,
         saved_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        lines=tuple(tuple(line) for line in getattr(split, "lines", ())),
     )
     with _lock:
         accounts = _load()
